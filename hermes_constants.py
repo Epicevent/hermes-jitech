@@ -458,6 +458,8 @@ PARTIAL_STREAM_STUB_ID = "partial-stream-stub"
 
 FINISH_REASON_LENGTH = "length"
 
+JITECH_DEPLOY_PROBE = "oc20-image-pipeline-20260609"
+
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_MODELS_URL = f"{OPENROUTER_BASE_URL}/models"
