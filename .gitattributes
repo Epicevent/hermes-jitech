@@ -1,2 +1,6 @@
 # Auto-generated files — collapse diffs and exclude from language stats
 web/package-lock.json linguist-generated=true
+
+.gitattributes text eol=lf
+*.sh text eol=lf
+docker/cont-init.d/* text eol=lf

@@ -19,6 +19,21 @@ set -eu
 
 HERMES_HOME="${HERMES_HOME:-/opt/data}"
 INSTALL_DIR="/opt/hermes"
+# Managed customer slots pass the host data group so the Unix account can
+# traverse $HERMES_HOME and read artifacts written under workspace.
+HERMES_SHARED_GID=""
+case "${OPENCLAW_NAS_DATA_GID:-}" in
+    ""|*[!0-9]*) ;;
+    *) HERMES_SHARED_GID="$OPENCLAW_NAS_DATA_GID" ;;
+esac
+
+chown_hermes_home() {
+    if [ -n "$HERMES_SHARED_GID" ]; then
+        chown "hermes:$HERMES_SHARED_GID" "$1"
+    else
+        chown hermes:hermes "$1"
+    fi
+}
 
 # --- Bootstrap HERMES_HOME as root ---
 # Create the directory (and any missing parents) while we still have root
@@ -69,15 +84,20 @@ if [ "$needs_chown" = true ]; then
     # Top-level $HERMES_HOME: chown the directory itself (not its contents)
     # so hermes can mkdir new subdirs but bind-mounted host files keep
     # their existing ownership.
-    chown hermes:hermes "$HERMES_HOME" 2>/dev/null || \
+    chown_hermes_home "$HERMES_HOME" 2>/dev/null || \
         echo "[stage2] Warning: chown $HERMES_HOME failed (rootless container?) — continuing"
     # Hermes-owned subdirs: recursive chown is safe here because these are
     # created and managed exclusively by hermes (see the s6-setuidgid mkdir
     # -p block below for the canonical list).
     for sub in cron sessions logs hooks memories skills skins plans workspace home profiles; do
         if [ -e "$HERMES_HOME/$sub" ]; then
-            chown -R hermes:hermes "$HERMES_HOME/$sub" 2>/dev/null || \
-                echo "[stage2] Warning: chown $HERMES_HOME/$sub failed (rootless container?) — continuing"
+            if [ "$sub" = "workspace" ] && [ -n "$HERMES_SHARED_GID" ]; then
+                chown -R "hermes:$HERMES_SHARED_GID" "$HERMES_HOME/$sub" 2>/dev/null || \
+                    echo "[stage2] Warning: chown $HERMES_HOME/$sub failed (rootless container?) — continuing"
+            else
+                chown -R hermes:hermes "$HERMES_HOME/$sub" 2>/dev/null || \
+                    echo "[stage2] Warning: chown $HERMES_HOME/$sub failed (rootless container?) — continuing"
+            fi
         fi
     done
     # Hermes-owned trees under $INSTALL_DIR must be re-chowned when the UID
@@ -139,6 +159,15 @@ s6-setuidgid hermes mkdir -p \
     "$HERMES_HOME/plans" \
     "$HERMES_HOME/workspace" \
     "$HERMES_HOME/home"
+
+if [ -n "$HERMES_SHARED_GID" ]; then
+    chown_hermes_home "$HERMES_HOME" 2>/dev/null || \
+        echo "[stage2] Warning: chown $HERMES_HOME failed (rootless container?) — continuing"
+    chmod 0750 "$HERMES_HOME" 2>/dev/null || true
+    chown -R "hermes:$HERMES_SHARED_GID" "$HERMES_HOME/workspace" 2>/dev/null || \
+        echo "[stage2] Warning: chown $HERMES_HOME/workspace failed (rootless container?) — continuing"
+    chmod 2750 "$HERMES_HOME/workspace" 2>/dev/null || true
+fi
 
 # --- Install-method stamp (read by detect_install_method() in hermes status) ---
 # Preserved from the tini-era entrypoint (PR #27843). Must be written as
