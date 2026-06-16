@@ -66,6 +66,8 @@ cd /home/openclawdev/src/hermes-jitech
 git status
 ```
 
+On Windows, use the PowerShell installer at `scripts/install.ps1`.
+
 The intended loop is:
 
 ```text
