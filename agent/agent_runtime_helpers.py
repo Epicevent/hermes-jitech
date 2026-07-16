@@ -2034,7 +2034,16 @@ def _iter_pool_sockets(client: Any):
     transport internals and vary across httpx/httpcore releases.
     """
     try:
+        # OpenAI SDK clients keep their httpx.Client at ``_client``.  Hermes's
+        # native adapter facades (GeminiNativeClient, GeminiCloudCodeClient)
+        # keep theirs at ``_http``.  The stale-stream / interrupt abort path
+        # must find sockets on both shapes — otherwise the kill is a silent
+        # no-op (``tcp_force_closed=0``), the blocked worker never unwinds,
+        # and a stalled stream hangs the turn indefinitely (oc17 19.5-minute
+        # gemini stall, 2026-07-15).
         http_client = getattr(client, "_client", None)
+        if http_client is None:
+            http_client = getattr(client, "_http", None)
         if http_client is None:
             return
         transport = getattr(http_client, "_transport", None)

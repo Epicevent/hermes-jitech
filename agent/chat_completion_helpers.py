@@ -1672,6 +1672,22 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
     # poll loop uses this to detect stale connections that keep receiving
     # SSE keep-alive pings but no actual data.
     last_chunk_time = {"t": time.time()}
+    # Set by the poll loop when a stale-kill failed to unblock the worker
+    # and the turn was abandoned (kill escalation).  The worker checks it
+    # at its chunk/event loops and retry-attempt boundaries so a zombie
+    # stream that later revives cleans itself up instead of firing
+    # callbacks into a conversation that has already moved on.
+    stream_abandoned = {"yes": False}
+    # Kill-escalation state, armed by the stale-kill block below.  A
+    # stale-kill only *shuts down sockets*; if the abort primitive cannot
+    # reach the worker's sockets (an unknown client shape) the worker
+    # stays blocked forever while the poll loop repeats ineffective kills
+    # every stale-timeout — the oc17 19.5-minute gemini hang.  Escalation
+    # gives the worker a grace window to unwind after each kill; if it is
+    # still pinned to the same connection when the window expires, the
+    # poll loop abandons the worker and fails the turn itself (the same
+    # worker-independent guarantee the interrupt path already provides).
+    kill_escalation = {"deadline": None, "client_id": None, "chunk_marker": None}
 
     def _fire_first_delta():
         if not first_delta_fired["done"] and on_first_delta:
@@ -1787,7 +1803,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
             except Exception:
                 pass
 
-            if agent._interrupt_requested:
+            if agent._interrupt_requested or stream_abandoned["yes"]:
                 break
 
             if not chunk.choices:
@@ -2017,7 +2033,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 except Exception:
                     pass
 
-                if agent._interrupt_requested:
+                if agent._interrupt_requested or stream_abandoned["yes"]:
                     break
 
                 event_type = getattr(event, "type", None)
@@ -2065,6 +2081,13 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 # causing multi-minute delays between /stop and response.
                 if agent._interrupt_requested:
                     raise InterruptedError("Agent interrupted before stream retry")
+                # The poll loop abandoned this worker (kill escalation) and
+                # has already returned an error for the turn.  Opening a
+                # fresh connection here would stream a full response into
+                # the void — bail out; the ``finally`` below releases the
+                # request client.
+                if stream_abandoned["yes"]:
+                    return
                 try:
                     if agent.api_mode == "anthropic_messages":
                         agent._try_refresh_anthropic_client_credentials()
@@ -2323,6 +2346,10 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         else:
             _stream_stale_timeout = _stream_stale_timeout_base
 
+    # Grace window after each stale-kill before the poll loop concludes the
+    # abort was ineffective and abandons the worker (0 disables escalation).
+    _kill_grace = _env_float("HERMES_STREAM_KILL_GRACE_SECONDS", 10.0)
+
     t = threading.Thread(target=_call, daemon=True)
     t.start()
     _last_heartbeat = time.time()
@@ -2349,8 +2376,16 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         # Detect stale streams: connections kept alive by SSE pings
         # but delivering no real chunks.  Kill the client so the
         # inner retry loop can start a fresh connection.
+        #
+        # While an escalation verdict is pending (deadline armed), skip
+        # further kills: repeating the same socket shutdown cannot help,
+        # and a re-kill would reset the progress marker and re-arm the
+        # deadline — starving the escalation check forever.
         _stale_elapsed = time.time() - last_chunk_time["t"]
-        if _stale_elapsed > _stream_stale_timeout:
+        if (
+            _stale_elapsed > _stream_stale_timeout
+            and kill_escalation["deadline"] is None
+        ):
             _est_ctx = estimate_request_context_tokens(api_kwargs)
             logger.warning(
                 "Stream stale for %.0fs (threshold %.0fs) — no chunks received. "
@@ -2377,9 +2412,86 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
             # Reset the timer so we don't kill repeatedly while
             # the inner thread processes the closure.
             last_chunk_time["t"] = time.time()
+            # Arm kill escalation: snapshot which connection the worker is
+            # pinned to right now.  If the same connection is still in the
+            # holder — and no chunk or fresh attempt has moved the timer —
+            # when the grace window expires, the socket shutdown above did
+            # not reach the worker (e.g. a client shape _iter_pool_sockets
+            # doesn't know) and waiting longer cannot help.
+            if _kill_grace > 0:
+                with request_client_lock:
+                    _pinned = request_client_holder.get("client")
+                kill_escalation["deadline"] = time.time() + _kill_grace
+                kill_escalation["client_id"] = id(_pinned) if _pinned is not None else None
+                kill_escalation["chunk_marker"] = last_chunk_time["t"]
             agent._touch_activity(
                 f"stale stream detected after {int(_stale_elapsed)}s, reconnecting"
             )
+
+        # Kill escalation: the stale-kill above only shuts down sockets it
+        # can find.  If the worker is still pinned to the SAME connection
+        # after the grace window — no unwind, no fresh attempt, no chunk —
+        # the abort was a no-op and the hang would otherwise repeat forever
+        # (observed: oc17 gemini, 19.5 minutes of ineffective kills every
+        # stale-timeout).  Abandon the daemon worker and fail the turn from
+        # here, the same worker-independent unblock the interrupt path uses;
+        # the abandoned worker self-cleans via ``stream_abandoned`` when and
+        # if it ever wakes.
+        if (
+            kill_escalation["deadline"] is not None
+            and time.time() >= kill_escalation["deadline"]
+        ):
+            with request_client_lock:
+                _cur_client = request_client_holder.get("client")
+            _still_pinned = (
+                t.is_alive()
+                # Both chunk arrival and each retry attempt rewrite
+                # last_chunk_time, so float equality means "no progress
+                # since the kill".
+                and last_chunk_time["t"] == kill_escalation["chunk_marker"]
+                and (
+                    # anthropic_messages never registers a request client,
+                    # so the holder was empty at kill time; the chunk
+                    # marker alone carries the progress signal there.
+                    kill_escalation["client_id"] is None
+                    or (
+                        _cur_client is not None
+                        and id(_cur_client) == kill_escalation["client_id"]
+                    )
+                )
+            )
+            kill_escalation["deadline"] = None
+            if _still_pinned:
+                stream_abandoned["yes"] = True
+                # Last-ditch abort, mirroring the interrupt path below.
+                try:
+                    if agent.api_mode == "anthropic_messages":
+                        agent._anthropic_client.close()
+                        agent._rebuild_anthropic_client()
+                    else:
+                        _close_request_client_once("stale_stream_kill_escalation")
+                except Exception:
+                    pass
+                logger.error(
+                    "Stale-stream kill did not unblock the worker within "
+                    "%.0fs grace (model=%s). Abandoning the stream worker "
+                    "and failing the turn so the retry loop can recover.",
+                    _kill_grace, api_kwargs.get("model", "unknown"),
+                )
+                agent._buffer_status(
+                    f"⚠️ Provider connection could not be aborted after "
+                    f"{int(_kill_grace)}s — abandoning the stalled stream "
+                    f"and retrying."
+                )
+                agent._touch_activity("stalled stream abandoned (kill escalation)")
+                if result["error"] is None and result["response"] is None:
+                    result["error"] = TimeoutError(
+                        "Streaming connection stalled and could not be "
+                        f"aborted (worker did not unwind within "
+                        f"{int(_kill_grace)}s grace after socket shutdown); "
+                        "stream abandoned"
+                    )
+                break
 
         if agent._interrupt_requested:
             try:
