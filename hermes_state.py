@@ -21,6 +21,7 @@ import re
 import sqlite3
 import threading
 import time
+import unicodedata
 from pathlib import Path
 
 from agent.memory_manager import sanitize_context
@@ -249,6 +250,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     cost_source TEXT,
     pricing_version TEXT,
     title TEXT,
+    folder_path TEXT,
     api_call_count INTEGER DEFAULT 0,
     handoff_state TEXT,
     handoff_platform TEXT,
@@ -1099,6 +1101,78 @@ class SessionDB:
             )
             row = cursor.fetchone()
         return row["title"] if row else None
+
+    # Session folder-path constraints. These MUST stay in lockstep with the
+    # workspace-side parser (hermes-workspace src/lib/session-folder.ts) —
+    # both are ports of the same canonical rule set, and the stored value
+    # here is what every client's folder tree is derived from.
+    FOLDER_MAX_DEPTH = 4
+    FOLDER_SEGMENT_MAX_LENGTH = 60
+    FOLDER_MAX_LENGTH = 200
+
+    @staticmethod
+    def sanitize_folder_path(folder_path: Optional[str]) -> Optional[str]:
+        """Canonicalize a session folder path ("전구체/액상") for storage.
+
+        - NFC-normalizes, then splits on "/", trims each segment, and drops
+          empty segments (collapsing leading/trailing/duplicate slashes)
+        - Normalizes empty/whitespace-only input to None (clearing the folder)
+        - Rejects control characters, "."/".." segments, more than
+          FOLDER_MAX_DEPTH levels, segments over FOLDER_SEGMENT_MAX_LENGTH,
+          and joined paths over FOLDER_MAX_LENGTH
+
+        Returns the canonical "/"-joined path or None.
+        Raises ValueError when the path fails validation.
+        """
+        if folder_path is None:
+            return None
+        if not isinstance(folder_path, str):
+            raise ValueError("folder_path must be a string")
+        normalized = unicodedata.normalize("NFC", folder_path)
+        for ch in normalized:
+            code = ord(ch)
+            if code <= 0x1F or code == 0x7F:
+                raise ValueError("folder_path: control characters are not allowed")
+        segments = [seg.strip() for seg in normalized.split("/") if seg.strip()]
+        if not segments:
+            return None
+        if len(segments) > SessionDB.FOLDER_MAX_DEPTH:
+            raise ValueError(
+                f"folder_path too deep (max {SessionDB.FOLDER_MAX_DEPTH} levels)"
+            )
+        for seg in segments:
+            if seg in (".", ".."):
+                raise ValueError("folder_path: '.' and '..' segments are not allowed")
+            if len(seg) > SessionDB.FOLDER_SEGMENT_MAX_LENGTH:
+                raise ValueError(
+                    f"folder_path segment too long (max {SessionDB.FOLDER_SEGMENT_MAX_LENGTH})"
+                )
+        joined = "/".join(segments)
+        if len(joined) > SessionDB.FOLDER_MAX_LENGTH:
+            raise ValueError(
+                f"folder_path too long (max {SessionDB.FOLDER_MAX_LENGTH})"
+            )
+        return joined
+
+    def set_session_folder(self, session_id: str, folder_path: Optional[str]) -> bool:
+        """Set or clear a session's folder path (sidebar organization).
+
+        None or empty/whitespace-only clears the folder. Returns True if the
+        session was found. Raises ValueError if the path fails validation.
+        Unlike titles, folder paths are deliberately NOT unique — many
+        sessions sharing one path is what makes it a folder.
+        """
+        folder_path = self.sanitize_folder_path(folder_path)
+
+        def _do(conn):
+            cursor = conn.execute(
+                "UPDATE sessions SET folder_path = ? WHERE id = ?",
+                (folder_path, session_id),
+            )
+            return cursor.rowcount
+
+        rowcount = self._execute_write(_do)
+        return rowcount > 0
 
     def get_session_by_title(self, title: str) -> Optional[Dict[str, Any]]:
         """Look up a session by exact title. Returns session dict or None."""

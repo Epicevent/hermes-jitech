@@ -1251,7 +1251,8 @@ class APIServerAdapter(BasePlatformAdapter):
     def _session_response(session: Dict[str, Any]) -> Dict[str, Any]:
         """Return a stable, client-safe session representation."""
         safe_keys = (
-            "id", "source", "user_id", "model", "title", "started_at", "ended_at",
+            "id", "source", "user_id", "model", "title", "folder_path",
+            "started_at", "ended_at",
             "end_reason", "message_count", "tool_call_count", "input_tokens",
             "output_tokens", "cache_read_tokens", "cache_write_tokens",
             "reasoning_tokens", "estimated_cost_usd", "actual_cost_usd",
@@ -1390,7 +1391,7 @@ class APIServerAdapter(BasePlatformAdapter):
         body, err = await self._read_json_body(request)
         if err:
             return err
-        allowed = {"title", "end_reason"}
+        allowed = {"title", "end_reason", "folder_path"}
         unknown = sorted(set(body) - allowed)
         if unknown:
             return web.json_response(_openai_error(f"Unsupported session fields: {', '.join(unknown)}", code="unsupported_session_field"), status=400)
@@ -1401,6 +1402,14 @@ class APIServerAdapter(BasePlatformAdapter):
                 db.set_session_title(session_id, "" if body["title"] is None else str(body["title"]))
             except ValueError as exc:
                 return web.json_response(_openai_error(str(exc), code="invalid_title"), status=400)
+        if "folder_path" in body:
+            # null (or empty) clears the folder; a string is canonicalized and
+            # validated by SessionDB.sanitize_folder_path before storage.
+            raw_folder = body["folder_path"]
+            try:
+                db.set_session_folder(session_id, None if raw_folder is None else str(raw_folder))
+            except ValueError as exc:
+                return web.json_response(_openai_error(str(exc), code="invalid_folder_path"), status=400)
         if body.get("end_reason"):
             db.end_session(session_id, str(body["end_reason"]))
         session = db.get_session(session_id) or session
