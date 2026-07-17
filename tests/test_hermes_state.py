@@ -1417,6 +1417,95 @@ class TestSessionTitle:
         assert session["ended_at"] is not None
 
 
+class TestSessionFolder:
+    """Tests for SessionDB.set_session_folder() / sanitize_folder_path().
+
+    The rules must stay in lockstep with the workspace-side parser
+    (hermes-workspace src/lib/session-folder.ts).
+    """
+
+    def test_set_and_get_folder(self, db):
+        db.create_session(session_id="s1", source="cli")
+        assert db.set_session_folder("s1", "전구체/액상") is True
+        assert db.get_session("s1")["folder_path"] == "전구체/액상"
+
+    def test_folder_initially_none(self, db):
+        db.create_session(session_id="s1", source="cli")
+        assert db.get_session("s1")["folder_path"] is None
+
+    def test_set_folder_nonexistent_session(self, db):
+        assert db.set_session_folder("nonexistent", "a") is False
+
+    def test_clear_with_none_and_empty(self, db):
+        db.create_session(session_id="s1", source="cli")
+        db.set_session_folder("s1", "a/b")
+        assert db.set_session_folder("s1", None) is True
+        assert db.get_session("s1")["folder_path"] is None
+        db.set_session_folder("s1", "a/b")
+        assert db.set_session_folder("s1", "   ") is True
+        assert db.get_session("s1")["folder_path"] is None
+
+    def test_not_unique_across_sessions(self, db):
+        # Unlike titles, many sessions share one folder path.
+        db.create_session(session_id="s1", source="cli")
+        db.create_session(session_id="s2", source="cli")
+        assert db.set_session_folder("s1", "shared") is True
+        assert db.set_session_folder("s2", "shared") is True
+
+    def test_canonicalizes_slashes_and_trims(self, db):
+        db.create_session(session_id="s1", source="cli")
+        db.set_session_folder("s1", " 전구체 / 액상 ")
+        assert db.get_session("s1")["folder_path"] == "전구체/액상"
+        db.set_session_folder("s1", "/a//b/")
+        assert db.get_session("s1")["folder_path"] == "a/b"
+
+    def test_nfc_normalization(self, db):
+        db.create_session(session_id="s1", source="cli")
+        nfd = "전구체".encode().decode()  # ensure source form
+        import unicodedata as _ud
+        decomposed = _ud.normalize("NFD", nfd)
+        assert decomposed != nfd  # sanity: NFD really differs
+        db.set_session_folder("s1", decomposed)
+        assert db.get_session("s1")["folder_path"] == nfd
+
+    def test_rejects_control_chars(self, db):
+        db.create_session(session_id="s1", source="cli")
+        import pytest
+        with pytest.raises(ValueError):
+            db.set_session_folder("s1", "a\tb")
+
+    def test_rejects_dot_segments(self, db):
+        db.create_session(session_id="s1", source="cli")
+        import pytest
+        with pytest.raises(ValueError):
+            db.set_session_folder("s1", "a/../b")
+
+    def test_rejects_too_deep(self, db):
+        db.create_session(session_id="s1", source="cli")
+        import pytest
+        with pytest.raises(ValueError):
+            db.set_session_folder("s1", "a/b/c/d/e")
+
+    def test_rejects_long_segment(self, db):
+        db.create_session(session_id="s1", source="cli")
+        import pytest
+        with pytest.raises(ValueError):
+            db.set_session_folder("s1", "x" * 61)
+
+    def test_rejects_long_total(self, db):
+        db.create_session(session_id="s1", source="cli")
+        import pytest
+        with pytest.raises(ValueError):
+            db.set_session_folder("s1", "/".join(["y" * 60] * 4))  # 243 > 200
+
+    def test_folder_in_list_sessions_rich(self, db):
+        db.create_session(session_id="s1", source="cli")
+        db.set_session_folder("s1", "연구 자료/고체 전구체")
+        rows = db.list_sessions_rich()
+        mine = [r for r in rows if r["id"] == "s1"]
+        assert mine and mine[0]["folder_path"] == "연구 자료/고체 전구체"
+
+
 class TestSanitizeTitle:
     """Tests for SessionDB.sanitize_title() validation and cleaning."""
 
