@@ -2520,6 +2520,51 @@ async def get_session_detail(session_id: str):
         db.close()
 
 
+@app.patch("/api/sessions/{session_id}")
+async def patch_session_endpoint(session_id: str, request: Request):
+    """Update client-safe session metadata (title, folder_path).
+
+    Mirrors the gateway ApiServer PATCH lane — the workspace calls whichever
+    of the two servers is available, so both must accept the same fields.
+    A field that is absent is left unchanged; null (or empty) clears it.
+    """
+    from hermes_state import SessionDB
+    try:
+        updates = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    if not isinstance(updates, dict):
+        raise HTTPException(status_code=400, detail="Body must be a JSON object")
+    allowed = {"title", "folder_path"}
+    unknown = sorted(set(updates) - allowed)
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported session fields: {', '.join(unknown)}",
+        )
+    db = SessionDB()
+    try:
+        sid = db.resolve_session_id(session_id)
+        if not sid:
+            raise HTTPException(status_code=404, detail="Session not found")
+        if "title" in updates:
+            raw_title = updates["title"]
+            try:
+                db.set_session_title(sid, "" if raw_title is None else str(raw_title))
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+        if "folder_path" in updates:
+            raw_folder = updates["folder_path"]
+            try:
+                db.set_session_folder(sid, None if raw_folder is None else str(raw_folder))
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+        session = db.get_session(sid)
+        return {"session": session}
+    finally:
+        db.close()
+
+
 
 @app.get("/api/sessions/{session_id}/latest-descendant")
 async def get_session_latest_descendant(session_id: str):
