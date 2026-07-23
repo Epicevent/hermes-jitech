@@ -178,6 +178,8 @@ def test_native_client_uses_x_goog_api_key_and_native_models_endpoint(monkeypatc
                         "candidatesTokenCount": 1,
                         "totalTokenCount": 2,
                     },
+                    "responseId": "provider-response-1",
+                    "modelVersion": "gemini-2.5-flash",
                 }
             )
 
@@ -196,6 +198,50 @@ def test_native_client_uses_x_goog_api_key_and_native_models_endpoint(monkeypatc
     assert recorded["headers"]["x-goog-api-key"] == "AIza-test"
     assert "Authorization" not in recorded["headers"]
     assert response.choices[0].message.content == "hello"
+    assert client.last_provider_receipt == {
+        "provider": "gemini",
+        "responseId": "provider-response-1",
+        "modelVersion": "gemini-2.5-flash",
+        "usageMetadata": {
+            "promptTokenCount": 1,
+            "candidatesTokenCount": 1,
+            "totalTokenCount": 2,
+        },
+        "finishReason": "STOP",
+    }
+
+
+def test_native_client_does_not_reuse_a_previous_provider_receipt(monkeypatch):
+    from agent.gemini_native_adapter import GeminiNativeClient
+
+    payloads = iter([
+        {
+            "candidates": [{"content": {"parts": [{"text": "first"}]}, "finishReason": "STOP"}],
+            "usageMetadata": {"totalTokenCount": 2},
+            "responseId": "provider-response-1",
+            "modelVersion": "gemini-2.5-flash",
+        },
+        {
+            "candidates": [{"content": {"parts": [{"text": "second"}]}, "finishReason": "STOP"}],
+            "usageMetadata": {"totalTokenCount": 2},
+        },
+    ])
+
+    class DummyHTTP:
+        def post(self, url, json=None, headers=None, timeout=None):
+            return DummyResponse(payload=next(payloads))
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr("agent.gemini_native_adapter.httpx.Client", lambda *a, **k: DummyHTTP())
+    client = GeminiNativeClient(api_key="AIza-test")
+    request = {"model": "gemini-2.5-flash", "messages": [{"role": "user", "content": "Hello"}]}
+
+    client.chat.completions.create(**request)
+    assert client.last_provider_receipt is not None
+    client.chat.completions.create(**request)
+    assert client.last_provider_receipt is None
 
 
 def test_native_http_error_keeps_status_and_retry_after():

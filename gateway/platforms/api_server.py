@@ -2108,6 +2108,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     "prompt_tokens": usage.get("input_tokens", 0),
                     "completion_tokens": usage.get("output_tokens", 0),
                     "total_tokens": usage.get("total_tokens", 0),
+                    "provider_receipt": usage.get("provider_receipt"),
                 },
             }
             await response.write(f"data: {json.dumps(finish_chunk)}\n\n".encode())
@@ -2667,6 +2668,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     "input_tokens": usage.get("input_tokens", 0),
                     "output_tokens": usage.get("output_tokens", 0),
                     "total_tokens": usage.get("total_tokens", 0),
+                    "provider_receipt": usage.get("provider_receipt"),
                 }
                 full_history = self._build_response_conversation_history(
                     conversation_history,
@@ -3441,6 +3443,9 @@ class APIServerAdapter(BasePlatformAdapter):
                 "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
                 "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
             }
+            provider_receipt = getattr(getattr(agent, "client", None), "last_provider_receipt", None)
+            if isinstance(provider_receipt, dict):
+                usage["provider_receipt"] = provider_receipt
             # Include the effective session ID in the result so callers
             # (e.g. X-Hermes-Session-Id header) can track compression-
             # triggered session rotations. (#16938)

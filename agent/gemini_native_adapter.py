@@ -540,6 +540,39 @@ def translate_gemini_response(resp: Dict[str, Any], model: str) -> SimpleNamespa
     )
 
 
+def provider_receipt_from_gemini_response(resp: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Keep only non-content fields that attest one completed Gemini response."""
+    candidates = resp.get("candidates") or []
+    first = candidates[0] if isinstance(candidates, list) and candidates and isinstance(candidates[0], dict) else {}
+    usage = resp.get("usageMetadata")
+    response_id = resp.get("responseId")
+    model_version = resp.get("modelVersion")
+    finish_reason = first.get("finishReason")
+    if not (
+        isinstance(response_id, str) and response_id
+        and isinstance(model_version, str) and model_version
+        and isinstance(usage, dict) and usage
+        and isinstance(finish_reason, str) and finish_reason
+    ):
+        return None
+    token_fields = {
+        key: int(value)
+        for key, value in usage.items()
+        if key in {"promptTokenCount", "candidatesTokenCount", "totalTokenCount", "cachedContentTokenCount"}
+        and isinstance(value, int)
+        and not isinstance(value, bool)
+    }
+    if not token_fields:
+        return None
+    return {
+        "provider": "gemini",
+        "responseId": response_id,
+        "modelVersion": model_version,
+        "usageMetadata": token_fields,
+        "finishReason": finish_reason,
+    }
+
+
 class _GeminiStreamChunk(SimpleNamespace):
     pass
 
@@ -829,6 +862,7 @@ class GeminiNativeClient:
         self.base_url = normalized_base
         self._default_headers = dict(default_headers or {})
         self.chat = _GeminiChatNamespace(self)
+        self.last_provider_receipt: Optional[Dict[str, Any]] = None
         self.is_closed = False
         self._http = http_client or httpx.Client(
             timeout=timeout or httpx.Timeout(connect=15.0, read=600.0, write=30.0, pool=30.0)
@@ -880,6 +914,7 @@ class GeminiNativeClient:
         timeout: Any = None,
         **_: Any,
     ) -> Any:
+        self.last_provider_receipt = None
         thinking_config = None
         if isinstance(extra_body, dict):
             thinking_config = extra_body.get("thinking_config") or extra_body.get("thinkingConfig")
@@ -911,6 +946,7 @@ class GeminiNativeClient:
                 status_code=response.status_code,
                 response=response,
             ) from exc
+        self.last_provider_receipt = provider_receipt_from_gemini_response(payload)
         return translate_gemini_response(payload, model=model)
 
     def _stream_completion(self, *, model: str, request: Dict[str, Any], timeout: Any = None) -> Iterator[_GeminiStreamChunk]:
@@ -919,6 +955,7 @@ class GeminiNativeClient:
         stream_headers["Accept"] = "text/event-stream"
 
         def _generator() -> Iterator[_GeminiStreamChunk]:
+            self.last_provider_receipt = None
             try:
                 with self._http.stream("POST", url, json=request, headers=stream_headers, timeout=timeout) as response:
                     if response.status_code != 200:
@@ -926,6 +963,9 @@ class GeminiNativeClient:
                         raise gemini_http_error(response)
                     tool_call_indices: Dict[str, Dict[str, Any]] = {}
                     for event in _iter_sse_events(response):
+                        receipt = provider_receipt_from_gemini_response(event)
+                        if receipt is not None:
+                            self.last_provider_receipt = receipt
                         for chunk in translate_stream_event(event, model, tool_call_indices):
                             yield chunk
             except httpx.HTTPError as exc:
