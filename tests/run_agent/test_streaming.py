@@ -100,6 +100,42 @@ class TestStreamingAccumulator:
 
     @patch("run_agent.AIAgent._create_request_openai_client")
     @patch("run_agent.AIAgent._close_request_openai_client")
+    def test_provider_receipt_survives_request_client_close(self, mock_close, mock_create):
+        """The gateway reads the receipt from the agent after the request client closes."""
+        from run_agent import AIAgent
+
+        chunks = [
+            _make_stream_chunk(content="OK", finish_reason="stop", model="gemini-3.6-flash"),
+        ]
+        receipt = {
+            "provider": "gemini",
+            "responseId": "provider-response-1",
+            "modelVersion": "gemini-3.6-flash",
+            "usageMetadata": {"promptTokenCount": 2, "candidatesTokenCount": 1, "totalTokenCount": 3},
+            "finishReason": "STOP",
+        }
+        mock_client = MagicMock()
+        mock_client.last_provider_receipt = receipt
+        mock_client.chat.completions.create.return_value = iter(chunks)
+        mock_create.return_value = mock_client
+
+        agent = AIAgent(
+            api_key="test-key",
+            base_url="https://generativelanguage.googleapis.com/v1beta",
+            model="gemini-3.6-flash",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+        agent.api_mode = "chat_completions"
+        agent._interrupt_requested = False
+
+        agent._interruptible_streaming_api_call({})
+
+        assert agent.last_provider_receipt == receipt
+
+    @patch("run_agent.AIAgent._create_request_openai_client")
+    @patch("run_agent.AIAgent._close_request_openai_client")
     def test_tool_call_response(self, mock_close, mock_create):
         """Tool call stream accumulates ID, name, and arguments."""
         from run_agent import AIAgent

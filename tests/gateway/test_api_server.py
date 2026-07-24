@@ -466,6 +466,31 @@ class TestAgentExecution:
             task_id="session-123",
         )
 
+    @pytest.mark.asyncio
+    async def test_run_agent_forwards_receipt_captured_from_request_client(self, adapter):
+        receipt = {
+            "provider": "gemini",
+            "responseId": "provider-response-1",
+            "modelVersion": "gemini-3.6-flash",
+            "usageMetadata": {"totalTokenCount": 3},
+            "finishReason": "STOP",
+        }
+        mock_agent = MagicMock()
+        mock_agent.run_conversation.return_value = {"final_response": "ok"}
+        mock_agent.session_prompt_tokens = 1
+        mock_agent.session_completion_tokens = 2
+        mock_agent.session_total_tokens = 3
+        mock_agent.last_provider_receipt = receipt
+
+        with patch.object(adapter, "_create_agent", return_value=mock_agent):
+            _, usage = await adapter._run_agent(
+                user_message="hello",
+                conversation_history=[],
+                session_id="session-123",
+            )
+
+        assert usage["provider_receipt"] == receipt
+
 
 # ---------------------------------------------------------------------------
 # /health endpoint

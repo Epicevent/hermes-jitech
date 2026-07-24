@@ -148,6 +148,51 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _capture_request_provider_receipt(agent, request_client) -> None:
+    """Copy a safe Gemini receipt off the per-request client before it closes."""
+    agent.last_provider_receipt = None
+    candidates = [request_client]
+    for attr in ("_real_client", "_sync"):
+        nested = getattr(request_client, attr, None)
+        if nested is not None:
+            candidates.append(nested)
+    for candidate in candidates:
+        value = getattr(candidate, "last_provider_receipt", None)
+        if not isinstance(value, dict) or value.get("provider") != "gemini":
+            continue
+        usage = value.get("usageMetadata")
+        token_counts = {
+            key: item
+            for key, item in (usage.items() if isinstance(usage, dict) else [])
+            if key in {
+                "promptTokenCount",
+                "candidatesTokenCount",
+                "totalTokenCount",
+                "cachedContentTokenCount",
+            }
+            and isinstance(item, int)
+            and not isinstance(item, bool)
+        }
+        response_id = value.get("responseId")
+        model_version = value.get("modelVersion")
+        finish_reason = value.get("finishReason")
+        if not (
+            isinstance(response_id, str) and response_id
+            and isinstance(model_version, str) and model_version
+            and token_counts
+            and isinstance(finish_reason, str) and finish_reason
+        ):
+            continue
+        agent.last_provider_receipt = {
+            "provider": "gemini",
+            "responseId": response_id,
+            "modelVersion": model_version,
+            "usageMetadata": token_counts,
+            "finishReason": finish_reason,
+        }
+        return
+
+
 def interruptible_api_call(agent, api_kwargs: dict):
     """
     Run the API call in a background thread so the main conversation loop
@@ -162,6 +207,7 @@ def interruptible_api_call(agent, api_kwargs: dict):
     the main retry loop can try again with backoff / credential rotation /
     provider fallback.
     """
+    agent.last_provider_receipt = None
     result = {"response": None, "error": None}
     request_client_holder = {"client": None, "owner_tid": None}
     request_client_lock = threading.Lock()
@@ -261,6 +307,7 @@ def interruptible_api_call(agent, api_kwargs: dict):
                     )
                 )
                 result["response"] = request_client.chat.completions.create(**api_kwargs)
+                _capture_request_provider_receipt(agent, request_client)
         except Exception as e:
             result["error"] = e
         finally:
@@ -1543,6 +1590,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
     Falls back to _interruptible_api_call on provider errors indicating
     streaming is not supported.
     """
+    agent.last_provider_receipt = None
     if agent._interrupt_requested:
         raise InterruptedError("Agent interrupted before streaming API call")
 
@@ -1922,6 +1970,8 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
             # Usage in the final chunk
             if hasattr(chunk, "usage") and chunk.usage:
                 usage_obj = chunk.usage
+
+        _capture_request_provider_receipt(agent, request_client)
 
         # Build mock response matching non-streaming shape
         full_content = "".join(content_parts) or None

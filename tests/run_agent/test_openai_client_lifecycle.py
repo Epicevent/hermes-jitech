@@ -95,6 +95,46 @@ def test_retry_after_api_connection_error_recreates_request_client(monkeypatch):
     assert second_request.close_calls >= 1
 
 
+def test_non_streaming_provider_receipt_survives_request_client_close(monkeypatch):
+    receipt = {
+        "provider": "gemini",
+        "responseId": "provider-response-1",
+        "modelVersion": "gemini-3.6-flash",
+        "usageMetadata": {"totalTokenCount": 3},
+        "finishReason": "STOP",
+    }
+    request_client = FakeRequestClient(lambda **kwargs: {"ok": True})
+    request_client.last_provider_receipt = receipt
+    factory = OpenAIFactory([request_client])
+    monkeypatch.setattr(run_agent, "OpenAI", factory)
+
+    agent = _build_agent()
+    result = agent._interruptible_api_call({"model": agent.model, "messages": []})
+
+    assert result == {"ok": True}
+    assert request_client.close_calls >= 1
+    assert agent.last_provider_receipt == receipt
+
+
+def test_non_streaming_request_without_receipt_clears_previous_receipt(monkeypatch):
+    request_client = FakeRequestClient(lambda **kwargs: {"ok": True})
+    factory = OpenAIFactory([request_client])
+    monkeypatch.setattr(run_agent, "OpenAI", factory)
+
+    agent = _build_agent()
+    agent.last_provider_receipt = {
+        "provider": "gemini",
+        "responseId": "stale-provider-response",
+        "modelVersion": "gemini-3.6-flash",
+        "usageMetadata": {"totalTokenCount": 3},
+        "finishReason": "STOP",
+    }
+
+    agent._interruptible_api_call({"model": agent.model, "messages": []})
+
+    assert agent.last_provider_receipt is None
+
+
 def test_stale_non_stream_close_is_single_owner(monkeypatch):
     def slow_responder(**kwargs):
         time.sleep(0.1)
