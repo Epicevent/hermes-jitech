@@ -491,6 +491,32 @@ class TestAgentExecution:
 
         assert usage["provider_receipt"] == receipt
 
+    @pytest.mark.asyncio
+    async def test_run_agent_does_not_fall_back_to_a_shared_client_receipt(self, adapter):
+        stale_receipt = {
+            "provider": "gemini",
+            "responseId": "stale-provider-response",
+            "modelVersion": "gemini-3.6-flash",
+            "usageMetadata": {"totalTokenCount": 3},
+            "finishReason": "STOP",
+        }
+        mock_agent = MagicMock()
+        mock_agent.run_conversation.return_value = {"final_response": "ok"}
+        mock_agent.session_prompt_tokens = 1
+        mock_agent.session_completion_tokens = 2
+        mock_agent.session_total_tokens = 3
+        mock_agent.last_provider_receipt = None
+        mock_agent.client.last_provider_receipt = stale_receipt
+
+        with patch.object(adapter, "_create_agent", return_value=mock_agent):
+            _, usage = await adapter._run_agent(
+                user_message="hello",
+                conversation_history=[],
+                session_id="session-123",
+            )
+
+        assert "provider_receipt" not in usage
+
 
 # ---------------------------------------------------------------------------
 # /health endpoint
