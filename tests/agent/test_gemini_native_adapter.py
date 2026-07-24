@@ -200,8 +200,10 @@ def test_native_client_uses_x_goog_api_key_and_native_models_endpoint(monkeypatc
     assert response.choices[0].message.content == "hello"
     assert client.last_provider_receipt == {
         "provider": "gemini",
+        "configuredModel": "gemini-2.5-flash",
         "responseId": "provider-response-1",
         "modelVersion": "gemini-2.5-flash",
+        "evidenceSource": "gemini_response.modelVersion",
         "usageMetadata": {
             "promptTokenCount": 1,
             "candidatesTokenCount": 1,
@@ -260,7 +262,7 @@ def test_native_stream_captures_provider_receipt_from_completed_event():
             "totalTokenCount": 2,
         },
         "responseId": "provider-stream-response-1",
-        "modelVersion": "gemini-3.6-flash",
+        "modelVersion": "gemini-3.6-flash-001",
     }
 
     class DummyStreamResponse:
@@ -292,8 +294,10 @@ def test_native_stream_captures_provider_receipt_from_completed_event():
     assert [chunk.choices[0].delta.content for chunk in stream] == ["hello", None]
     assert client.last_provider_receipt == {
         "provider": "gemini",
+        "configuredModel": "gemini-3.6-flash",
         "responseId": "provider-stream-response-1",
-        "modelVersion": "gemini-3.6-flash",
+        "modelVersion": "gemini-3.6-flash-001",
+        "evidenceSource": "gemini_response.modelVersion",
         "usageMetadata": {
             "promptTokenCount": 1,
             "candidatesTokenCount": 1,
@@ -301,6 +305,57 @@ def test_native_stream_captures_provider_receipt_from_completed_event():
         },
         "finishReason": "STOP",
     }
+
+
+def test_native_stream_does_not_reuse_a_previous_provider_receipt():
+    from agent.gemini_native_adapter import GeminiNativeClient
+
+    payloads = iter([
+        {
+            "candidates": [{"content": {"parts": [{"text": "first"}]}, "finishReason": "STOP"}],
+            "usageMetadata": {"totalTokenCount": 2},
+            "responseId": "provider-stream-response-1",
+            "modelVersion": "gemini-3.6-flash",
+        },
+        {
+            "candidates": [{"content": {"parts": [{"text": "second"}]}, "finishReason": "STOP"}],
+            "usageMetadata": {"totalTokenCount": 2},
+        },
+    ])
+
+    class DummyStreamResponse:
+        status_code = 200
+
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return False
+
+        def iter_text(self):
+            yield f"data: {json.dumps(self.payload)}\n\n"
+
+    class DummyHTTP:
+        def stream(self, method, url, json=None, headers=None, timeout=None):
+            return DummyStreamResponse(next(payloads))
+
+        def close(self):
+            return None
+
+    client = GeminiNativeClient(api_key="AIza-test", http_client=DummyHTTP())
+    request = {
+        "model": "gemini-3.6-flash",
+        "messages": [{"role": "user", "content": "Hello"}],
+        "stream": True,
+    }
+
+    list(client.chat.completions.create(**request))
+    assert client.last_provider_receipt is not None
+    list(client.chat.completions.create(**request))
+    assert client.last_provider_receipt is None
 
 
 def test_native_http_error_keeps_status_and_retry_after():
