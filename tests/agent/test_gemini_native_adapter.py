@@ -244,6 +244,65 @@ def test_native_client_does_not_reuse_a_previous_provider_receipt(monkeypatch):
     assert client.last_provider_receipt is None
 
 
+def test_native_stream_captures_provider_receipt_from_completed_event():
+    from agent.gemini_native_adapter import GeminiNativeClient
+
+    payload = {
+        "candidates": [
+            {
+                "content": {"parts": [{"text": "hello"}]},
+                "finishReason": "STOP",
+            }
+        ],
+        "usageMetadata": {
+            "promptTokenCount": 1,
+            "candidatesTokenCount": 1,
+            "totalTokenCount": 2,
+        },
+        "responseId": "provider-stream-response-1",
+        "modelVersion": "gemini-3.6-flash",
+    }
+
+    class DummyStreamResponse:
+        status_code = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return False
+
+        def iter_text(self):
+            yield f"data: {json.dumps(payload)}\n\n"
+
+    class DummyHTTP:
+        def stream(self, method, url, json=None, headers=None, timeout=None):
+            return DummyStreamResponse()
+
+        def close(self):
+            return None
+
+    client = GeminiNativeClient(api_key="AIza-test", http_client=DummyHTTP())
+    stream = client.chat.completions.create(
+        model="gemini-3.6-flash",
+        messages=[{"role": "user", "content": "Hello"}],
+        stream=True,
+    )
+
+    assert [chunk.choices[0].delta.content for chunk in stream] == ["hello", None]
+    assert client.last_provider_receipt == {
+        "provider": "gemini",
+        "responseId": "provider-stream-response-1",
+        "modelVersion": "gemini-3.6-flash",
+        "usageMetadata": {
+            "promptTokenCount": 1,
+            "candidatesTokenCount": 1,
+            "totalTokenCount": 2,
+        },
+        "finishReason": "STOP",
+    }
+
+
 def test_native_http_error_keeps_status_and_retry_after():
     from agent.gemini_native_adapter import gemini_http_error
 

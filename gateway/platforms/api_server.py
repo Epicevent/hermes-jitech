@@ -3443,7 +3443,9 @@ class APIServerAdapter(BasePlatformAdapter):
                 "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
                 "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
             }
-            provider_receipt = getattr(getattr(agent, "client", None), "last_provider_receipt", None)
+            provider_receipt = getattr(agent, "last_provider_receipt", None)
+            if not isinstance(provider_receipt, dict):
+                provider_receipt = getattr(getattr(agent, "client", None), "last_provider_receipt", None)
             if isinstance(provider_receipt, dict):
                 usage["provider_receipt"] = provider_receipt
             # Include the effective session ID in the result so callers
