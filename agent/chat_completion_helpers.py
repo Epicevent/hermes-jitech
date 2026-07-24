@@ -183,8 +183,21 @@ def _capture_request_provider_receipt(agent, request_client) -> None:
             and isinstance(finish_reason, str) and finish_reason
         ):
             continue
+        configured_model = value.get("configuredModel")
+        evidence_source = value.get("evidenceSource")
+        model_evidence = {}
+        if (
+            isinstance(configured_model, str)
+            and configured_model
+            and evidence_source == "gemini_response.modelVersion"
+        ):
+            model_evidence = {
+                "configuredModel": configured_model,
+                "evidenceSource": "gemini_response.modelVersion",
+            }
         agent.last_provider_receipt = {
             "provider": "gemini",
+            **model_evidence,
             "responseId": response_id,
             "modelVersion": model_version,
             "usageMetadata": token_counts,

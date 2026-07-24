@@ -109,8 +109,10 @@ class TestStreamingAccumulator:
         ]
         receipt = {
             "provider": "gemini",
+            "configuredModel": "gemini-3.6-flash",
             "responseId": "provider-response-1",
-            "modelVersion": "gemini-3.6-flash",
+            "modelVersion": "gemini-3.6-flash-001",
+            "evidenceSource": "gemini_response.modelVersion",
             "usageMetadata": {"promptTokenCount": 2, "candidatesTokenCount": 1, "totalTokenCount": 3},
             "finishReason": "STOP",
         }
@@ -133,6 +135,30 @@ class TestStreamingAccumulator:
         agent._interruptible_streaming_api_call({})
 
         assert agent.last_provider_receipt == receipt
+
+    def test_untrusted_provider_receipt_model_evidence_source_is_not_preserved(self):
+        from agent.chat_completion_helpers import _capture_request_provider_receipt
+
+        agent = SimpleNamespace(last_provider_receipt=None)
+        request_client = SimpleNamespace(last_provider_receipt={
+            "provider": "gemini",
+            "configuredModel": "gemini-3.6-flash",
+            "responseId": "provider-response-1",
+            "modelVersion": "gemini-3.6-flash",
+            "evidenceSource": "environment",
+            "usageMetadata": {"totalTokenCount": 3},
+            "finishReason": "STOP",
+        })
+
+        _capture_request_provider_receipt(agent, request_client)
+
+        assert agent.last_provider_receipt == {
+            "provider": "gemini",
+            "responseId": "provider-response-1",
+            "modelVersion": "gemini-3.6-flash",
+            "usageMetadata": {"totalTokenCount": 3},
+            "finishReason": "STOP",
+        }
 
     @patch("run_agent.AIAgent._create_request_openai_client")
     @patch("run_agent.AIAgent._close_request_openai_client")

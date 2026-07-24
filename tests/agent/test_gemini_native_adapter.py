@@ -200,8 +200,10 @@ def test_native_client_uses_x_goog_api_key_and_native_models_endpoint(monkeypatc
     assert response.choices[0].message.content == "hello"
     assert client.last_provider_receipt == {
         "provider": "gemini",
+        "configuredModel": "gemini-2.5-flash",
         "responseId": "provider-response-1",
         "modelVersion": "gemini-2.5-flash",
+        "evidenceSource": "gemini_response.modelVersion",
         "usageMetadata": {
             "promptTokenCount": 1,
             "candidatesTokenCount": 1,
@@ -260,7 +262,7 @@ def test_native_stream_captures_provider_receipt_from_completed_event():
             "totalTokenCount": 2,
         },
         "responseId": "provider-stream-response-1",
-        "modelVersion": "gemini-3.6-flash",
+        "modelVersion": "gemini-3.6-flash-001",
     }
 
     class DummyStreamResponse:
@@ -292,8 +294,10 @@ def test_native_stream_captures_provider_receipt_from_completed_event():
     assert [chunk.choices[0].delta.content for chunk in stream] == ["hello", None]
     assert client.last_provider_receipt == {
         "provider": "gemini",
+        "configuredModel": "gemini-3.6-flash",
         "responseId": "provider-stream-response-1",
-        "modelVersion": "gemini-3.6-flash",
+        "modelVersion": "gemini-3.6-flash-001",
+        "evidenceSource": "gemini_response.modelVersion",
         "usageMetadata": {
             "promptTokenCount": 1,
             "candidatesTokenCount": 1,

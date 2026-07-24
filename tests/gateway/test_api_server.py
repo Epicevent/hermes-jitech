@@ -470,8 +470,10 @@ class TestAgentExecution:
     async def test_run_agent_forwards_receipt_captured_from_request_client(self, adapter):
         receipt = {
             "provider": "gemini",
+            "configuredModel": "gemini-3.6-flash",
             "responseId": "provider-response-1",
-            "modelVersion": "gemini-3.6-flash",
+            "modelVersion": "gemini-3.6-flash-001",
+            "evidenceSource": "gemini_response.modelVersion",
             "usageMetadata": {"totalTokenCount": 3},
             "finishReason": "STOP",
         }

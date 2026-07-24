@@ -540,8 +540,12 @@ def translate_gemini_response(resp: Dict[str, Any], model: str) -> SimpleNamespa
     )
 
 
-def provider_receipt_from_gemini_response(resp: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Keep only non-content fields that attest one completed Gemini response."""
+def provider_receipt_from_gemini_response(
+    resp: Dict[str, Any],
+    *,
+    configured_model: str,
+) -> Optional[Dict[str, Any]]:
+    """Keep the request model and non-content fields attesting one Gemini response."""
     candidates = resp.get("candidates") or []
     first = candidates[0] if isinstance(candidates, list) and candidates and isinstance(candidates[0], dict) else {}
     usage = resp.get("usageMetadata")
@@ -549,7 +553,10 @@ def provider_receipt_from_gemini_response(resp: Dict[str, Any]) -> Optional[Dict
     model_version = resp.get("modelVersion")
     finish_reason = first.get("finishReason")
     if not (
-        isinstance(response_id, str) and response_id
+        isinstance(configured_model, str)
+        and configured_model
+        and isinstance(response_id, str)
+        and response_id
         and isinstance(model_version, str) and model_version
         and isinstance(usage, dict) and usage
         and isinstance(finish_reason, str) and finish_reason
@@ -566,8 +573,10 @@ def provider_receipt_from_gemini_response(resp: Dict[str, Any]) -> Optional[Dict
         return None
     return {
         "provider": "gemini",
+        "configuredModel": configured_model,
         "responseId": response_id,
         "modelVersion": model_version,
+        "evidenceSource": "gemini_response.modelVersion",
         "usageMetadata": token_fields,
         "finishReason": finish_reason,
     }
@@ -946,7 +955,10 @@ class GeminiNativeClient:
                 status_code=response.status_code,
                 response=response,
             ) from exc
-        self.last_provider_receipt = provider_receipt_from_gemini_response(payload)
+        self.last_provider_receipt = provider_receipt_from_gemini_response(
+            payload,
+            configured_model=model,
+        )
         return translate_gemini_response(payload, model=model)
 
     def _stream_completion(self, *, model: str, request: Dict[str, Any], timeout: Any = None) -> Iterator[_GeminiStreamChunk]:
@@ -963,7 +975,10 @@ class GeminiNativeClient:
                         raise gemini_http_error(response)
                     tool_call_indices: Dict[str, Dict[str, Any]] = {}
                     for event in _iter_sse_events(response):
-                        receipt = provider_receipt_from_gemini_response(event)
+                        receipt = provider_receipt_from_gemini_response(
+                            event,
+                            configured_model=model,
+                        )
                         if receipt is not None:
                             self.last_provider_receipt = receipt
                         for chunk in translate_stream_event(event, model, tool_call_indices):
