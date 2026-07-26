@@ -467,10 +467,16 @@ class FALVideoGenProvider(VideoGenProvider):
         )
 
         try:
-            result = fal_client.subscribe(
-                endpoint,
-                arguments=payload,
-                with_logs=False,
+            from agent.provider_usage_capture import capture_provider_call
+
+            result = capture_provider_call(
+                lambda: fal_client.subscribe(
+                    endpoint,
+                    arguments=payload,
+                    with_logs=False,
+                ),
+                provider="fal",
+                model=family_id,
             )
         except Exception as exc:
             logger.warning(

@@ -275,13 +275,24 @@ class KreaImageGenProvider(ImageGenProvider):
         # 1. Submit job.
         submit_url = f"{BASE_URL}/generate/image/krea/krea-2/{meta['path']}"
         try:
-            response = requests.post(
-                submit_url,
-                headers=headers,
-                json=payload,
-                timeout=30,
+            from agent.provider_usage_capture import capture_provider_call
+
+            def _invoke_krea_submit():
+                result = requests.post(
+                    submit_url,
+                    headers=headers,
+                    json=payload,
+                    timeout=30,
+                )
+                result.raise_for_status()
+                return result
+
+            response = capture_provider_call(
+                _invoke_krea_submit,
+                provider="krea",
+                model=model_id,
+                response_transform=lambda result: result.json(),
             )
-            response.raise_for_status()
         except requests.HTTPError as exc:
             resp = exc.response
             status = resp.status_code if resp is not None else 0

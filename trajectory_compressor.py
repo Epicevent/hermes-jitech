@@ -405,7 +405,10 @@ class TrajectoryCompressor:
             from openai import OpenAI
             from agent.auxiliary_client import _to_openai_base_url
             self.client = OpenAI(
-                api_key=api_key, base_url=_to_openai_base_url(self.config.base_url))
+                api_key=api_key,
+                base_url=_to_openai_base_url(self.config.base_url),
+                max_retries=0,
+            )
             # AsyncOpenAI is created lazily in _get_async_client() so it
             # binds to the current event loop — avoids "Event loop is closed"
             # when process_directory() is called multiple times (each call
@@ -429,6 +432,7 @@ class TrajectoryCompressor:
         self.async_client = AsyncOpenAI(
             api_key=self._async_client_api_key,
             base_url=_to_openai_base_url(self.config.base_url),
+            max_retries=0,
         )
         return self.async_client
 
@@ -596,6 +600,13 @@ TURNS TO SUMMARIZE:
 
 Write only the summary, starting with "[CONTEXT SUMMARY]:" prefix."""
 
+        from agent.provider_usage_capture import (
+            ProviderAttemptSeries,
+            capture_provider_call,
+            provider_from_client,
+        )
+
+        attempt_series = ProviderAttemptSeries()
         for attempt in range(self.config.max_retries):
             try:
                 metrics.summarization_api_calls += 1
@@ -622,7 +633,14 @@ Write only the summary, starting with "[CONTEXT SUMMARY]:" prefix."""
                     }
                     if summary_temperature is not None:
                         _create_kwargs["temperature"] = summary_temperature
-                    response = self.client.chat.completions.create(**_create_kwargs)
+                    response = capture_provider_call(
+                        lambda: self.client.chat.completions.create(**_create_kwargs),
+                        provider=provider_from_client(
+                            self.client, getattr(self, "_llm_provider", None)
+                        ),
+                        model=self.config.summarization_model,
+                        series=attempt_series,
+                    )
                 
                 summary = self._coerce_summary_content(response.choices[0].message.content)
                 return self._ensure_summary_prefix(summary)
@@ -665,6 +683,13 @@ TURNS TO SUMMARIZE:
 
 Write only the summary, starting with "[CONTEXT SUMMARY]:" prefix."""
 
+        from agent.provider_usage_capture import (
+            ProviderAttemptSeries,
+            capture_provider_call_async,
+            provider_from_client,
+        )
+
+        attempt_series = ProviderAttemptSeries()
         for attempt in range(self.config.max_retries):
             try:
                 metrics.summarization_api_calls += 1
@@ -691,7 +716,15 @@ Write only the summary, starting with "[CONTEXT SUMMARY]:" prefix."""
                     }
                     if summary_temperature is not None:
                         _create_kwargs["temperature"] = summary_temperature
-                    response = await self._get_async_client().chat.completions.create(**_create_kwargs)
+                    async_client = self._get_async_client()
+                    response = await capture_provider_call_async(
+                        lambda: async_client.chat.completions.create(**_create_kwargs),
+                        provider=provider_from_client(
+                            async_client, getattr(self, "_llm_provider", None)
+                        ),
+                        model=self.config.summarization_model,
+                        series=attempt_series,
+                    )
                 
                 summary = self._coerce_summary_content(response.choices[0].message.content)
                 return self._ensure_summary_prefix(summary)

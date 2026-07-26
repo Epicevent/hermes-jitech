@@ -578,8 +578,20 @@ def _upscale_image(image_url: str, original_prompt: str) -> Optional[Dict[str, A
             "enable_safety_checker": UPSCALER_SAFETY_CHECKER,
         }
 
-        handler = _submit_fal_request(UPSCALER_MODEL, arguments=upscaler_arguments)
-        result = handler.get()
+        from agent.provider_usage_capture import capture_provider_call
+
+        def _invoke_fal_upscale():
+            handler = _submit_fal_request(
+                UPSCALER_MODEL,
+                arguments=upscaler_arguments,
+            )
+            return handler.get()
+
+        result = capture_provider_call(
+            _invoke_fal_upscale,
+            provider="fal",
+            model=UPSCALER_MODEL,
+        )
 
         if result and "image" in result:
             upscaled_image = result["image"]
@@ -680,8 +692,17 @@ def image_generate_tool(
             meta.get("display", model_id), model_id, prompt[:80],
         )
 
-        handler = _submit_fal_request(model_id, arguments=arguments)
-        result = handler.get()
+        from agent.provider_usage_capture import capture_provider_call
+
+        def _invoke_fal_image():
+            handler = _submit_fal_request(model_id, arguments=arguments)
+            return handler.get()
+
+        result = capture_provider_call(
+            _invoke_fal_image,
+            provider="fal",
+            model=model_id,
+        )
 
         generation_time = (datetime.datetime.now() - start_time).total_seconds()
 

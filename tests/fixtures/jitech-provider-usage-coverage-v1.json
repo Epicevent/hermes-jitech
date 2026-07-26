@@ -1,0 +1,18 @@
+{
+  "schema": "jitech-provider-usage-coverage/v1",
+  "productFamily": "hermes",
+  "manifestDigest": "sha256:2d28c1c03aea3f6e7236bab1c6c6f7abab0b21f43f62beda8a449f9af3e943b9",
+  "coverageStatus": "partial",
+  "surfaces": [
+    {
+      "surfaceCode": "fixture.request_only",
+      "observationKind": "request_only",
+      "meterFamily": "other",
+      "modelEvidence": "unavailable",
+      "retryObservation": "unavailable",
+      "usageObservation": "unavailable",
+      "status": "gap",
+      "gapCode": "FIXTURE_GAP"
+    }
+  ]
+}

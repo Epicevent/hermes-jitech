@@ -911,7 +911,13 @@ async def _generate_edge_tts(text: str, output_path: str, tts_config: Dict[str, 
         kwargs["rate"] = f"{pct:+d}%"
 
     communicate = _edge_tts.Communicate(text, **kwargs)
-    await communicate.save(output_path)
+    from agent.provider_usage_capture import capture_provider_call_async
+
+    await capture_provider_call_async(
+        lambda: communicate.save(output_path),
+        provider="microsoft-edge-tts",
+        model=voice,
+    )
     return output_path
 
 
@@ -946,17 +952,26 @@ def _generate_elevenlabs(text: str, output_path: str, tts_config: Dict[str, Any]
 
     ElevenLabs = _import_elevenlabs()
     client = ElevenLabs(api_key=api_key)
-    audio_generator = client.text_to_speech.convert(
-        text=text,
-        voice_id=voice_id,
-        model_id=model_id,
-        output_format=output_format,
-    )
+    from agent.provider_usage_capture import capture_provider_call
 
-    # audio_generator yields chunks -- write them all
-    with open(output_path, "wb") as f:
-        for chunk in audio_generator:
-            f.write(chunk)
+    def _invoke_elevenlabs():
+        audio_generator = client.text_to_speech.convert(
+            text=text,
+            voice_id=voice_id,
+            model_id=model_id,
+            output_format=output_format,
+        )
+        # The SDK may defer the HTTP request/body transfer until iteration.
+        with open(output_path, "wb") as f:
+            for chunk in audio_generator:
+                f.write(chunk)
+        return audio_generator
+
+    capture_provider_call(
+        _invoke_elevenlabs,
+        provider="elevenlabs",
+        model=model_id,
+    )
 
     return output_path
 
@@ -991,7 +1006,7 @@ def _generate_openai_tts(text: str, output_path: str, tts_config: Dict[str, Any]
         response_format = "mp3"
 
     OpenAIClient = _import_openai_client()
-    client = OpenAIClient(api_key=api_key, base_url=base_url)
+    client = OpenAIClient(api_key=api_key, base_url=base_url, max_retries=0)
     try:
         create_kwargs = {
             "model": model,
@@ -1002,9 +1017,18 @@ def _generate_openai_tts(text: str, output_path: str, tts_config: Dict[str, Any]
         }
         if speed != 1.0:
             create_kwargs["speed"] = max(0.25, min(4.0, speed))
-        response = client.audio.speech.create(**create_kwargs)
+        from agent.provider_usage_capture import capture_provider_call
 
-        response.stream_to_file(output_path)
+        def _invoke_openai_tts():
+            response = client.audio.speech.create(**create_kwargs)
+            response.stream_to_file(output_path)
+            return response
+
+        capture_provider_call(
+            _invoke_openai_tts,
+            provider="openai",
+            model=model,
+        )
         return output_path
     finally:
         close = getattr(client, "close", None)
@@ -1143,17 +1167,27 @@ def _generate_xai_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -
             output_format["bit_rate"] = bit_rate
         payload["output_format"] = output_format
 
-    response = requests.post(
-        f"{base_url}/tts",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "User-Agent": hermes_xai_user_agent(),
-        },
-        json=payload,
-        timeout=60,
+    from agent.provider_usage_capture import capture_provider_call
+
+    def _invoke_xai_tts():
+        response = requests.post(
+            f"{base_url}/tts",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "User-Agent": hermes_xai_user_agent(),
+            },
+            json=payload,
+            timeout=60,
+        )
+        response.raise_for_status()
+        return response
+
+    response = capture_provider_call(
+        _invoke_xai_tts,
+        provider="xai",
+        model="xai-tts",
     )
-    response.raise_for_status()
 
     with open(output_path, "wb") as f:
         f.write(response.content)
@@ -1244,7 +1278,28 @@ def _generate_minimax_tts(text: str, output_path: str, tts_config: Dict[str, Any
             "voice_id": voice_id,
         }
 
-    response = requests.post(base_url, json=payload, headers=headers, timeout=60)
+    from agent.provider_usage_capture import capture_provider_call
+
+    def _invoke_minimax_tts():
+        result = requests.post(base_url, json=payload, headers=headers, timeout=60)
+        result.raise_for_status()
+        if is_t2a_v2:
+            result_body = result.json()
+            base_response = result_body.get("base_resp", {})
+            if base_response.get("status_code", -1) != 0:
+                raise RuntimeError(
+                    "MiniMax TTS API error "
+                    f"(code {base_response.get('status_code', -1)}): "
+                    f"{base_response.get('status_msg', 'unknown error')}"
+                )
+        return result
+
+    response = capture_provider_call(
+        _invoke_minimax_tts,
+        provider="minimax",
+        model=model,
+        response_transform=lambda result: result.json(),
+    )
 
     if is_t2a_v2:
         # t2a_v2 returns JSON with hex-encoded audio
@@ -1322,11 +1377,17 @@ def _generate_mistral_tts(text: str, output_path: str, tts_config: Dict[str, Any
     Mistral = _import_mistral_client()
     try:
         with Mistral(api_key=api_key) as client:
-            response = client.audio.speech.complete(
+            from agent.provider_usage_capture import capture_provider_call
+
+            response = capture_provider_call(
+                lambda: client.audio.speech.complete(
+                    model=model,
+                    input=text,
+                    voice_id=voice_id,
+                    response_format=response_format,
+                ),
+                provider="mistral",
                 model=model,
-                input=text,
-                voice_id=voice_id,
-                response_format=response_format,
             )
             audio_bytes = base64.b64decode(response.audio_data)
     except ValueError:
@@ -1425,23 +1486,33 @@ def _generate_gemini_tts(text: str, output_path: str, tts_config: Dict[str, Any]
     }
 
     endpoint = f"{base_url}/models/{model}:generateContent"
-    response = requests.post(
-        endpoint,
-        params={"key": api_key},
-        headers={"Content-Type": "application/json"},
-        json=payload,
-        timeout=60,
-    )
-    if response.status_code != 200:
-        # Surface the API error message when present
-        try:
-            err = response.json().get("error", {})
-            detail = err.get("message") or response.text[:300]
-        except Exception:
-            detail = response.text[:300]
-        raise RuntimeError(
-            f"Gemini TTS API error (HTTP {response.status_code}): {detail}"
+    from agent.provider_usage_capture import capture_provider_call
+
+    def _invoke_gemini_tts():
+        result = requests.post(
+            endpoint,
+            params={"key": api_key},
+            headers={"Content-Type": "application/json"},
+            json=payload,
+            timeout=60,
         )
+        if result.status_code != 200:
+            try:
+                err = result.json().get("error", {})
+                detail = err.get("message") or result.text[:300]
+            except Exception:
+                detail = result.text[:300]
+            raise RuntimeError(
+                f"Gemini TTS API error (HTTP {result.status_code}): {detail}"
+            )
+        return result
+
+    response = capture_provider_call(
+        _invoke_gemini_tts,
+        provider="gemini",
+        model=model,
+        response_transform=lambda result: result.json(),
+    )
 
     try:
         data = response.json()
@@ -2362,22 +2433,36 @@ def stream_tts_to_speaker(
             if len(cleaned) > stream_max_len:
                 cleaned = cleaned[:stream_max_len]
             try:
-                audio_iter = client.text_to_speech.convert(
-                    text=cleaned,
-                    voice_id=voice_id,
-                    model_id=model_id,
-                    output_format="pcm_24000",
+                from agent.provider_usage_capture import capture_provider_call
+
+                def _invoke_streaming_elevenlabs():
+                    audio_iter = client.text_to_speech.convert(
+                        text=cleaned,
+                        voice_id=voice_id,
+                        model_id=model_id,
+                        output_format="pcm_24000",
+                    )
+                    if output_stream is not None:
+                        for chunk in audio_iter:
+                            if stop_event.is_set():
+                                break
+                            import numpy as _np
+                            audio_array = _np.frombuffer(chunk, dtype=_np.int16)
+                            output_stream.write(audio_array.reshape(-1, 1))
+                    else:
+                        # Fallback: write chunks to temp file and play via system player
+                        _play_via_tempfile(audio_iter, stop_event)
+                    if stop_event.is_set():
+                        raise InterruptedError("streaming TTS stopped")
+                    return audio_iter
+
+                capture_provider_call(
+                    _invoke_streaming_elevenlabs,
+                    provider="elevenlabs",
+                    model=model_id,
                 )
-                if output_stream is not None:
-                    for chunk in audio_iter:
-                        if stop_event.is_set():
-                            break
-                        import numpy as _np
-                        audio_array = _np.frombuffer(chunk, dtype=_np.int16)
-                        output_stream.write(audio_array.reshape(-1, 1))
-                else:
-                    # Fallback: write chunks to temp file and play via system player
-                    _play_via_tempfile(audio_iter, stop_event)
+            except InterruptedError:
+                return
             except Exception as exc:
                 logger.warning("Streaming TTS sentence failed: %s", exc)
 

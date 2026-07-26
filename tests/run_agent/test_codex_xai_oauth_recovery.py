@@ -130,6 +130,23 @@ def test_codex_stream_retries_remote_protocol_error_once():
     assert call_count["n"] == 2
 
 
+def test_codex_stream_surfaces_first_attempt_when_outer_ledger_owns_retries():
+    """Conversation-level receipt tracking must see every physical request."""
+    import httpx
+
+    agent = _make_codex_agent()
+    agent._provider_usage_outer_attempt_tracking = True
+    mock_client = MagicMock()
+    mock_client.responses.create.side_effect = httpx.RemoteProtocolError(
+        "peer closed connection without sending complete message body"
+    )
+
+    with pytest.raises(httpx.RemoteProtocolError):
+        agent._run_codex_stream({}, client=mock_client)
+
+    assert mock_client.responses.create.call_count == 1
+
+
 def test_codex_stream_unrelated_runtimeerror_still_raises():
     """RuntimeErrors that aren't transport errors must propagate.
 

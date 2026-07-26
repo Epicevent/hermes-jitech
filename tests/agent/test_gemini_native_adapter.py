@@ -213,6 +213,42 @@ def test_native_client_uses_x_goog_api_key_and_native_models_endpoint(monkeypatc
     }
 
 
+def test_provider_receipt_preserves_raw_accounting_and_identity_without_usage():
+    from agent.gemini_native_adapter import provider_receipt_from_gemini_response
+
+    raw_usage = {
+        "promptTokenCount": 10,
+        "cachedContentTokenCount": 4,
+        "candidatesTokenCount": 5,
+        "thoughtsTokenCount": 3,
+        "toolUsePromptTokenCount": 2,
+        "totalTokenCount": 20,
+        "serviceTier": "STANDARD",
+        "promptTokensDetails": [{"modality": "TEXT", "tokenCount": 10}],
+    }
+    receipt = provider_receipt_from_gemini_response(
+        {
+            "candidates": [{"finishReason": "STOP"}],
+            "responseId": "provider-response-raw",
+            "modelVersion": "gemini-3.6-flash-001",
+            "usageMetadata": raw_usage,
+        },
+        configured_model="gemini-3.6-flash",
+    )
+    no_usage = provider_receipt_from_gemini_response(
+        {
+            "candidates": [{"finishReason": "STOP"}],
+            "responseId": "provider-response-no-usage",
+            "modelVersion": "gemini-3.6-flash-001",
+        },
+        configured_model="gemini-3.6-flash",
+    )
+
+    assert receipt["usageMetadata"] == raw_usage
+    assert no_usage["usageMetadata"] == {}
+    assert no_usage["evidenceSource"] == "gemini_response.modelVersion"
+
+
 def test_native_client_does_not_reuse_a_previous_provider_receipt(monkeypatch):
     from agent.gemini_native_adapter import GeminiNativeClient
 

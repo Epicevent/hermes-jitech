@@ -51,6 +51,7 @@ class TestAsyncClientLazyCreation:
         mock_async_openai.assert_called_once_with(
             api_key="test-key",
             base_url="https://api.example.com/v1",
+            max_retries=0,
         )
         assert comp.async_client is not None
 

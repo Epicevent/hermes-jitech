@@ -78,8 +78,12 @@ def _get_bedrock_runtime_client(region: str):
     """
     if region not in _bedrock_runtime_client_cache:
         boto3 = _require_boto3()
+        from botocore.config import Config
+
         _bedrock_runtime_client_cache[region] = boto3.client(
-            "bedrock-runtime", region_name=region,
+            "bedrock-runtime",
+            region_name=region,
+            config=Config(retries={"total_max_attempts": 1, "mode": "standard"}),
         )
     return _bedrock_runtime_client_cache[region]
 
@@ -677,11 +681,15 @@ def normalize_converse_response(response: Dict) -> SimpleNamespace:
 
     # Build usage stats
     usage_data = response.get("usage", {})
+    input_tokens = usage_data.get("inputTokens")
+    output_tokens = usage_data.get("outputTokens")
     usage = SimpleNamespace(
-        prompt_tokens=usage_data.get("inputTokens", 0),
-        completion_tokens=usage_data.get("outputTokens", 0),
+        prompt_tokens=input_tokens,
+        completion_tokens=output_tokens,
         total_tokens=(
-            usage_data.get("inputTokens", 0) + usage_data.get("outputTokens", 0)
+            input_tokens + output_tokens
+            if input_tokens is not None and output_tokens is not None
+            else None
         ),
     )
 
@@ -698,6 +706,7 @@ def normalize_converse_response(response: Dict) -> SimpleNamespace:
     return SimpleNamespace(
         choices=[choice],
         usage=usage,
+        provider_usage=usage_data or None,
         model=response.get("modelId", ""),
     )
 
@@ -828,10 +837,7 @@ def stream_converse_with_callbacks(
 
         elif "metadata" in event:
             meta_usage = event["metadata"].get("usage", {})
-            usage_data = {
-                "inputTokens": meta_usage.get("inputTokens", 0),
-                "outputTokens": meta_usage.get("outputTokens", 0),
-            }
+            usage_data = dict(meta_usage) if isinstance(meta_usage, dict) else {}
 
     # Flush remaining text
     if current_text_buffer:
@@ -844,11 +850,15 @@ def stream_converse_with_callbacks(
         reasoning_content="\n\n".join(reasoning_parts) if reasoning_parts else None,
     )
 
+    input_tokens = usage_data.get("inputTokens")
+    output_tokens = usage_data.get("outputTokens")
     usage = SimpleNamespace(
-        prompt_tokens=usage_data.get("inputTokens", 0),
-        completion_tokens=usage_data.get("outputTokens", 0),
+        prompt_tokens=input_tokens,
+        completion_tokens=output_tokens,
         total_tokens=(
-            usage_data.get("inputTokens", 0) + usage_data.get("outputTokens", 0)
+            input_tokens + output_tokens
+            if input_tokens is not None and output_tokens is not None
+            else None
         ),
     )
 
@@ -865,6 +875,7 @@ def stream_converse_with_callbacks(
     return SimpleNamespace(
         choices=[choice],
         usage=usage,
+        provider_usage=usage_data or None,
         model="",
     )
 
@@ -959,7 +970,13 @@ def call_converse(
     )
 
     try:
-        response = client.converse(**kwargs)
+        from agent.provider_usage_capture import capture_provider_call
+
+        response = capture_provider_call(
+            lambda: normalize_converse_response(client.converse(**kwargs)),
+            provider="bedrock",
+            model=model,
+        )
     except Exception as exc:
         if is_stale_connection_error(exc):
             logger.warning(
@@ -969,7 +986,7 @@ def call_converse(
             )
             invalidate_runtime_client(region)
         raise
-    return normalize_converse_response(response)
+    return response
 
 
 def call_converse_stream(
@@ -1001,7 +1018,13 @@ def call_converse_stream(
     )
 
     try:
-        response = client.converse_stream(**kwargs)
+        from agent.provider_usage_capture import capture_provider_call
+
+        response = capture_provider_call(
+            lambda: normalize_converse_stream_events(client.converse_stream(**kwargs)),
+            provider="bedrock",
+            model=model,
+        )
     except Exception as exc:
         if is_stale_connection_error(exc):
             logger.warning(
@@ -1011,7 +1034,7 @@ def call_converse_stream(
             )
             invalidate_runtime_client(region)
         raise
-    return normalize_converse_stream_events(response)
+    return response
 
 
 # ---------------------------------------------------------------------------

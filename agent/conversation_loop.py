@@ -73,6 +73,287 @@ from utils import base_url_host_matches, env_var_enabled
 logger = logging.getLogger(__name__)
 
 
+_PROVIDER_USAGE_KEYS = (
+    "promptTokenCount",
+    "cachedContentTokenCount",
+    "candidatesTokenCount",
+    "thoughtsTokenCount",
+    "toolUsePromptTokenCount",
+    "totalTokenCount",
+    "serviceTier",
+    "trafficType",
+    "promptTokensDetails",
+    "cacheTokensDetails",
+    "candidatesTokensDetails",
+    "toolUsePromptTokensDetails",
+    "prompt_tokens",
+    "completion_tokens",
+    "total_tokens",
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "reasoning_tokens",
+    "prompt_tokens_details",
+    "completion_tokens_details",
+    "input_tokens_details",
+    "output_tokens_details",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+    "inputTokens",
+    "outputTokens",
+    "totalTokens",
+    "cacheReadInputTokens",
+    "cacheWriteInputTokens",
+    "service_tier",
+)
+
+
+def _provider_usage_trigger(agent: Any) -> str:
+    """Map the observed run origin to the shared content-free trigger enum."""
+    source = (
+        getattr(agent, "platform", None)
+        or os.environ.get("HERMES_SESSION_SOURCE")
+        or "unknown"
+    )
+    normalized = str(source).strip().lower()
+    if normalized in {"cron", "heartbeat", "manual", "memory", "overflow"}:
+        return normalized
+    if not normalized or normalized == "unknown":
+        return "unknown"
+    return "user"
+
+
+def _plain_usage_value(value: Any) -> Any:
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, list):
+        return [_plain_usage_value(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _plain_usage_value(item) for key, item in value.items()}
+    if hasattr(value, "model_dump"):
+        try:
+            dumped = value.model_dump()
+        except Exception:
+            dumped = None
+        if isinstance(dumped, dict):
+            return _plain_usage_value(dumped)
+    if hasattr(value, "to_dict"):
+        try:
+            dumped = value.to_dict()
+        except Exception:
+            dumped = None
+        if isinstance(dumped, dict):
+            return _plain_usage_value(dumped)
+    try:
+        attributes = vars(value)
+    except TypeError:
+        return None
+    return {
+        str(key): _plain_usage_value(item)
+        for key, item in attributes.items()
+        if not str(key).startswith("_")
+    }
+
+
+def _provider_raw_usage(response_usage: Any) -> Optional[dict[str, Any]]:
+    """Copy only named accounting buckets from an SDK usage object."""
+    plain = _plain_usage_value(response_usage)
+    if isinstance(plain, dict):
+        return {key: plain[key] for key in _PROVIDER_USAGE_KEYS if key in plain} or None
+    values: dict[str, Any] = {}
+    for key in _PROVIDER_USAGE_KEYS:
+        item = getattr(response_usage, key, None)
+        if item is not None:
+            values[key] = _plain_usage_value(item)
+    return values or None
+
+
+def _attach_usage_ledger_reference(
+    receipt: dict[str, Any],
+    result: dict[str, Any],
+) -> None:
+    exported = result.get("receipt")
+    if not isinstance(exported, dict):
+        raise ValueError("provider usage ledger insert returned no receipt")
+    receipt["usageLedger"] = {
+        "schema": exported.get("schema"),
+        "status": "persisted",
+        "ledgerSeq": exported.get("ledgerSeq"),
+        "receiptDigest": exported.get("receiptDigest"),
+        "receiptCoverage": exported.get("receiptCoverage"),
+        "missingReceiptFields": list(exported.get("missingReceiptFields") or []),
+        "usageCoverage": exported.get("usageCoverage"),
+        "missingUsageFields": list(exported.get("missingUsageFields") or []),
+    }
+
+
+def _attach_unavailable_usage_ledger(
+    receipt: dict[str, Any],
+    exc: BaseException,
+) -> None:
+    receipt["usageLedger"] = {
+        "schema": "jitech-provider-usage-call/v1",
+        "status": "unavailable",
+        "ledgerSeq": None,
+        "receiptDigest": None,
+        "receiptCoverage": "unavailable",
+        "missingReceiptFields": ["immutableLedgerPersistence"],
+        "usageCoverage": "unavailable",
+        "missingUsageFields": ["immutableLedgerPersistence"],
+        "failureClass": type(exc).__name__,
+    }
+
+
+def _record_provider_attempt(
+    agent: Any,
+    response: Any,
+    *,
+    configured_model: str,
+    configured_provider: str,
+    requested_model: str,
+    requested_provider: str,
+    run_id: str,
+    turn_id: str,
+    request_id: str,
+    call_id: str,
+    api_call_index: int,
+    attempt: int,
+    fallback_index: int,
+    retry_of: Optional[str],
+    fallback_parent: Optional[str],
+    started_at: float,
+    completed_at: float,
+    status: str,
+    finish_reason: Optional[str] = None,
+    error_category: Optional[str] = None,
+) -> Optional[dict[str, Any]]:
+    """Persist one actual provider attempt before mutable usage aggregation."""
+    if not call_id:
+        return None
+
+    provider_receipt = getattr(agent, "last_provider_receipt", None)
+    provider_receipt = (
+        dict(provider_receipt) if isinstance(provider_receipt, dict) else None
+    )
+    actual_provider = None
+    actual_model = None
+    response_id = None
+    evidence_source = None
+    raw_usage = None
+
+    if status == "succeeded":
+        if provider_receipt is not None:
+            model_version = provider_receipt.get("modelVersion")
+            source = provider_receipt.get("evidenceSource")
+            if (
+                isinstance(model_version, str)
+                and model_version
+                and source == "gemini_response.modelVersion"
+            ):
+                actual_provider = requested_provider
+                actual_model = model_version
+                evidence_source = source
+            candidate_response_id = provider_receipt.get("responseId")
+            if isinstance(candidate_response_id, str) and candidate_response_id:
+                response_id = candidate_response_id
+            provider_usage = provider_receipt.get("usageMetadata")
+            if isinstance(provider_usage, dict) and provider_usage:
+                raw_usage = provider_usage
+            candidate_finish = provider_receipt.get("finishReason")
+            if isinstance(candidate_finish, str) and candidate_finish:
+                finish_reason = candidate_finish
+
+        if actual_model is None and requested_provider not in {"gemini", "google"}:
+            response_model = getattr(response, "model", None)
+            if isinstance(response_model, str) and response_model:
+                actual_provider = requested_provider
+                actual_model = response_model
+                evidence_source = "response.model"
+        if response_id is None:
+            candidate_response_id = getattr(response, "id", None)
+            if isinstance(candidate_response_id, str) and candidate_response_id:
+                response_id = candidate_response_id
+        if raw_usage is None:
+            provider_usage = getattr(response, "provider_usage", None)
+            raw_usage = _provider_raw_usage(
+                provider_usage
+                if provider_usage is not None
+                else getattr(response, "usage", None)
+            )
+
+    receipt_projection = provider_receipt or {"provider": requested_provider}
+    receipt_projection.update({
+        "configuredModel": configured_model,
+        "requestedModel": requested_model,
+        "actualModel": actual_model,
+        "runId": run_id,
+        "turnId": turn_id,
+        "requestId": request_id,
+        "callId": call_id,
+        "apiCallIndex": api_call_index,
+        "attempt": attempt,
+        "fallbackIndex": fallback_index,
+        "retryOf": retry_of,
+        "fallbackParent": fallback_parent,
+        "status": status,
+    })
+
+    if not getattr(agent, "_session_db", None) or not getattr(
+        agent, "session_id", None
+    ):
+        _attach_unavailable_usage_ledger(
+            receipt_projection,
+            RuntimeError("provider usage ledger unavailable"),
+        )
+        agent.last_provider_receipt = receipt_projection
+        return None
+
+    try:
+        if not agent._session_db_created:
+            agent._ensure_db_session()
+        result = agent._session_db.record_provider_call(
+            agent.session_id,
+            call_id=call_id,
+            request_id=request_id,
+            api_call_index=api_call_index,
+            attempt=attempt,
+            fallback_index=fallback_index,
+            configured_provider=configured_provider,
+            configured_model=configured_model,
+            requested_provider=requested_provider,
+            requested_model=requested_model,
+            actual_provider=actual_provider,
+            actual_model=actual_model,
+            response_id=response_id,
+            evidence_source=evidence_source,
+            finish_reason=finish_reason,
+            usage=raw_usage,
+            run_id=run_id,
+            turn_id=turn_id,
+            retry_of=retry_of,
+            fallback_parent=fallback_parent,
+            started_at=started_at,
+            completed_at=completed_at,
+            status=status,
+            trigger=_provider_usage_trigger(agent),
+            error_category=error_category,
+        )
+        _attach_usage_ledger_reference(receipt_projection, result)
+        agent.last_provider_receipt = receipt_projection
+        return result
+    except Exception as exc:
+        _attach_unavailable_usage_ledger(receipt_projection, exc)
+        agent.last_provider_receipt = receipt_projection
+        logger.error(
+            "Provider usage ledger persistence failed (session=%s, call=%s): %s",
+            getattr(agent, "session_id", None),
+            call_id,
+            exc,
+        )
+        return None
+
+
 def _ollama_context_limit_error(agent: Any, request_tokens: int) -> Optional[str]:
     """Return a user-facing error when Ollama is loaded with too little context."""
     if not getattr(agent, "tools", None):
@@ -425,6 +706,18 @@ def run_conversation(
     # runtime so this turn gets a fresh attempt with the preferred model.
     # No-op when _fallback_activated is False (gateway, first turn, etc.).
     agent._restore_primary_runtime()
+    # The outer retry loop owns provider-attempt identity and persistence.
+    # Streaming helpers must surface transport failures here instead of
+    # opening hidden replacement requests that would share one receipt.
+    agent._provider_usage_outer_attempt_tracking = True
+    from agent.provider_usage_capture import current_provider_usage_context
+
+    provider_context = current_provider_usage_context()
+    provider_turn_id = (
+        provider_context.turn_id if provider_context else str(uuid.uuid4())
+    )
+    configured_model_for_turn = agent.model
+    configured_provider_for_turn = agent.provider or "unknown"
 
     # Sanitize surrogate characters from user input.  Clipboard paste from
     # rich-text editors (Google Docs, Word, etc.) can inject lone surrogates
@@ -440,6 +733,11 @@ def run_conversation(
     agent._persist_user_message_override = persist_user_message
     # Generate unique task_id if not provided to isolate VMs between concurrent tasks
     effective_task_id = task_id or str(uuid.uuid4())
+    provider_run_id = (
+        provider_context.run_id
+        if provider_context and provider_context.run_id
+        else agent.session_id or effective_task_id
+    )
     # Expose the active task_id so tools running mid-turn (e.g. delegate_task
     # in delegate_tool.py) can identify this agent for the cross-agent file
     # state registry.  Set BEFORE any tool dispatch so snapshots taken at
@@ -784,6 +1082,7 @@ def run_conversation(
             break
         
         api_call_count += 1
+        provider_request_id = str(uuid.uuid4())
         agent._api_call_count = api_call_count
         agent._touch_activity(f"starting API call #{api_call_count}")
 
@@ -1131,6 +1430,20 @@ def run_conversation(
         finish_reason = "stop"
         response = None  # Guard against UnboundLocalError if all retries fail
         api_kwargs = None  # Guard against UnboundLocalError in except handler
+        provider_call_id = ""
+        provider_requested_model = agent.model
+        provider_call_attempt = 0
+        provider_fallback_index = 0
+        provider_retry_of = None
+        provider_fallback_parent = None
+        provider_active_fallback_parent = None
+        provider_previous_call_id = None
+        provider_previous_fallback_index = int(
+            getattr(agent, "_fallback_index", 0) or 0
+        )
+        provider_call_started_at = api_start_time
+        provider_call_completed_at = api_start_time
+        provider_attempt_recorded = False
 
         while retry_count < max_retries:
             # ── Nous Portal rate limit guard ──────────────────────
@@ -1279,11 +1592,48 @@ def run_conversation(
                         _use_streaming = False
 
                 if _use_streaming:
+                    provider_call_id = str(uuid.uuid4())
+                    provider_requested_model = agent.model
+                    provider_call_attempt += 1
+                    provider_fallback_index = int(
+                        getattr(agent, "_fallback_index", 0) or 0
+                    )
+                    provider_retry_of = provider_previous_call_id
+                    if provider_fallback_index == 0:
+                        provider_active_fallback_parent = None
+                    elif (
+                        provider_previous_call_id is not None
+                        and provider_fallback_index
+                        != provider_previous_fallback_index
+                    ):
+                        provider_active_fallback_parent = provider_previous_call_id
+                    provider_fallback_parent = provider_active_fallback_parent
+                    provider_call_started_at = time.time()
+                    provider_attempt_recorded = False
                     response = agent._interruptible_streaming_api_call(
                         api_kwargs, on_first_delta=_stop_spinner
                     )
                 else:
+                    provider_call_id = str(uuid.uuid4())
+                    provider_requested_model = agent.model
+                    provider_call_attempt += 1
+                    provider_fallback_index = int(
+                        getattr(agent, "_fallback_index", 0) or 0
+                    )
+                    provider_retry_of = provider_previous_call_id
+                    if provider_fallback_index == 0:
+                        provider_active_fallback_parent = None
+                    elif (
+                        provider_previous_call_id is not None
+                        and provider_fallback_index
+                        != provider_previous_fallback_index
+                    ):
+                        provider_active_fallback_parent = provider_previous_call_id
+                    provider_fallback_parent = provider_active_fallback_parent
+                    provider_call_started_at = time.time()
+                    provider_attempt_recorded = False
                     response = agent._interruptible_api_call(api_kwargs)
+                provider_call_completed_at = time.time()
                 
                 api_duration = time.time() - api_start_time
                 
@@ -1557,7 +1907,43 @@ def run_conversation(
                         )
                         finish_reason = "length"
 
+                provider_stream_interrupted = (
+                    getattr(response, "id", "") == PARTIAL_STREAM_STUB_ID
+                )
                 if finish_reason == "length":
+                    _record_provider_attempt(
+                        agent,
+                        response,
+                        configured_model=configured_model_for_turn,
+                        configured_provider=configured_provider_for_turn,
+                        requested_model=provider_requested_model,
+                        requested_provider=agent.provider or "unknown",
+                        run_id=provider_run_id,
+                        turn_id=provider_turn_id,
+                        request_id=provider_request_id,
+                        call_id=provider_call_id,
+                        api_call_index=api_call_count,
+                        attempt=provider_call_attempt,
+                        fallback_index=provider_fallback_index,
+                        retry_of=provider_retry_of,
+                        fallback_parent=provider_fallback_parent,
+                        started_at=provider_call_started_at,
+                        completed_at=provider_call_completed_at,
+                        status=(
+                            "interrupted"
+                            if provider_stream_interrupted
+                            else "succeeded"
+                        ),
+                        finish_reason=(
+                            None if provider_stream_interrupted else finish_reason
+                        ),
+                        error_category=(
+                            "PartialStreamInterrupted"
+                            if provider_stream_interrupted
+                            else None
+                        ),
+                    )
+                    provider_attempt_recorded = True
                     if getattr(response, "id", "") == PARTIAL_STREAM_STUB_ID:
                         agent._vprint(
                             f"{agent.log_prefix}⚠️  Stream interrupted by network error "
@@ -1808,6 +2194,40 @@ def run_conversation(
                         agent.context_compressor._context_probed = False
                         agent.context_compressor._context_probe_persistable = False
 
+                    _record_provider_attempt(
+                        agent,
+                        response,
+                        configured_model=configured_model_for_turn,
+                        configured_provider=configured_provider_for_turn,
+                        requested_model=provider_requested_model,
+                        requested_provider=agent.provider or "unknown",
+                        run_id=provider_run_id,
+                        turn_id=provider_turn_id,
+                        request_id=provider_request_id,
+                        call_id=provider_call_id,
+                        api_call_index=api_call_count,
+                        attempt=provider_call_attempt,
+                        fallback_index=provider_fallback_index,
+                        retry_of=provider_retry_of,
+                        fallback_parent=provider_fallback_parent,
+                        started_at=provider_call_started_at,
+                        completed_at=provider_call_completed_at,
+                        status=(
+                            "interrupted"
+                            if provider_stream_interrupted
+                            else "succeeded"
+                        ),
+                        finish_reason=(
+                            None if provider_stream_interrupted else finish_reason
+                        ),
+                        error_category=(
+                            "PartialStreamInterrupted"
+                            if provider_stream_interrupted
+                            else None
+                        ),
+                    )
+                    provider_attempt_recorded = True
+
                     agent.session_prompt_tokens += prompt_tokens
                     agent.session_completion_tokens += completion_tokens
                     agent.session_total_tokens += total_tokens
@@ -1909,6 +2329,40 @@ def run_conversation(
                             f"{cached:,}/{prompt:,} tokens "
                             f"({hit_pct:.0f}% hit, {written:,} written)"
                         )
+                else:
+                    _record_provider_attempt(
+                        agent,
+                        response,
+                        configured_model=configured_model_for_turn,
+                        configured_provider=configured_provider_for_turn,
+                        requested_model=provider_requested_model,
+                        requested_provider=agent.provider or "unknown",
+                        run_id=provider_run_id,
+                        turn_id=provider_turn_id,
+                        request_id=provider_request_id,
+                        call_id=provider_call_id,
+                        api_call_index=api_call_count,
+                        attempt=provider_call_attempt,
+                        fallback_index=provider_fallback_index,
+                        retry_of=provider_retry_of,
+                        fallback_parent=provider_fallback_parent,
+                        started_at=provider_call_started_at,
+                        completed_at=provider_call_completed_at,
+                        status=(
+                            "interrupted"
+                            if provider_stream_interrupted
+                            else "succeeded"
+                        ),
+                        finish_reason=(
+                            None if provider_stream_interrupted else finish_reason
+                        ),
+                        error_category=(
+                            "PartialStreamInterrupted"
+                            if provider_stream_interrupted
+                            else None
+                        ),
+                    )
+                    provider_attempt_recorded = True
                 
                 has_retried_429 = False  # Reset on success
                 # Note: don't clear the retry buffer here — an "API call
@@ -1929,6 +2383,34 @@ def run_conversation(
                 break  # Success, exit retry loop
 
             except InterruptedError:
+                provider_call_completed_at = time.time()
+                if not provider_attempt_recorded:
+                    _record_provider_attempt(
+                        agent,
+                        None,
+                        configured_model=configured_model_for_turn,
+                        configured_provider=configured_provider_for_turn,
+                        requested_model=provider_requested_model,
+                        requested_provider=agent.provider or "unknown",
+                        run_id=provider_run_id,
+                        turn_id=provider_turn_id,
+                        request_id=provider_request_id,
+                        call_id=provider_call_id,
+                        api_call_index=api_call_count,
+                        attempt=provider_call_attempt,
+                        fallback_index=provider_fallback_index,
+                        retry_of=provider_retry_of,
+                        fallback_parent=provider_fallback_parent,
+                        started_at=provider_call_started_at,
+                        completed_at=provider_call_completed_at,
+                        status="interrupted",
+                        error_category="InterruptedError",
+                    )
+                    provider_attempt_recorded = True
+                provider_previous_call_id = (
+                    provider_call_id or provider_previous_call_id
+                )
+                provider_previous_fallback_index = provider_fallback_index
                 if thinking_spinner:
                     thinking_spinner.stop("")
                     thinking_spinner = None
@@ -1942,6 +2424,34 @@ def run_conversation(
                 break
 
             except Exception as api_error:
+                provider_call_completed_at = time.time()
+                if not provider_attempt_recorded:
+                    _record_provider_attempt(
+                        agent,
+                        None,
+                        configured_model=configured_model_for_turn,
+                        configured_provider=configured_provider_for_turn,
+                        requested_model=provider_requested_model,
+                        requested_provider=agent.provider or "unknown",
+                        run_id=provider_run_id,
+                        turn_id=provider_turn_id,
+                        request_id=provider_request_id,
+                        call_id=provider_call_id,
+                        api_call_index=api_call_count,
+                        attempt=provider_call_attempt,
+                        fallback_index=provider_fallback_index,
+                        retry_of=provider_retry_of,
+                        fallback_parent=provider_fallback_parent,
+                        started_at=provider_call_started_at,
+                        completed_at=provider_call_completed_at,
+                        status="failed",
+                        error_category=type(api_error).__name__,
+                    )
+                    provider_attempt_recorded = True
+                provider_previous_call_id = (
+                    provider_call_id or provider_previous_call_id
+                )
+                provider_previous_fallback_index = provider_fallback_index
                 # Stop spinner silently — retry status is buffered and
                 # only flushed when every retry+fallback is exhausted.
                 if thinking_spinner:

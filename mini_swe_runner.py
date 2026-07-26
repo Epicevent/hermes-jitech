@@ -217,6 +217,7 @@ class MiniSWERunner:
                     "OPENROUTER_API_KEY",
                     os.getenv("ANTHROPIC_API_KEY",
                               os.getenv("OPENAI_API_KEY", ""))),
+                "max_retries": 0,
             }
             self.client = OpenAI(**client_kwargs)
         else:
@@ -229,7 +230,9 @@ class MiniSWERunner:
                 from openai import OpenAI
                 self.client = OpenAI(
                     base_url="https://openrouter.ai/api/v1",
-                    api_key=os.getenv("OPENROUTER_API_KEY", ""))
+                    api_key=os.getenv("OPENROUTER_API_KEY", ""),
+                    max_retries=0,
+                )
         
         # Environment will be created per-task
         self.env = None
@@ -475,7 +478,18 @@ Complete the user's task step by step."""
                     if fixed_temperature is not None:
                         api_kwargs["temperature"] = fixed_temperature
 
-                    response = self.client.chat.completions.create(**api_kwargs)
+                    from agent.provider_usage_capture import (
+                        ProviderAttemptSeries,
+                        capture_provider_call,
+                        provider_from_client,
+                    )
+
+                    response = capture_provider_call(
+                        lambda: self.client.chat.completions.create(**api_kwargs),
+                        provider=provider_from_client(self.client, "openrouter"),
+                        model=self.model,
+                        series=ProviderAttemptSeries(api_call_index=api_call_count),
+                    )
                 except Exception as e:
                     self.logger.error(f"API call failed: {e}")
                     break

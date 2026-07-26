@@ -402,7 +402,12 @@ def judge_goal(
         return "continue", "empty response (nothing to evaluate)", False
 
     try:
-        from agent.auxiliary_client import get_auxiliary_extra_body, get_text_auxiliary_client
+        from agent.auxiliary_client import (
+            _captured_create,
+            get_auxiliary_extra_body,
+            get_text_auxiliary_client,
+        )
+        from agent.provider_usage_capture import ProviderAttemptSeries
     except Exception as exc:
         logger.debug("goal judge: auxiliary client import failed: %s", exc)
         return "continue", "auxiliary client unavailable", False
@@ -437,7 +442,7 @@ def judge_goal(
         )
 
     try:
-        resp = client.chat.completions.create(
+        call_kwargs = dict(
             model=model,
             messages=[
                 {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
@@ -448,6 +453,7 @@ def judge_goal(
             timeout=timeout,
             extra_body=get_auxiliary_extra_body() or None,
         )
+        resp = _captured_create(client, call_kwargs, "auto", ProviderAttemptSeries())
     except Exception as exc:
         logger.info("goal judge: API call failed (%s) — falling through to continue", exc)
         return "continue", f"judge error: {type(exc).__name__}", False

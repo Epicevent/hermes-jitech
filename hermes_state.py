@@ -34,7 +34,21 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 15
+
+
+class ProviderCallConflictError(RuntimeError):
+    """A call_id replay carried different canonical receipt bytes."""
+
+    def __init__(self, call_id: str, existing_digest: str, incoming_digest: str):
+        self.call_id = call_id
+        self.existing_digest = existing_digest
+        self.incoming_digest = incoming_digest
+        super().__init__(
+            f"provider call receipt conflict for {call_id}: "
+            f"existing={existing_digest} incoming={incoming_digest}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # WAL-compatibility fallback
@@ -278,6 +292,53 @@ CREATE TABLE IF NOT EXISTS messages (
     observed INTEGER DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS provider_calls (
+    call_id TEXT PRIMARY KEY,
+    ledger_seq INTEGER,
+    receipt_digest TEXT,
+    export_receipt_json TEXT,
+    session_id TEXT REFERENCES sessions(id),
+    producer_coverage_digest TEXT,
+    run_id TEXT,
+    turn_id TEXT,
+    request_id TEXT,
+    api_call_index INTEGER NOT NULL,
+    attempt INTEGER NOT NULL,
+    retry_of TEXT,
+    fallback_parent TEXT,
+    fallback_index INTEGER NOT NULL DEFAULT 0,
+    started_at REAL,
+    completed_at REAL,
+    configured_provider TEXT NOT NULL,
+    configured_model TEXT NOT NULL,
+    requested_provider TEXT NOT NULL,
+    requested_model TEXT NOT NULL,
+    actual_provider TEXT,
+    actual_model TEXT,
+    response_id TEXT,
+    evidence_source TEXT,
+    finish_reason TEXT,
+    usage_json TEXT,
+    service_tier TEXT,
+    status TEXT NOT NULL,
+    error_category TEXT,
+    created_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS provider_usage_coverage_manifests (
+    manifest_digest TEXT PRIMARY KEY,
+    manifest_json TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS provider_call_conflicts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    call_id TEXT NOT NULL,
+    existing_digest TEXT NOT NULL,
+    incoming_digest TEXT NOT NULL,
+    detected_at REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS state_meta (
     key TEXT PRIMARY KEY,
     value TEXT
@@ -287,6 +348,32 @@ CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_provider_calls_session ON provider_calls(session_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_provider_calls_request ON provider_calls(request_id);
+CREATE INDEX IF NOT EXISTS idx_provider_call_conflicts_call ON provider_call_conflicts(call_id, detected_at);
+
+CREATE TRIGGER IF NOT EXISTS provider_usage_coverage_manifests_no_update
+BEFORE UPDATE ON provider_usage_coverage_manifests
+BEGIN
+    SELECT RAISE(ABORT, 'provider usage coverage manifests are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS provider_usage_coverage_manifests_no_replace
+BEFORE INSERT ON provider_usage_coverage_manifests
+WHEN EXISTS (
+    SELECT 1 FROM provider_usage_coverage_manifests
+    WHERE manifest_digest = NEW.manifest_digest
+      AND manifest_json <> NEW.manifest_json
+)
+BEGIN
+    SELECT RAISE(ABORT, 'provider usage coverage manifests are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS provider_usage_coverage_manifests_no_delete
+BEFORE DELETE ON provider_usage_coverage_manifests
+BEGIN
+    SELECT RAISE(ABORT, 'provider usage coverage manifests are immutable');
+END;
 """
 
 FTS_SQL = """
@@ -343,6 +430,148 @@ CREATE TRIGGER IF NOT EXISTS messages_fts_trigram_update AFTER UPDATE ON message
     );
 END;
 """
+
+
+def _provider_usage_export_page(
+    conn: sqlite3.Connection,
+    *,
+    after: int,
+    limit: int,
+) -> Dict[str, Any]:
+    """Build and verify one provider-usage page from one read snapshot."""
+    if isinstance(after, bool) or not isinstance(after, int) or after < 0:
+        raise ValueError("after must be a nonnegative integer")
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
+        raise ValueError("limit must be an integer from 1 to 500")
+
+    from agent.provider_usage_receipt import (
+        EXPORT_SCHEMA_NAME,
+        validate_provider_usage_export,
+        validate_provider_usage_receipt,
+    )
+
+    owns_snapshot = not conn.in_transaction
+    if owns_snapshot:
+        conn.execute("BEGIN")
+    try:
+        invalid = conn.execute(
+            "SELECT call_id FROM provider_calls "
+            "WHERE ledger_seq IS NULL OR export_receipt_json IS NULL "
+            "OR producer_coverage_digest IS NULL LIMIT 1"
+        ).fetchone()
+        if invalid is not None:
+            raise ValueError(
+                f"provider usage ledger has incomplete row for call {invalid['call_id']}"
+            )
+
+        rows = conn.execute(
+            "SELECT ledger_seq, producer_coverage_digest, export_receipt_json "
+            "FROM provider_calls "
+            "WHERE ledger_seq > ? ORDER BY ledger_seq ASC LIMIT ?",
+            (after, limit),
+        ).fetchall()
+        max_seq_row = conn.execute(
+            "SELECT COALESCE(MAX(ledger_seq), 0) FROM provider_calls"
+        ).fetchone()
+
+        receipts: List[Dict[str, Any]] = []
+        for row in rows:
+            ledger_seq = row["ledger_seq"]
+            receipt = json.loads(row["export_receipt_json"])
+            if receipt.get("ledgerSeq") != ledger_seq:
+                raise ValueError(
+                    f"provider usage ledger sequence mismatch at seq {ledger_seq}"
+                )
+            validate_provider_usage_receipt(receipt)
+            if receipt["producerCoverageDigest"] != row["producer_coverage_digest"]:
+                raise ValueError(
+                    "provider usage coverage binding mismatch at "
+                    f"seq {ledger_seq}"
+                )
+            receipts.append(receipt)
+
+        required_manifest_digests = sorted({
+            receipt["producerCoverageDigest"] for receipt in receipts
+        })
+        coverage_manifests: List[Dict[str, Any]] = []
+        if required_manifest_digests:
+            placeholders = ",".join("?" for _ in required_manifest_digests)
+            manifest_rows = conn.execute(
+                "SELECT manifest_digest, manifest_json "
+                "FROM provider_usage_coverage_manifests "
+                f"WHERE manifest_digest IN ({placeholders}) "
+                "ORDER BY manifest_digest ASC",
+                required_manifest_digests,
+            ).fetchall()
+            from agent.provider_usage_coverage import (
+                validate_provider_usage_coverage,
+            )
+
+            for row in manifest_rows:
+                manifest = json.loads(row["manifest_json"])
+                if manifest.get("manifestDigest") != row["manifest_digest"]:
+                    raise ValueError(
+                        "provider usage coverage manifest key mismatch for "
+                        f"{row['manifest_digest']}"
+                    )
+                validate_provider_usage_coverage(manifest)
+                coverage_manifests.append(manifest)
+            observed_manifest_digests = [
+                manifest["manifestDigest"] for manifest in coverage_manifests
+            ]
+            if observed_manifest_digests != required_manifest_digests:
+                missing = sorted(
+                    set(required_manifest_digests) - set(observed_manifest_digests)
+                )
+                raise ValueError(
+                    f"provider usage coverage manifests missing: {missing}"
+                )
+
+        next_cursor = receipts[-1]["ledgerSeq"] if receipts else after
+        has_more = (
+            conn.execute(
+                "SELECT 1 FROM provider_calls WHERE ledger_seq > ? LIMIT 1",
+                (next_cursor,),
+            ).fetchone()
+            is not None
+        )
+        page = {
+            "schema": EXPORT_SCHEMA_NAME,
+            "after": after,
+            "nextCursor": next_cursor,
+            "highWatermark": int(max_seq_row[0] or 0),
+            "count": len(receipts),
+            "hasMore": has_more,
+            "receipts": receipts,
+            "coverageManifests": coverage_manifests,
+        }
+        validate_provider_usage_export(
+            page,
+            expected_after=after,
+            expected_family="hermes",
+        )
+        return page
+    finally:
+        if owns_snapshot:
+            conn.rollback()
+
+
+def export_provider_usage_receipts_readonly(
+    *,
+    db_path: Optional[Path] = None,
+    after: int = 0,
+    limit: int = 500,
+) -> Dict[str, Any]:
+    """Export through SQLite read-only mode without init, repair, or migration."""
+    path = Path(db_path or DEFAULT_DB_PATH).expanduser().resolve()
+    uri = f"{path.as_uri()}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True, timeout=1.0, isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA query_only=ON")
+        return _provider_usage_export_page(conn, after=after, limit=limit)
+    finally:
+        conn.close()
 
 
 class SessionDB:
@@ -623,6 +852,22 @@ class SessionDB:
         except sqlite3.OperationalError as exc:
             logger.debug("idx_messages_platform_msg_id create skipped: %s", exc)
 
+        try:
+            cursor.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_provider_calls_ledger_seq "
+                "ON provider_calls(ledger_seq) WHERE ledger_seq IS NOT NULL"
+            )
+        except sqlite3.OperationalError as exc:
+            logger.debug("idx_provider_calls_ledger_seq create skipped: %s", exc)
+
+        try:
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_provider_calls_coverage "
+                "ON provider_calls(producer_coverage_digest)"
+            )
+        except sqlite3.OperationalError as exc:
+            logger.debug("idx_provider_calls_coverage create skipped: %s", exc)
+
         # ── Schema version bookkeeping ─────────────────────────────────
         # Bump to current so future data migrations (if any) can gate on
         # version.  No version-gated column additions remain.
@@ -900,6 +1145,292 @@ class SessionDB:
         def _do(conn):
             conn.execute(sql, params)
         self._execute_write(_do)
+
+    def record_provider_call(
+        self,
+        session_id: Optional[str],
+        *,
+        call_id: str,
+        request_id: Optional[str],
+        api_call_index: int,
+        attempt: int,
+        fallback_index: int,
+        configured_provider: str,
+        configured_model: str,
+        requested_provider: str,
+        requested_model: str,
+        actual_provider: Optional[str],
+        actual_model: Optional[str],
+        response_id: Optional[str],
+        evidence_source: Optional[str],
+        finish_reason: Optional[str],
+        usage: Optional[Dict[str, Any]],
+        run_id: Optional[str] = None,
+        turn_id: Optional[str] = None,
+        retry_of: Optional[str] = None,
+        fallback_parent: Optional[str] = None,
+        started_at: Optional[float] = None,
+        completed_at: Optional[float] = None,
+        status: str = "succeeded",
+        trigger: str = "unknown",
+        error_category: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Append one immutable, content-free provider-call receipt.
+
+        Exact canonical replay is idempotent. A divergent replay records a
+        conflict in the same transaction and never overwrites prior truth.
+        """
+        if not call_id:
+            raise ValueError("call_id is required")
+        if not isinstance(api_call_index, int) or isinstance(api_call_index, bool):
+            raise ValueError("api_call_index must be a positive integer")
+        if api_call_index < 1:
+            raise ValueError("api_call_index must be a positive integer")
+        if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 1:
+            raise ValueError("attempt must be a positive integer")
+        if (
+            not isinstance(fallback_index, int)
+            or isinstance(fallback_index, bool)
+            or fallback_index < 0
+        ):
+            raise ValueError("fallback_index must be a nonnegative integer")
+
+        from agent.provider_usage_coverage import (
+            provider_usage_coverage_manifest,
+            validate_provider_usage_coverage,
+        )
+        from agent.provider_usage_receipt import build_provider_usage_receipt
+
+        completed_at = completed_at if completed_at is not None else time.time()
+        started_at = started_at if started_at is not None else completed_at
+        coverage_manifest = provider_usage_coverage_manifest()
+        validate_provider_usage_coverage(
+            coverage_manifest,
+            expected_family="hermes",
+        )
+        producer_coverage_digest = coverage_manifest["manifestDigest"]
+        coverage_manifest_json = json.dumps(
+            coverage_manifest,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        export_receipt = build_provider_usage_receipt(
+            ledger_seq=None,
+            call_id=call_id,
+            run_id=run_id,
+            turn_id=turn_id,
+            request_id=request_id,
+            session_id=session_id,
+            trigger=trigger,
+            producer_coverage_digest=producer_coverage_digest,
+            attempt=attempt,
+            retry_of=retry_of,
+            fallback_parent=fallback_parent,
+            fallback_index=fallback_index,
+            started_at=started_at,
+            completed_at=completed_at,
+            status=status,
+            configured_provider=configured_provider,
+            configured_model=configured_model,
+            requested_provider=requested_provider,
+            requested_model=requested_model,
+            actual_provider=actual_provider,
+            actual_model=actual_model,
+            response_id=response_id,
+            evidence_source=evidence_source,
+            raw_usage=usage,
+            finish_reason=finish_reason,
+            error_category=error_category,
+        )
+        incoming_digest = export_receipt["receiptDigest"]
+        raw_usage = export_receipt["usage"]["rawProviderUsage"]
+        usage_json = (
+            json.dumps(raw_usage, ensure_ascii=False, sort_keys=True)
+            if raw_usage is not None
+            else None
+        )
+        service_tier = export_receipt["usage"]["serviceTier"]
+        if session_id:
+            self._insert_session_row(session_id, "unknown", model=configured_model)
+
+        def _do(conn):
+            existing = conn.execute(
+                "SELECT ledger_seq, receipt_digest, export_receipt_json "
+                "FROM provider_calls WHERE call_id = ?",
+                (call_id,),
+            ).fetchone()
+            if existing is not None:
+                replay_receipt = dict(export_receipt)
+                replay_receipt["ledgerSeq"] = existing["ledger_seq"]
+                replay_json = json.dumps(
+                    replay_receipt,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                if (
+                    existing["receipt_digest"] == incoming_digest
+                    and existing["export_receipt_json"] == replay_json
+                ):
+                    return {
+                        "inserted": False,
+                        "ledger_seq": existing["ledger_seq"],
+                        "receipt": json.loads(existing["export_receipt_json"]),
+                    }
+                conn.execute(
+                    "INSERT INTO provider_call_conflicts "
+                    "(call_id, existing_digest, incoming_digest, detected_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (
+                        call_id,
+                        existing["receipt_digest"] or "missing",
+                        incoming_digest,
+                        time.time(),
+                    ),
+                )
+                return {
+                    "conflict": True,
+                    "existing_digest": existing["receipt_digest"] or "missing",
+                }
+
+            ledger_seq = int(
+                conn.execute(
+                    "SELECT COALESCE(MAX(ledger_seq), 0) + 1 FROM provider_calls"
+                ).fetchone()[0]
+            )
+            stored_manifest = conn.execute(
+                "SELECT manifest_json FROM provider_usage_coverage_manifests "
+                "WHERE manifest_digest = ?",
+                (producer_coverage_digest,),
+            ).fetchone()
+            if stored_manifest is None:
+                conn.execute(
+                    "INSERT INTO provider_usage_coverage_manifests "
+                    "(manifest_digest, manifest_json, created_at) VALUES (?, ?, ?)",
+                    (
+                        producer_coverage_digest,
+                        coverage_manifest_json,
+                        completed_at,
+                    ),
+                )
+            elif stored_manifest["manifest_json"] != coverage_manifest_json:
+                raise ValueError(
+                    "provider usage coverage manifest digest conflict for "
+                    f"{producer_coverage_digest}"
+                )
+            stored_receipt = dict(export_receipt)
+            stored_receipt["ledgerSeq"] = ledger_seq
+            from agent.provider_usage_receipt import validate_provider_usage_receipt
+
+            validate_provider_usage_receipt(stored_receipt)
+            export_json = json.dumps(
+                stored_receipt,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            conn.execute(
+                """INSERT INTO provider_calls (
+                    call_id, ledger_seq, receipt_digest, export_receipt_json,
+                    session_id, producer_coverage_digest, run_id, turn_id,
+                    request_id, api_call_index,
+                    attempt, retry_of, fallback_parent, fallback_index,
+                    started_at, completed_at, configured_provider,
+                    configured_model, requested_provider, requested_model,
+                    actual_provider, actual_model, response_id, evidence_source,
+                    finish_reason, usage_json, service_tier, status,
+                    error_category, created_at
+                ) VALUES (
+                    :call_id, :ledger_seq, :receipt_digest, :export_receipt_json,
+                    :session_id, :producer_coverage_digest, :run_id, :turn_id,
+                    :request_id, :api_call_index,
+                    :attempt, :retry_of, :fallback_parent, :fallback_index,
+                    :started_at, :completed_at, :configured_provider,
+                    :configured_model, :requested_provider, :requested_model,
+                    :actual_provider, :actual_model, :response_id, :evidence_source,
+                    :finish_reason, :usage_json, :service_tier, :status,
+                    :error_category, :created_at
+                )""",
+                {
+                    "call_id": call_id,
+                    "ledger_seq": ledger_seq,
+                    "receipt_digest": incoming_digest,
+                    "export_receipt_json": export_json,
+                    "session_id": session_id,
+                    "producer_coverage_digest": producer_coverage_digest,
+                    "run_id": run_id,
+                    "turn_id": turn_id,
+                    "request_id": request_id,
+                    "api_call_index": api_call_index,
+                    "attempt": attempt,
+                    "retry_of": retry_of,
+                    "fallback_parent": fallback_parent,
+                    "fallback_index": fallback_index,
+                    "started_at": started_at,
+                    "completed_at": completed_at,
+                    "configured_provider": configured_provider,
+                    "configured_model": configured_model,
+                    "requested_provider": requested_provider,
+                    "requested_model": requested_model,
+                    "actual_provider": actual_provider,
+                    "actual_model": actual_model,
+                    "response_id": response_id,
+                    "evidence_source": evidence_source,
+                    "finish_reason": finish_reason,
+                    "usage_json": usage_json,
+                    "service_tier": service_tier,
+                    "status": status,
+                    "error_category": error_category,
+                    "created_at": completed_at,
+                },
+            )
+            return {
+                "inserted": True,
+                "ledger_seq": ledger_seq,
+                "receipt": stored_receipt,
+            }
+
+        result = self._execute_write(_do)
+        if result.get("conflict"):
+            raise ProviderCallConflictError(
+                call_id,
+                result["existing_digest"],
+                incoming_digest,
+            )
+        return result
+
+    def get_provider_calls(self, session_id: str) -> List[Dict[str, Any]]:
+        """Reload content-free provider calls for audit and tests."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM provider_calls WHERE session_id = ? "
+                "ORDER BY ledger_seq, call_id",
+                (session_id,),
+            ).fetchall()
+        result: List[Dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            usage_json = item.pop("usage_json", None)
+            item["usage"] = json.loads(usage_json) if usage_json else None
+            export_json = item.pop("export_receipt_json", None)
+            item["export_receipt"] = json.loads(export_json) if export_json else None
+            result.append(item)
+        return result
+
+    def export_provider_usage_receipts(
+        self,
+        *,
+        after: int = 0,
+        limit: int = 500,
+    ) -> Dict[str, Any]:
+        """Read an ordered, content-free incremental ledger page."""
+        with self._lock:
+            return _provider_usage_export_page(
+                self._conn,
+                after=after,
+                limit=limit,
+            )
 
     def ensure_session(
         self,
