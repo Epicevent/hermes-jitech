@@ -212,9 +212,11 @@ def describe_profile(
 
     try:
         from agent.auxiliary_client import (  # type: ignore
+            _captured_create,
             get_auxiliary_extra_body,
             get_text_auxiliary_client,
         )
+        from agent.provider_usage_capture import ProviderAttemptSeries
     except Exception as exc:
         logger.debug("describe: auxiliary client import failed: %s", exc)
         return DescribeOutcome(canon, False, "auxiliary client unavailable")
@@ -238,7 +240,7 @@ def describe_profile(
     )
 
     try:
-        resp = client.chat.completions.create(
+        call_kwargs = dict(
             model=aux_model,
             messages=[
                 {"role": "system", "content": _SYSTEM_PROMPT},
@@ -249,6 +251,7 @@ def describe_profile(
             timeout=timeout or 60,
             extra_body=get_auxiliary_extra_body() or None,
         )
+        resp = _captured_create(client, call_kwargs, "auto", ProviderAttemptSeries())
     except Exception as exc:
         logger.info("describe: API call failed for %s (%s)", canon, exc)
         return DescribeOutcome(canon, False, f"LLM error: {type(exc).__name__}")

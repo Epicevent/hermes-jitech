@@ -65,6 +65,37 @@ import os
 import sys
 
 
+# ``usage-receipts coverage --json`` is a static contract read. Recognize its
+# one valid invocation before profile, dotenv, and logging startup so asking for
+# the manifest cannot create HERMES_HOME, initialize a ledger, or use network.
+_PROVIDER_USAGE_COVERAGE_FAST_ARGV = ["usage-receipts", "coverage", "--json"]
+_PROVIDER_USAGE_COVERAGE_FAST_PATH = (
+    sys.argv[1:] == _PROVIDER_USAGE_COVERAGE_FAST_ARGV
+)
+
+
+def _provider_usage_export_fast_args(argv: list[str]) -> tuple[int, int] | None:
+    """Recognize the OPS invocation without profile, dotenv, or log startup."""
+    if (
+        len(argv) != 6
+        or argv[:2] != ["usage-receipts", "export"]
+        or argv[2] != "--after"
+        or argv[4] != "--limit"
+    ):
+        return None
+    try:
+        return int(argv[3]), int(argv[5])
+    except ValueError:
+        return None
+
+
+_PROVIDER_USAGE_EXPORT_FAST_ARGS = _provider_usage_export_fast_args(sys.argv[1:])
+_PROVIDER_USAGE_READ_FAST_PATH = (
+    _PROVIDER_USAGE_COVERAGE_FAST_PATH
+    or _PROVIDER_USAGE_EXPORT_FAST_ARGS is not None
+)
+
+
 # Mouse-tracking residue suppression — runs BEFORE every other import on the
 # TUI hot path so the terminal stops emitting SGR/X10 mouse reports while the
 # Python launcher is still doing imports (≈100–300ms in cooked + echo mode,
@@ -299,14 +330,16 @@ def _apply_profile_override() -> None:
                     break
 
 
-_apply_profile_override()
+if not _PROVIDER_USAGE_READ_FAST_PATH:
+    _apply_profile_override()
 
 # Load .env from ~/.hermes/.env first, then project root as dev fallback.
 # User-managed env files should override stale shell exports on restart.
 from hermes_cli.config import get_hermes_home
 from hermes_cli.env_loader import load_hermes_dotenv
 
-load_hermes_dotenv(project_env=PROJECT_ROOT / ".env")
+if not _PROVIDER_USAGE_READ_FAST_PATH:
+    load_hermes_dotenv(project_env=PROJECT_ROOT / ".env")
 
 # Bridge security.redact_secrets from config.yaml → HERMES_REDACT_SECRETS env
 # var BEFORE hermes_logging imports agent.redact (which snapshots the flag at
@@ -344,7 +377,8 @@ except Exception:
 try:
     from hermes_logging import setup_logging as _setup_logging
 
-    _setup_logging(mode="cli")
+    if not _PROVIDER_USAGE_READ_FAST_PATH:
+        _setup_logging(mode="cli")
 except Exception:
     pass  # best-effort — don't crash the CLI if logging setup fails
 
@@ -10150,6 +10184,7 @@ def _coalesce_session_name_args(argv: list) -> list:
         "mcp",
         "sessions",
         "insights",
+        "usage-receipts",
         "version",
         "update",
         "uninstall",
@@ -11013,7 +11048,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         "dump", "fallback", "gateway", "hooks", "import", "insights",
         "kanban", "login", "logout", "logs", "lsp", "mcp", "memory", "migrate",
         "model", "pairing", "plugins", "portal", "postinstall", "profile", "proxy",
-        "send", "sessions", "setup",
+        "send", "sessions", "setup", "usage-receipts",
         "skills", "slack", "status", "tools", "uninstall", "update",
         "version", "webhook", "whatsapp", "chat", "secrets", "security",
         # Help-ish invocations — plugin commands not being listed in
@@ -11285,6 +11320,20 @@ def _try_termux_fast_tui_launch() -> bool:
 
 def main():
     """Main entry point for hermes CLI."""
+    if _PROVIDER_USAGE_COVERAGE_FAST_PATH:
+        from agent.provider_usage_coverage import provider_usage_coverage_manifest
+
+        manifest = provider_usage_coverage_manifest()
+        print(json.dumps(manifest, ensure_ascii=False, sort_keys=True))
+        return
+    if _PROVIDER_USAGE_EXPORT_FAST_ARGS is not None:
+        from hermes_state import export_provider_usage_receipts_readonly
+
+        after, limit = _PROVIDER_USAGE_EXPORT_FAST_ARGS
+        page = export_provider_usage_receipts_readonly(after=after, limit=limit)
+        print(json.dumps(page, ensure_ascii=False, sort_keys=True))
+        return
+
     # Force UTF-8 stdio on Windows before anything prints.  No-op elsewhere.
     try:
         from hermes_cli.stdio import configure_windows_stdio
@@ -13613,6 +13662,60 @@ Examples:
             print(f"Error generating insights: {e}")
 
     insights_parser.set_defaults(func=cmd_insights)
+
+    # =========================================================================
+    # usage-receipts command (read-only OPS collector seam)
+    # =========================================================================
+    usage_receipts_parser = subparsers.add_parser(
+        "usage-receipts",
+        help="Export immutable content-free provider usage receipts",
+    )
+    usage_receipts_sub = usage_receipts_parser.add_subparsers(
+        dest="usage_receipts_action"
+    )
+    usage_receipts_export = usage_receipts_sub.add_parser(
+        "export",
+        help="Export receipts after a monotonic ledger cursor",
+    )
+    usage_receipts_export.add_argument(
+        "--after", type=int, default=0, help="Last verified ledger sequence"
+    )
+    usage_receipts_export.add_argument(
+        "--limit", type=int, default=500, help="Page size (1-500)"
+    )
+    usage_receipts_coverage = usage_receipts_sub.add_parser(
+        "coverage",
+        help="Export the static provider-call surface coverage manifest",
+    )
+    usage_receipts_coverage.add_argument(
+        "--json",
+        action="store_true",
+        required=True,
+        help="Emit the exact machine-readable coverage contract",
+    )
+
+    def cmd_usage_receipts(args):
+        action = getattr(args, "usage_receipts_action", None)
+        if action == "coverage":
+            from agent.provider_usage_coverage import (
+                provider_usage_coverage_manifest,
+            )
+
+            manifest = provider_usage_coverage_manifest()
+            print(json.dumps(manifest, ensure_ascii=False, sort_keys=True))
+            return
+        if action != "export":
+            usage_receipts_parser.print_help()
+            return
+        from hermes_state import export_provider_usage_receipts_readonly
+
+        page = export_provider_usage_receipts_readonly(
+            after=args.after,
+            limit=args.limit,
+        )
+        print(json.dumps(page, ensure_ascii=False, sort_keys=True))
+
+    usage_receipts_parser.set_defaults(func=cmd_usage_receipts)
 
     # =========================================================================
     # claw command (OpenClaw migration)

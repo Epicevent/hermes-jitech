@@ -76,13 +76,34 @@ def probe_gemini_tier(
     }
 
     try:
+        from agent.provider_usage_capture import capture_provider_call
+
+        class _TierProbeHTTPError(RuntimeError):
+            def __init__(self, response):
+                self.response = response
+                super().__init__(f"Gemini tier probe returned HTTP {response.status_code}")
+
         with httpx.Client(timeout=timeout) as client:
-            resp = client.post(
-                url,
-                params={"key": key},
-                json=payload,
-                headers={"Content-Type": "application/json"},
-            )
+            def _invoke_tier_probe():
+                result = client.post(
+                    url,
+                    params={"key": key},
+                    json=payload,
+                    headers={"Content-Type": "application/json"},
+                )
+                if not 200 <= result.status_code < 300:
+                    raise _TierProbeHTTPError(result)
+                return result
+
+            try:
+                resp = capture_provider_call(
+                    _invoke_tier_probe,
+                    provider="gemini",
+                    model=model,
+                    response_transform=lambda result: result.json(),
+                )
+            except _TierProbeHTTPError as exc:
+                resp = exc.response
     except Exception as exc:
         logger.debug("probe_gemini_tier: network error: %s", exc)
         return "unknown"
@@ -558,18 +579,12 @@ def provider_receipt_from_gemini_response(
         and isinstance(response_id, str)
         and response_id
         and isinstance(model_version, str) and model_version
-        and isinstance(usage, dict) and usage
         and isinstance(finish_reason, str) and finish_reason
     ):
         return None
-    token_fields = {
-        key: int(value)
-        for key, value in usage.items()
-        if key in {"promptTokenCount", "candidatesTokenCount", "totalTokenCount", "cachedContentTokenCount"}
-        and isinstance(value, int)
-        and not isinstance(value, bool)
-    }
-    if not token_fields:
+    try:
+        raw_usage = json.loads(json.dumps(usage)) if isinstance(usage, dict) else {}
+    except (TypeError, ValueError):
         return None
     return {
         "provider": "gemini",
@@ -577,7 +592,7 @@ def provider_receipt_from_gemini_response(
         "responseId": response_id,
         "modelVersion": model_version,
         "evidenceSource": "gemini_response.modelVersion",
-        "usageMetadata": token_fields,
+        "usageMetadata": raw_usage,
         "finishReason": finish_reason,
     }
 

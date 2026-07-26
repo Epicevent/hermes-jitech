@@ -1189,7 +1189,13 @@ class TestTranscribeXAI:
 
         assert result["transcript"] == "hello world"
 
-    def test_api_error_returns_failure(self, monkeypatch, sample_ogg, mock_xai_http_module):
+    def test_api_error_returns_failure(
+        self,
+        monkeypatch,
+        sample_ogg,
+        mock_xai_http_module,
+        tmp_path,
+    ):
         monkeypatch.setenv("XAI_API_KEY", "xai-test-key")
 
         mock_response = MagicMock()
@@ -1197,14 +1203,33 @@ class TestTranscribeXAI:
         mock_response.json.return_value = {"error": {"message": "Invalid audio format"}}
         mock_response.text = '{"error": {"message": "Invalid audio format"}}'
 
+        from agent.provider_usage_capture import bind_provider_usage_context
+
+        db_path = tmp_path / "state.db"
         with patch("tools.transcription_tools._load_stt_config", return_value={}), \
-             patch("requests.post", return_value=mock_response):
+             patch("requests.post", return_value=mock_response), \
+             bind_provider_usage_context(
+                 session_id=None,
+                 run_id="run-xai-error",
+                 turn_id="turn-xai-error",
+                 db_path=db_path,
+             ):
             from tools.transcription_tools import _transcribe_xai
             result = _transcribe_xai(sample_ogg, "grok-stt")
 
         assert result["success"] is False
         assert "HTTP 400" in result["error"]
         assert "Invalid audio format" in result["error"]
+
+        from hermes_state import SessionDB
+
+        db = SessionDB(db_path)
+        try:
+            receipt = db.export_provider_usage_receipts()["receipts"][0]
+        finally:
+            db.close()
+        assert receipt["status"] == "failed"
+        assert receipt["errorCategory"] == "HTTPError"
 
     def test_empty_transcript_returns_failure(self, monkeypatch, sample_ogg, mock_xai_http_module):
         monkeypatch.setenv("XAI_API_KEY", "xai-test-key")

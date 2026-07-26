@@ -198,13 +198,24 @@ class XAIImageGenProvider(ImageGenProvider):
         base_url = str(creds.get("base_url") or "https://api.x.ai/v1").strip().rstrip("/")
 
         try:
-            response = requests.post(
-                f"{base_url}/images/generations",
-                headers=headers,
-                json=payload,
-                timeout=120,
+            from agent.provider_usage_capture import capture_provider_call
+
+            def _invoke_xai_image():
+                result = requests.post(
+                    f"{base_url}/images/generations",
+                    headers=headers,
+                    json=payload,
+                    timeout=120,
+                )
+                result.raise_for_status()
+                return result
+
+            response = capture_provider_call(
+                _invoke_xai_image,
+                provider=provider_name,
+                model=model_id,
+                response_transform=lambda result: result.json(),
             )
-            response.raise_for_status()
         except requests.HTTPError as exc:
             response = exc.response
             status = response.status_code if response is not None else 0

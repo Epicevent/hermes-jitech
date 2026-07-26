@@ -122,6 +122,12 @@ async def _run_reference_model_safe(
     Returns:
         tuple[str, str, bool]: (model_name, response_content_or_error, success_flag)
     """
+    from agent.provider_usage_capture import (
+        ProviderAttemptSeries,
+        capture_provider_call_async,
+    )
+
+    attempt_series = ProviderAttemptSeries()
     for attempt in range(max_retries):
         try:
             logger.info("Querying %s (attempt %s/%s)", model, attempt + 1, max_retries)
@@ -144,7 +150,13 @@ async def _run_reference_model_safe(
             if not model.lower().startswith('gpt-'):
                 api_params["temperature"] = temperature
             
-            response = await _get_openrouter_client().chat.completions.create(**api_params)
+            client = _get_openrouter_client()
+            response = await capture_provider_call_async(
+                lambda: client.chat.completions.create(**api_params),
+                provider="openrouter",
+                model=model,
+                series=attempt_series,
+            )
             
             content = extract_content_or_reasoning(response)
             if not content:
@@ -196,7 +208,13 @@ async def _run_aggregator_model(
     Returns:
         str: Synthesized final response
     """
+    from agent.provider_usage_capture import (
+        ProviderAttemptSeries,
+        capture_provider_call_async,
+    )
+
     logger.info("Running aggregator model: %s", AGGREGATOR_MODEL)
+    attempt_series = ProviderAttemptSeries()
 
     # Build parameters for the API call
     api_params = {
@@ -219,14 +237,25 @@ async def _run_aggregator_model(
     if not AGGREGATOR_MODEL.lower().startswith('gpt-'):
         api_params["temperature"] = temperature
 
-    response = await _get_openrouter_client().chat.completions.create(**api_params)
+    client = _get_openrouter_client()
+    response = await capture_provider_call_async(
+        lambda: client.chat.completions.create(**api_params),
+        provider="openrouter",
+        model=AGGREGATOR_MODEL,
+        series=attempt_series,
+    )
 
     content = extract_content_or_reasoning(response)
 
     # Retry once on empty content (reasoning-only response)
     if not content:
         logger.warning("Aggregator returned empty content, retrying once")
-        response = await _get_openrouter_client().chat.completions.create(**api_params)
+        response = await capture_provider_call_async(
+            lambda: client.chat.completions.create(**api_params),
+            provider="openrouter",
+            model=AGGREGATOR_MODEL,
+            series=attempt_series,
+        )
         content = extract_content_or_reasoning(response)
 
     logger.info("Aggregation complete (%s characters)", len(content))

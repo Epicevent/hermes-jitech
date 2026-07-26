@@ -252,15 +252,31 @@ class XAIWebSearchProvider(WebSearchProvider):
         # can't refresh those and an immediate retry would just burn quota.
         is_oauth_path = (creds.get("provider") == "xai-oauth")
         resp = None
+        from agent.provider_usage_capture import (
+            ProviderAttemptSeries,
+            capture_provider_call,
+        )
+
+        attempt_series = ProviderAttemptSeries()
         for attempt in range(2):
             try:
-                resp = httpx.post(
-                    f"{base_url}/responses",
-                    headers=headers,
-                    json=payload,
-                    timeout=timeout,
+                def _invoke_xai_web_search():
+                    result = httpx.post(
+                        f"{base_url}/responses",
+                        headers=headers,
+                        json=payload,
+                        timeout=timeout,
+                    )
+                    result.raise_for_status()
+                    return result
+
+                resp = capture_provider_call(
+                    _invoke_xai_web_search,
+                    provider="xai",
+                    model=model,
+                    series=attempt_series,
+                    response_transform=lambda result: result.json(),
                 )
-                resp.raise_for_status()
                 break
             except httpx.HTTPStatusError as exc:
                 status = exc.response.status_code if exc.response is not None else 0

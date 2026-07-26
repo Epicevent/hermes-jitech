@@ -4368,7 +4368,36 @@ class AIAgent:
     ) -> Dict[str, Any]:
         """Forwarder — see ``agent.conversation_loop.run_conversation``."""
         from agent.conversation_loop import run_conversation
-        return run_conversation(self, user_message, system_message, conversation_history, task_id, stream_callback, persist_user_message)
+        from agent.provider_usage_capture import (
+            bind_provider_usage_context,
+            normalize_provider_usage_trigger,
+        )
+
+        turn_id = str(uuid.uuid4())
+        run_id = self.session_id or task_id or str(uuid.uuid4())
+        session_db = getattr(self, "_session_db", None)
+        db_path = getattr(session_db, "db_path", None)
+        with bind_provider_usage_context(
+            session_id=self.session_id,
+            run_id=run_id,
+            turn_id=turn_id,
+            trigger=normalize_provider_usage_trigger(
+                getattr(self, "platform", None)
+                or os.environ.get("HERMES_SESSION_SOURCE")
+            ),
+            configured_provider=self.provider or "unknown",
+            configured_model=self.model,
+            db_path=db_path,
+        ):
+            return run_conversation(
+                self,
+                user_message,
+                system_message,
+                conversation_history,
+                task_id,
+                stream_callback,
+                persist_user_message,
+            )
 
     def chat(self, message: str, stream_callback: Optional[callable] = None) -> str:
         """

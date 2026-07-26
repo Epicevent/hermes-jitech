@@ -160,7 +160,12 @@ def specify_task(
         )
 
     try:
-        from agent.auxiliary_client import get_auxiliary_extra_body, get_text_auxiliary_client
+        from agent.auxiliary_client import (
+            _captured_create,
+            get_auxiliary_extra_body,
+            get_text_auxiliary_client,
+        )
+        from agent.provider_usage_capture import ProviderAttemptSeries
     except Exception as exc:  # pragma: no cover — import smoke test
         logger.debug("specify: auxiliary client import failed: %s", exc)
         return SpecifyOutcome(task_id, False, "auxiliary client unavailable")
@@ -183,7 +188,7 @@ def specify_task(
     )
 
     try:
-        resp = client.chat.completions.create(
+        call_kwargs = dict(
             model=model,
             messages=[
                 {"role": "system", "content": _SYSTEM_PROMPT},
@@ -194,6 +199,7 @@ def specify_task(
             timeout=timeout or 120,
             extra_body=get_auxiliary_extra_body() or None,
         )
+        resp = _captured_create(client, call_kwargs, "auto", ProviderAttemptSeries())
     except Exception as exc:
         logger.info(
             "specify: API call failed for %s (%s) — skipping",

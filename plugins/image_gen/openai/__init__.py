@@ -224,8 +224,14 @@ class OpenAIImageGenProvider(ImageGenProvider):
         }
 
         try:
-            client = openai.OpenAI()
-            response = client.images.generate(**payload)
+            client = openai.OpenAI(max_retries=0)
+            from agent.provider_usage_capture import capture_provider_call
+
+            response = capture_provider_call(
+                lambda: client.images.generate(**payload),
+                provider="openai",
+                model=API_MODEL,
+            )
         except Exception as exc:
             logger.debug("OpenAI image generation failed", exc_info=True)
             return error_response(

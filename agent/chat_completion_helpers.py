@@ -161,25 +161,16 @@ def _capture_request_provider_receipt(agent, request_client) -> None:
         if not isinstance(value, dict) or value.get("provider") != "gemini":
             continue
         usage = value.get("usageMetadata")
-        token_counts = {
-            key: item
-            for key, item in (usage.items() if isinstance(usage, dict) else [])
-            if key in {
-                "promptTokenCount",
-                "candidatesTokenCount",
-                "totalTokenCount",
-                "cachedContentTokenCount",
-            }
-            and isinstance(item, int)
-            and not isinstance(item, bool)
-        }
+        try:
+            raw_usage = json.loads(json.dumps(usage)) if isinstance(usage, dict) else None
+        except (TypeError, ValueError):
+            raw_usage = None
         response_id = value.get("responseId")
         model_version = value.get("modelVersion")
         finish_reason = value.get("finishReason")
         if not (
             isinstance(response_id, str) and response_id
             and isinstance(model_version, str) and model_version
-            and token_counts
             and isinstance(finish_reason, str) and finish_reason
         ):
             continue
@@ -200,7 +191,7 @@ def _capture_request_provider_receipt(agent, request_client) -> None:
             **model_evidence,
             "responseId": response_id,
             "modelVersion": model_version,
-            "usageMetadata": token_counts,
+            "usageMetadata": raw_usage or {},
             "finishReason": finish_reason,
         }
         return
@@ -1339,6 +1330,34 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
 
 def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
     """Request a summary when max iterations are reached. Returns the final response text."""
+    from agent.provider_usage_capture import (
+        ProviderAttemptSeries,
+        capture_provider_call,
+        provider_from_client,
+        response_with_provider_receipt,
+    )
+
+    summary_series = ProviderAttemptSeries(api_call_index=api_call_count + 1)
+
+    def _capture_summary(invoke, client=None):
+        provider = provider_from_client(client, agent.provider) if client else (
+            agent.provider or "unknown"
+        )
+        return capture_provider_call(
+            invoke,
+            provider=provider,
+            model=agent.model,
+            series=summary_series,
+            response_transform=(
+                lambda response: response_with_provider_receipt(
+                    response,
+                    getattr(client, "last_provider_receipt", None),
+                )
+                if client is not None
+                else None
+            ),
+        )
+
     print(f"⚠️  Reached maximum iterations ({agent.max_iterations}). Requesting summary...")
 
     summary_request = (
@@ -1424,7 +1443,9 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
         if agent.api_mode == "codex_responses":
             codex_kwargs = agent._build_api_kwargs(api_messages)
             codex_kwargs.pop("tools", None)
-            summary_response = agent._run_codex_stream(codex_kwargs)
+            summary_response = _capture_summary(
+                lambda: agent._run_codex_stream(codex_kwargs)
+            )
             _ct_sum = agent._get_transport()
             _cnr_sum = _ct_sum.normalize_response(summary_response)
             final_response = (_cnr_sum.content or "").strip()
@@ -1486,11 +1507,19 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
                                max_tokens=agent.max_tokens, reasoning_config=agent.reasoning_config,
                                is_oauth=agent._is_anthropic_oauth,
                                preserve_dots=agent._anthropic_preserve_dots())
-                summary_response = agent._anthropic_messages_create(_ant_kw)
+                summary_response = _capture_summary(
+                    lambda: agent._anthropic_messages_create(_ant_kw)
+                )
                 _summary_result = _tsum.normalize_response(summary_response, strip_tool_prefix=agent._is_anthropic_oauth)
                 final_response = (_summary_result.content or "").strip()
             else:
-                summary_response = agent._ensure_primary_openai_client(reason="iteration_limit_summary").chat.completions.create(**summary_kwargs)
+                summary_client = agent._ensure_primary_openai_client(
+                    reason="iteration_limit_summary"
+                )
+                summary_response = _capture_summary(
+                    lambda: summary_client.chat.completions.create(**summary_kwargs),
+                    summary_client,
+                )
                 _summary_result = agent._get_transport().normalize_response(summary_response)
                 final_response = (_summary_result.content or "").strip()
 
@@ -1506,7 +1535,9 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
             if agent.api_mode == "codex_responses":
                 codex_kwargs = agent._build_api_kwargs(api_messages)
                 codex_kwargs.pop("tools", None)
-                retry_response = agent._run_codex_stream(codex_kwargs)
+                retry_response = _capture_summary(
+                    lambda: agent._run_codex_stream(codex_kwargs)
+                )
                 _ct_retry = agent._get_transport()
                 _cnr_retry = _ct_retry.normalize_response(retry_response)
                 final_response = (_cnr_retry.content or "").strip()
@@ -1516,7 +1547,9 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
                                 is_oauth=agent._is_anthropic_oauth,
                                 max_tokens=agent.max_tokens, reasoning_config=agent.reasoning_config,
                                 preserve_dots=agent._anthropic_preserve_dots())
-                retry_response = agent._anthropic_messages_create(_ant_kw2)
+                retry_response = _capture_summary(
+                    lambda: agent._anthropic_messages_create(_ant_kw2)
+                )
                 _retry_result = _tretry.normalize_response(retry_response, strip_tool_prefix=agent._is_anthropic_oauth)
                 final_response = (_retry_result.content or "").strip()
             else:
@@ -1533,7 +1566,13 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
                 if summary_extra_body:
                     summary_kwargs["extra_body"] = summary_extra_body
 
-                summary_response = agent._ensure_primary_openai_client(reason="iteration_limit_summary_retry").chat.completions.create(**summary_kwargs)
+                summary_client = agent._ensure_primary_openai_client(
+                    reason="iteration_limit_summary_retry"
+                )
+                summary_response = _capture_summary(
+                    lambda: summary_client.chat.completions.create(**summary_kwargs),
+                    summary_client,
+                )
                 _retry_result = agent._get_transport().normalize_response(summary_response)
                 final_response = (_retry_result.content or "").strip()
 
@@ -2132,7 +2171,11 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
     def _call():
         import httpx as _httpx
 
-        _max_stream_retries = int(os.getenv("HERMES_STREAM_RETRIES", 2))
+        _max_stream_retries = (
+            0
+            if getattr(agent, "_provider_usage_outer_attempt_tracking", False)
+            else int(os.getenv("HERMES_STREAM_RETRIES", 2))
+        )
 
         try:
             for _stream_attempt in range(_max_stream_retries + 1):

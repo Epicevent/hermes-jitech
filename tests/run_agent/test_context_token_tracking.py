@@ -15,9 +15,22 @@ sys.modules.setdefault("firecrawl", types.SimpleNamespace(Firecrawl=object))
 sys.modules.setdefault("fal_client", types.SimpleNamespace())
 
 import run_agent
+from hermes_state import SessionDB
 
 
 def _patch_bootstrap(monkeypatch):
+    monkeypatch.setattr(
+        "agent.context_compressor.get_model_context_length",
+        lambda *args, **kwargs: 128_000,
+    )
+    monkeypatch.setattr(
+        "agent.conversation_loop.estimate_usage_cost",
+        lambda *args, **kwargs: SimpleNamespace(
+            amount_usd=None,
+            status="unavailable",
+            source="test",
+        ),
+    )
     monkeypatch.setattr(run_agent, "get_tool_definitions", lambda **kwargs: [{
         "type": "function",
         "function": {"name": "t", "description": "t", "parameters": {"type": "object", "properties": {}}},
@@ -126,3 +139,74 @@ def test_codex_no_cache_fields(monkeypatch):
     agent = _make_agent(monkeypatch, "codex_responses", "openai-codex", resp)
     agent.run_conversation("hi")
     assert agent.context_compressor.last_prompt_tokens == 3000
+
+
+def test_provider_response_persists_authoritative_usage_before_projection(
+    monkeypatch,
+    tmp_path,
+):
+    def response():
+        return SimpleNamespace(
+            id="response-ledger-1",
+            choices=[
+                SimpleNamespace(
+                    index=0,
+                    message=SimpleNamespace(
+                        role="assistant",
+                        content="ok",
+                        tool_calls=None,
+                        reasoning_content=None,
+                    ),
+                    finish_reason="stop",
+                )
+            ],
+            usage=SimpleNamespace(
+                prompt_tokens=50,
+                completion_tokens=7,
+                total_tokens=57,
+                prompt_tokens_details=SimpleNamespace(cached_tokens=10),
+                reasoning_tokens=2,
+                service_tier="priority",
+            ),
+            model="provider-returned-model",
+        )
+
+    agent = _make_agent(
+        monkeypatch,
+        "chat_completions",
+        "openrouter",
+        response,
+    )
+    agent.session_id = "usage-ledger-generic"
+    agent._session_db = SessionDB(tmp_path / "state.db")
+    agent._session_db_created = False
+
+    try:
+        agent.run_conversation("hi")
+        page = agent._session_db.export_provider_usage_receipts()
+    finally:
+        agent._session_db.close()
+    assert page["count"] == 1
+    receipt = page["receipts"][0]
+    assert receipt["configured"] == {
+        "provider": "openrouter",
+        "model": "test-model",
+    }
+    assert receipt["actual"] == {
+        "provider": "openrouter",
+        "model": "provider-returned-model",
+        "responseId": "response-ledger-1",
+        "evidenceSource": "response.model",
+    }
+    assert receipt["usage"]["inputTotal"] == 50
+    assert receipt["usage"]["inputNonCached"] == 40
+    assert receipt["usage"]["cacheRead"] == 10
+    assert receipt["usage"]["rawProviderUsage"] == {
+        "prompt_tokens": 50,
+        "completion_tokens": 7,
+        "total_tokens": 57,
+        "prompt_tokens_details": {"cached_tokens": 10},
+        "reasoning_tokens": 2,
+        "service_tier": "priority",
+    }
+    assert agent.last_provider_receipt["usageLedger"]["status"] == "persisted"

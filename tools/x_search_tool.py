@@ -329,19 +329,35 @@ def x_search_tool(
         timeout_seconds = _get_x_search_timeout_seconds()
         max_retries = _get_x_search_retries()
         response: Optional[requests.Response] = None
+        from agent.provider_usage_capture import (
+            ProviderAttemptSeries,
+            capture_provider_call,
+        )
+
+        attempt_series = ProviderAttemptSeries()
         for attempt in range(max_retries + 1):
             try:
-                response = requests.post(
-                    f"{base_url}/responses",
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json",
-                        "User-Agent": hermes_xai_user_agent(),
-                    },
-                    json=payload,
-                    timeout=timeout_seconds,
+                def _invoke_x_search():
+                    result = requests.post(
+                        f"{base_url}/responses",
+                        headers={
+                            "Authorization": f"Bearer {api_key}",
+                            "Content-Type": "application/json",
+                            "User-Agent": hermes_xai_user_agent(),
+                        },
+                        json=payload,
+                        timeout=timeout_seconds,
+                    )
+                    result.raise_for_status()
+                    return result
+
+                response = capture_provider_call(
+                    _invoke_x_search,
+                    provider="xai",
+                    model=str(payload["model"]),
+                    series=attempt_series,
+                    response_transform=lambda result: result.json(),
                 )
-                response.raise_for_status()
                 break
             except requests.HTTPError as e:
                 status_code = getattr(getattr(e, "response", None), "status_code", None)

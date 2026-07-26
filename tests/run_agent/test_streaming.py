@@ -160,6 +160,34 @@ class TestStreamingAccumulator:
             "finishReason": "STOP",
         }
 
+    def test_model_identity_survives_when_provider_usage_is_missing(self):
+        from agent.chat_completion_helpers import _capture_request_provider_receipt
+
+        agent = SimpleNamespace(last_provider_receipt=None)
+        request_client = SimpleNamespace(
+            last_provider_receipt={
+                "provider": "gemini",
+                "configuredModel": "gemini-3.6-flash",
+                "responseId": "provider-response-no-usage",
+                "modelVersion": "gemini-3.6-flash-001",
+                "evidenceSource": "gemini_response.modelVersion",
+                "usageMetadata": None,
+                "finishReason": "STOP",
+            }
+        )
+
+        _capture_request_provider_receipt(agent, request_client)
+
+        assert agent.last_provider_receipt == {
+            "provider": "gemini",
+            "configuredModel": "gemini-3.6-flash",
+            "evidenceSource": "gemini_response.modelVersion",
+            "responseId": "provider-response-no-usage",
+            "modelVersion": "gemini-3.6-flash-001",
+            "usageMetadata": {},
+            "finishReason": "STOP",
+        }
+
     @patch("run_agent.AIAgent._create_request_openai_client")
     @patch("run_agent.AIAgent._close_request_openai_client")
     def test_request_without_receipt_clears_previous_receipt(self, mock_close, mock_create):
@@ -683,6 +711,40 @@ class TestStreamingFallback:
         # Should have retried 3 times (default HERMES_STREAM_RETRIES=2 → 3 attempts)
         assert mock_client.chat.completions.create.call_count == 3
         assert mock_close.call_count >= 1
+
+    @patch("run_agent.AIAgent._create_request_openai_client")
+    @patch("run_agent.AIAgent._close_request_openai_client")
+    def test_outer_ledger_tracking_surfaces_first_stream_failure(
+        self,
+        mock_close,
+        mock_create,
+    ):
+        """The conversation loop, not this helper, owns physical retries."""
+        from run_agent import AIAgent
+        import httpx
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.side_effect = httpx.ConnectError(
+            "socket closed"
+        )
+        mock_create.return_value = mock_client
+
+        agent = AIAgent(
+            api_key="test-key",
+            base_url="https://openrouter.ai/api/v1",
+            model="test/model",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+        agent.api_mode = "chat_completions"
+        agent._interrupt_requested = False
+        agent._provider_usage_outer_attempt_tracking = True
+
+        with pytest.raises(httpx.ConnectError, match="socket closed"):
+            agent._interruptible_streaming_api_call({})
+
+        assert mock_client.chat.completions.create.call_count == 1
 
     @patch("run_agent.AIAgent._create_request_openai_client")
     @patch("run_agent.AIAgent._close_request_openai_client")

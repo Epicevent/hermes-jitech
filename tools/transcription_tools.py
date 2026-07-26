@@ -1270,10 +1270,16 @@ def _transcribe_groq(file_path: str, model_name: str) -> Dict[str, Any]:
         client = OpenAI(api_key=api_key, base_url=GROQ_BASE_URL, timeout=30, max_retries=0)
         try:
             with open(file_path, "rb") as audio_file:
-                transcription = client.audio.transcriptions.create(
+                from agent.provider_usage_capture import capture_provider_call
+
+                transcription = capture_provider_call(
+                    lambda: client.audio.transcriptions.create(
+                        model=model_name,
+                        file=audio_file,
+                        response_format="text",
+                    ),
+                    provider="groq",
                     model=model_name,
-                    file=audio_file,
-                    response_format="text",
                 )
 
             transcript_text = str(transcription).strip()
@@ -1327,10 +1333,16 @@ def _transcribe_openai(file_path: str, model_name: str) -> Dict[str, Any]:
         client = OpenAI(api_key=api_key, base_url=base_url, timeout=30, max_retries=0)
         try:
             with open(file_path, "rb") as audio_file:
-                transcription = client.audio.transcriptions.create(
+                from agent.provider_usage_capture import capture_provider_call
+
+                transcription = capture_provider_call(
+                    lambda: client.audio.transcriptions.create(
+                        model=model_name,
+                        file=audio_file,
+                        response_format="text" if model_name == "whisper-1" else "json",
+                    ),
+                    provider="openai",
                     model=model_name,
-                    file=audio_file,
-                    response_format="text" if model_name == "whisper-1" else "json",
                 )
 
             transcript_text = _extract_transcript_text(transcription)
@@ -1372,12 +1384,17 @@ def _transcribe_mistral(file_path: str, model_name: str) -> Dict[str, Any]:
 
     try:
         from mistralai.client import Mistral
+        from agent.provider_usage_capture import capture_provider_call
 
         with Mistral(api_key=api_key) as client:
             with open(file_path, "rb") as audio_file:
-                result = client.audio.transcriptions.complete(
+                result = capture_provider_call(
+                    lambda: client.audio.transcriptions.complete(
+                        model=model_name,
+                        file={"content": audio_file, "file_name": Path(file_path).name},
+                    ),
+                    provider="mistral",
                     model=model_name,
-                    file={"content": audio_file, "file_name": Path(file_path).name},
                 )
 
             transcript_text = _extract_transcript_text(result)
@@ -1447,7 +1464,9 @@ def _transcribe_xai(file_path: str, model_name: str) -> Dict[str, Any]:
         if use_diarize:
             data["diarize"] = "true"
 
-        with open(file_path, "rb") as audio_file:
+        from agent.provider_usage_capture import capture_provider_call
+
+        def _post_xai_stt():
             response = requests.post(
                 f"{base_url}/stt",
                 headers={
@@ -1460,19 +1479,42 @@ def _transcribe_xai(file_path: str, model_name: str) -> Dict[str, Any]:
                 data=data,
                 timeout=120,
             )
+            if response.status_code != 200:
+                error = requests.HTTPError(
+                    f"xAI STT returned HTTP {response.status_code}"
+                )
+                error.response = response
+                raise error
+            return response
 
-        if response.status_code != 200:
-            detail = ""
+        with open(file_path, "rb") as audio_file:
             try:
-                err_body = response.json()
-                detail = err_body.get("error", {}).get("message", "") or response.text[:300]
-            except Exception:
-                detail = response.text[:300]
-            return {
-                "success": False,
-                "transcript": "",
-                "error": f"xAI STT API error (HTTP {response.status_code}): {detail}",
-            }
+                response = capture_provider_call(
+                    _post_xai_stt,
+                    provider="xai",
+                    model=model_name,
+                    response_transform=lambda result: result.json(),
+                )
+            except requests.HTTPError as exc:
+                response = exc.response
+                if response is None:
+                    raise
+                detail = ""
+                try:
+                    err_body = response.json()
+                    detail = (
+                        err_body.get("error", {}).get("message", "")
+                        or response.text[:300]
+                    )
+                except Exception:
+                    detail = response.text[:300]
+                return {
+                    "success": False,
+                    "transcript": "",
+                    "error": (
+                        f"xAI STT API error (HTTP {response.status_code}): {detail}"
+                    ),
+                }
 
         result = response.json()
         transcript_text = result.get("text", "").strip()

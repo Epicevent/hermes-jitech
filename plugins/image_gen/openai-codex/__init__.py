@@ -246,6 +246,7 @@ def _collect_image_b64(token: str, *, prompt: str, size: str, quality: str) -> O
     """Stream a Codex Responses image_generation call and return the b64 image."""
     import httpx
     from agent.auxiliary_client import _codex_cloudflare_headers
+    from agent.provider_usage_capture import capture_provider_call
 
     headers = _codex_cloudflare_headers(token)
     headers.update({
@@ -256,23 +257,36 @@ def _collect_image_b64(token: str, *, prompt: str, size: str, quality: str) -> O
     payload = _build_responses_payload(prompt=prompt, size=size, quality=quality)
     timeout = httpx.Timeout(300.0, connect=30.0, read=300.0, write=30.0, pool=30.0)
 
-    image_b64: Optional[str] = None
-    with httpx.Client(timeout=timeout, headers=headers) as http:
-        with http.stream("POST", f"{_CODEX_BASE_URL}/responses", json=payload) as response:
-            try:
-                response.raise_for_status()
-            except httpx.HTTPStatusError as exc:
-                exc.response.read()
-                body = exc.response.text[:500]
-                raise RuntimeError(
-                    f"Codex Responses API returned HTTP {exc.response.status_code}: {body}"
-                ) from exc
-            for event in _iter_sse_json(response):
-                found = _extract_image_b64(event)
-                if found:
-                    image_b64 = found
+    def _invoke_codex_image() -> Dict[str, Any]:
+        image_b64: Optional[str] = None
+        final_response: Optional[Dict[str, Any]] = None
+        with httpx.Client(timeout=timeout, headers=headers) as http:
+            with http.stream("POST", f"{_CODEX_BASE_URL}/responses", json=payload) as response:
+                try:
+                    response.raise_for_status()
+                except httpx.HTTPStatusError as exc:
+                    exc.response.read()
+                    body = exc.response.text[:500]
+                    raise RuntimeError(
+                        f"Codex Responses API returned HTTP {exc.response.status_code}: {body}"
+                    ) from exc
+                for event in _iter_sse_json(response):
+                    found = _extract_image_b64(event)
+                    if found:
+                        image_b64 = found
+                    if event.get("type") == "response.completed" and isinstance(
+                        event.get("response"), dict
+                    ):
+                        final_response = event["response"]
+        return {"image_b64": image_b64, "provider_response": final_response}
 
-    return image_b64
+    captured = capture_provider_call(
+        _invoke_codex_image,
+        provider="openai-codex",
+        model=_CODEX_CHAT_MODEL,
+        response_transform=lambda result: result.get("provider_response"),
+    )
+    return captured.get("image_b64")
 
 
 # ---------------------------------------------------------------------------
