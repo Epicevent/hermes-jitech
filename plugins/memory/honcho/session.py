@@ -458,8 +458,10 @@ class HonchoSessionManager:
     def _async_writer_loop(self) -> None:
         """Background daemon thread: drains the async write queue."""
         while True:
+            item_acquired = False
             try:
                 item = self._async_queue.get(timeout=5)
+                item_acquired = True
                 if item is _ASYNC_SHUTDOWN:
                     break
 
@@ -493,6 +495,9 @@ class HonchoSessionManager:
                 continue
             except Exception as e:
                 logger.error("Honcho async writer error: %s", e)
+            finally:
+                if item_acquired:
+                    self._async_queue.task_done()
 
     def save(self, session: HonchoSession) -> None:
         """Save messages to Honcho, respecting write_frequency.
@@ -534,13 +539,23 @@ class HonchoSessionManager:
 
         # Drain async queue synchronously if it exists
         if self._async_queue is not None:
-            while not self._async_queue.empty():
+            while True:
                 try:
                     item = self._async_queue.get_nowait()
-                    if item is not _ASYNC_SHUTDOWN:
-                        self._flush_session(item)
                 except queue.Empty:
                     break
+                try:
+                    if item is not _ASYNC_SHUTDOWN:
+                        self._flush_session(item)
+                except Exception as e:
+                    logger.error("Honcho flush_all async queue error: %s", e)
+                finally:
+                    self._async_queue.task_done()
+
+            # The worker may already have removed an item from the queue.
+            # Queue completion accounting makes flush_all wait for that
+            # in-flight provider write instead of treating empty() as done.
+            self._async_queue.join()
 
     def shutdown(self) -> None:
         """Gracefully shut down the async writer thread."""

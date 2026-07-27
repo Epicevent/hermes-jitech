@@ -254,12 +254,43 @@ class TestFlushAll:
         mgr = _make_manager(write_frequency="async")
         sess = _make_session()
         sess.add_message("user", "pending")
-        mgr._async_queue.put(sess)
 
         with patch.object(mgr, "_flush_session") as mock_flush:
+            mgr._async_queue.put(sess)
             mgr.flush_all()
             # Called at least once for the queued item
             assert mock_flush.call_count >= 1
+
+        mgr.shutdown()
+
+    def test_flush_all_waits_for_worker_in_flight_item(self):
+        mgr = _make_manager(write_frequency="async")
+        sess = _make_session()
+        sess.add_message("user", "pending")
+        flush_started = threading.Event()
+        allow_flush = threading.Event()
+        flush_all_done = threading.Event()
+
+        def blocked_flush(_session):
+            flush_started.set()
+            assert allow_flush.wait(timeout=2)
+            return True
+
+        mgr._flush_session = blocked_flush
+        mgr._async_queue.put(sess)
+        assert flush_started.wait(timeout=2)
+
+        waiter = threading.Thread(
+            target=lambda: (mgr.flush_all(), flush_all_done.set()),
+            daemon=True,
+        )
+        waiter.start()
+        assert not flush_all_done.wait(timeout=0.05)
+        allow_flush.set()
+        waiter.join(timeout=2)
+
+        assert flush_all_done.is_set()
+        mgr.shutdown()
 
     def test_flush_all_tolerates_errors(self):
         mgr = _make_manager(write_frequency="session")
