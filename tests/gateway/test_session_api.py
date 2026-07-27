@@ -208,6 +208,60 @@ async def test_session_chat_accepts_multimodal_message(auth_adapter, session_db)
 
 
 @pytest.mark.asyncio
+async def test_session_chat_uses_content_safe_persistence_projection(auth_adapter, session_db):
+    session_id = session_db.create_session("image-persist-session", "api_server")
+    image_payload = [
+        {"type": "input_text", "text": "What's in this image?"},
+        {"type": "input_image", "image_url": "data:image/png;base64,AAAA"},
+    ]
+    persisted = (
+        "What's in this image?\n\n"
+        "![upload.png](MEDIA:/slot-state/artifacts/chat-uploads/abc.png)"
+    )
+    mock_run = AsyncMock(
+        return_value=(
+            {"final_response": "A cat.", "session_id": session_id},
+            {"total_tokens": 4},
+        )
+    )
+    app = _create_session_app(auth_adapter)
+    with patch.object(auth_adapter, "_run_agent", mock_run):
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                f"/api/sessions/{session_id}/chat",
+                json={
+                    "message": image_payload,
+                    "persist_user_message": persisted,
+                },
+                headers={"Authorization": "Bearer sk-test"},
+            )
+            assert resp.status == 200, await resp.text()
+
+    _, kwargs = mock_run.call_args
+    assert kwargs["user_message"] == [
+        {"type": "text", "text": "What's in this image?"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+    ]
+    assert kwargs["persist_user_message"] == persisted
+
+
+@pytest.mark.asyncio
+async def test_session_chat_rejects_non_string_persistence_projection(auth_adapter, session_db):
+    session_id = session_db.create_session("invalid-image-persist-session", "api_server")
+    app = _create_session_app(auth_adapter)
+    async with TestClient(TestServer(app)) as cli:
+        resp = await cli.post(
+            f"/api/sessions/{session_id}/chat",
+            json={"message": "hello", "persist_user_message": {"unsafe": True}},
+            headers={"Authorization": "Bearer sk-test"},
+        )
+        body = await resp.json()
+
+    assert resp.status == 400
+    assert body["error"]["code"] == "invalid_persist_user_message"
+
+
+@pytest.mark.asyncio
 async def test_session_chat_stream_accepts_multimodal_message(adapter, session_db):
     session_id = session_db.create_session("image-stream-session", "api_server")
     image_payload = [
@@ -230,14 +284,38 @@ async def test_session_chat_stream_accepts_multimodal_message(adapter, session_d
         async with TestClient(TestServer(app)) as cli:
             resp = await cli.post(
                 f"/api/sessions/{session_id}/chat/stream",
-                json={"message": image_payload},
+                json={
+                    "message": image_payload,
+                    "persist_user_message": "What's in this image?\n\n![upload.png](MEDIA:/slot-state/abc.png)",
+                    "client_message_id": "client-upload-1",
+                },
             )
             assert resp.status == 200, await resp.text()
             assert resp.headers["Content-Type"].startswith("text/event-stream")
             body = await resp.text()
 
     assert "event: assistant.completed" in body
+    assert '"client_id": "client-upload-1"' in body
+    assert '"content": "What\'s in this image?"' in body
     assert captured_kwargs["user_message"] == expected_user_message
+    assert captured_kwargs["persist_user_message"] == (
+        "What's in this image?\n\n![upload.png](MEDIA:/slot-state/abc.png)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_session_chat_stream_rejects_invalid_client_message_id(adapter, session_db):
+    session_id = session_db.create_session("invalid-client-id-session", "api_server")
+    app = _create_session_app(adapter)
+    async with TestClient(TestServer(app)) as cli:
+        resp = await cli.post(
+            f"/api/sessions/{session_id}/chat/stream",
+            json={"message": "hello", "client_message_id": "bad\nclient"},
+        )
+        body = await resp.json()
+
+    assert resp.status == 400
+    assert body["error"]["code"] == "invalid_client_message_id"
 
 
 @pytest.mark.asyncio

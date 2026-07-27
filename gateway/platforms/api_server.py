@@ -334,6 +334,75 @@ def _session_chat_user_message(body: Dict[str, Any], *, param: str = "message") 
         return None, _multimodal_validation_error(exc, param=param)
 
 
+def _session_chat_persist_user_message(
+    body: Dict[str, Any],
+) -> tuple[Optional[str], Optional["web.Response"]]:
+    """Read the optional content-safe transcript projection for a user turn.
+
+    The live ``message`` may contain image bytes that the provider must see but
+    that must not be copied into the session database.  A trusted client can
+    therefore provide a text-only projection (for example, a MEDIA reference
+    to a slot-local artifact) for persistence and history reload.
+    """
+    value = body.get("persist_user_message")
+    if value is None:
+        return None, None
+    if not isinstance(value, str):
+        return None, web.json_response(
+            _openai_error(
+                "persist_user_message must be a string",
+                code="invalid_persist_user_message",
+                param="persist_user_message",
+            ),
+            status=400,
+        )
+    return value, None
+
+
+def _session_chat_client_message_id(
+    body: Dict[str, Any],
+) -> tuple[Optional[str], Optional["web.Response"]]:
+    """Validate the caller identity used to reconcile optimistic UI echoes."""
+    value = body.get("client_message_id")
+    if value is None:
+        return None, None
+    if not isinstance(value, str):
+        return None, web.json_response(
+            _openai_error(
+                "client_message_id must be a string",
+                code="invalid_client_message_id",
+                param="client_message_id",
+            ),
+            status=400,
+        )
+    value = value.strip()
+    if not value or len(value) > 128 or re.search(r"[\r\n\x00]", value):
+        return None, web.json_response(
+            _openai_error(
+                "client_message_id must be 1-128 characters without control separators",
+                code="invalid_client_message_id",
+                param="client_message_id",
+            ),
+            status=400,
+        )
+    return value, None
+
+
+def _session_chat_visible_user_text(user_message: Any) -> str:
+    """Return only visible text from a normalized multimodal user message."""
+    if isinstance(user_message, str):
+        return user_message
+    if not isinstance(user_message, list):
+        return ""
+    return "\n".join(
+        str(part.get("text") or "")
+        for part in user_message
+        if isinstance(part, dict)
+        and str(part.get("type") or "").strip().lower() in _TEXT_PART_TYPES
+        and str(part.get("text") or "")
+    )
+
+
 def check_api_server_requirements() -> bool:
     """Check if API server dependencies are available."""
     return AIOHTTP_AVAILABLE
@@ -1510,6 +1579,9 @@ class APIServerAdapter(BasePlatformAdapter):
         user_message, err = _session_chat_user_message(body)
         if err is not None:
             return err
+        persist_user_message, err = _session_chat_persist_user_message(body)
+        if err is not None:
+            return err
         system_prompt = body.get("system_message") or body.get("instructions")
         if system_prompt is not None and not isinstance(system_prompt, str):
             return web.json_response(_openai_error("system_message must be a string", code="invalid_system_message"), status=400)
@@ -1520,6 +1592,7 @@ class APIServerAdapter(BasePlatformAdapter):
             ephemeral_system_prompt=system_prompt,
             session_id=session_id,
             gateway_session_key=gateway_session_key,
+            persist_user_message=persist_user_message,
         )
         effective_session_id = result.get("session_id") if isinstance(result, dict) else session_id
         final_response = result.get("final_response", "") if isinstance(result, dict) else ""
@@ -1552,6 +1625,12 @@ class APIServerAdapter(BasePlatformAdapter):
         if err:
             return err
         user_message, err = _session_chat_user_message(body)
+        if err is not None:
+            return err
+        persist_user_message, err = _session_chat_persist_user_message(body)
+        if err is not None:
+            return err
+        client_message_id, err = _session_chat_client_message_id(body)
         if err is not None:
             return err
         system_prompt = body.get("system_message") or body.get("instructions")
@@ -1600,7 +1679,13 @@ class APIServerAdapter(BasePlatformAdapter):
 
         async def _run_and_signal() -> None:
             try:
-                await queue.put(_event_payload("run.started", {"user_message": {"role": "user", "content": user_message}}))
+                visible_user_text = _session_chat_visible_user_text(user_message)
+                await queue.put(_event_payload("run.started", {"user_message": {
+                    "id": client_message_id,
+                    "client_id": client_message_id,
+                    "role": "user",
+                    "content": visible_user_text,
+                }}))
                 await queue.put(_event_payload("message.started", {"message": {"id": message_id, "role": "assistant"}}))
                 history = self._conversation_history_for_session(session_id)
                 result, usage = await self._run_agent(
@@ -1611,6 +1696,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     stream_delta_callback=_delta,
                     tool_progress_callback=_tool_progress,
                     gateway_session_key=gateway_session_key,
+                    persist_user_message=persist_user_message,
                 )
                 final_response = result.get("final_response", "") if isinstance(result, dict) else ""
                 effective_session_id = result.get("session_id", session_id) if isinstance(result, dict) else session_id
@@ -3396,7 +3482,7 @@ class APIServerAdapter(BasePlatformAdapter):
 
     async def _run_agent(
         self,
-        user_message: str,
+        user_message: Any,
         conversation_history: List[Dict[str, str]],
         ephemeral_system_prompt: Optional[str] = None,
         session_id: Optional[str] = None,
@@ -3406,6 +3492,7 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_complete_callback=None,
         agent_ref: Optional[list] = None,
         gateway_session_key: Optional[str] = None,
+        persist_user_message: Optional[str] = None,
     ) -> tuple:
         """
         Create an agent and run a conversation in a thread executor.
@@ -3433,11 +3520,14 @@ class APIServerAdapter(BasePlatformAdapter):
             if agent_ref is not None:
                 agent_ref[0] = agent
             effective_task_id = session_id or str(uuid.uuid4())
-            result = agent.run_conversation(
-                user_message=user_message,
-                conversation_history=conversation_history,
-                task_id=effective_task_id,
-            )
+            run_kwargs = {
+                "user_message": user_message,
+                "conversation_history": conversation_history,
+                "task_id": effective_task_id,
+            }
+            if persist_user_message is not None:
+                run_kwargs["persist_user_message"] = persist_user_message
+            result = agent.run_conversation(**run_kwargs)
             usage = {
                 "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
                 "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
