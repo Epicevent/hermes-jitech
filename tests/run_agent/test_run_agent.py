@@ -2653,6 +2653,41 @@ class TestHandleMaxIterations:
             for item in input_items
         )
 
+    def test_clientless_summary_preserves_response_for_usage_capture(self, agent):
+        agent.api_mode = "codex_responses"
+        agent.provider = "openai-codex"
+        agent.model = "gpt-5.5"
+        agent._cached_system_prompt = "You are helpful."
+        response = SimpleNamespace(
+            id="summary-response-1",
+            status="completed",
+            output=[
+                SimpleNamespace(
+                    type="message",
+                    status="completed",
+                    content=[SimpleNamespace(type="output_text", text="Summary")],
+                )
+            ],
+            usage=SimpleNamespace(input_tokens=11, output_tokens=2, total_tokens=13),
+            model="gpt-5.5",
+        )
+        agent._run_codex_stream = MagicMock(return_value=response)
+
+        def capture(invoke, **kwargs):
+            assert kwargs["response_transform"] is None
+            return invoke()
+
+        with patch(
+            "agent.provider_usage_capture.capture_provider_call",
+            side_effect=capture,
+        ):
+            result = agent._handle_max_iterations(
+                [{"role": "user", "content": "do stuff"}],
+                60,
+            )
+
+        assert result == "Summary"
+
     def test_api_sanitizer_matches_responses_call_id_when_id_differs(self, agent):
         messages = [
             {
@@ -3748,6 +3783,67 @@ class TestRetryExhaustion:
         assert result.get("failed") is True
         assert "error" in result
         assert "Invalid API response" in result["error"]
+
+    def test_invalid_responses_persist_each_attempt_with_retry_lineage(
+        self,
+        agent,
+        tmp_path,
+    ):
+        from hermes_state import SessionDB
+
+        self._setup_agent(agent)
+        agent.model = "test-model"
+        agent.provider = "openrouter"
+        agent._session_db = SessionDB(tmp_path / "state.db")
+        agent._session_db_created = False
+        bad_resp = SimpleNamespace(
+            id="malformed-response",
+            choices=[],
+            model="provider-returned-model",
+            usage=SimpleNamespace(
+                prompt_tokens=9,
+                completion_tokens=0,
+                total_tokens=9,
+            ),
+        )
+        agent.client.chat.completions.create.return_value = bad_resp
+        from agent import conversation_loop as _conv_loop
+
+        try:
+            with (
+                patch.object(agent, "_persist_session"),
+                patch.object(agent, "_save_trajectory"),
+                patch.object(agent, "_cleanup_task_resources"),
+                patch("run_agent.time", self._make_fast_time_mock()),
+                patch.object(_conv_loop, "time", self._make_fast_time_mock()),
+                patch.object(
+                    _conv_loop,
+                    "jittered_backoff",
+                    lambda *a, **k: 0.0,
+                ),
+            ):
+                result = agent.run_conversation("hello")
+            page = agent._session_db.export_provider_usage_receipts()
+        finally:
+            agent._session_db.close()
+
+        assert result["failed"] is True
+        receipts = page["receipts"]
+        assert len(receipts) == 3
+        assert [receipt["status"] for receipt in receipts] == ["failed"] * 3
+        assert receipts[0]["retryOf"] is None
+        assert receipts[1]["retryOf"] == receipts[0]["callId"]
+        assert receipts[2]["retryOf"] == receipts[1]["callId"]
+        assert all(
+            receipt["errorCategory"] == "InvalidProviderResponse"
+            for receipt in receipts
+        )
+        assert all(
+            receipt["actual"]["model"] == "provider-returned-model"
+            and receipt["actual"]["responseId"] == "malformed-response"
+            for receipt in receipts
+        )
+        assert all(receipt["usage"]["inputTotal"] == 9 for receipt in receipts)
 
     def test_api_error_returns_gracefully_after_retries(self, agent):
         """Exhausted retries on API errors must return error result, not crash."""
