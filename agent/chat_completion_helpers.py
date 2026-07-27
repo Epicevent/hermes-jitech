@@ -1353,9 +1353,7 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
                     response,
                     getattr(client, "last_provider_receipt", None),
                 )
-                if client is not None
-                else None
-            ),
+            ) if client is not None else None,
         )
 
     print(f"⚠️  Reached maximum iterations ({agent.max_iterations}). Requesting summary...")

@@ -330,7 +330,7 @@ def _apply_profile_override() -> None:
                     break
 
 
-if not _PROVIDER_USAGE_READ_FAST_PATH:
+if not _PROVIDER_USAGE_COVERAGE_FAST_PATH:
     _apply_profile_override()
 
 # Load .env from ~/.hermes/.env first, then project root as dev fallback.

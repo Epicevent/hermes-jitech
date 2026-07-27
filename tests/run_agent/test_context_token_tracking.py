@@ -210,3 +210,53 @@ def test_provider_response_persists_authoritative_usage_before_projection(
         "service_tier": "priority",
     }
     assert agent.last_provider_receipt["usageLedger"]["status"] == "persisted"
+
+
+def test_provider_response_opens_authoritative_ledger_when_session_db_missing(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    def response():
+        return SimpleNamespace(
+            id="response-sessionless-1",
+            choices=[
+                SimpleNamespace(
+                    index=0,
+                    message=SimpleNamespace(
+                        role="assistant",
+                        content="ok",
+                        tool_calls=None,
+                        reasoning_content=None,
+                    ),
+                    finish_reason="stop",
+                )
+            ],
+            usage=SimpleNamespace(
+                prompt_tokens=12,
+                completion_tokens=3,
+                total_tokens=15,
+            ),
+            model="provider-returned-model",
+        )
+
+    agent = _make_agent(
+        monkeypatch,
+        "chat_completions",
+        "openrouter",
+        response,
+    )
+    assert agent._session_db is None
+
+    try:
+        agent.run_conversation("hi")
+        page = agent._session_db.export_provider_usage_receipts()
+    finally:
+        if agent._session_db is not None:
+            agent._session_db.close()
+
+    assert page["count"] == 1
+    assert page["receipts"][0]["actual"]["responseId"] == "response-sessionless-1"
+    assert page["receipts"][0]["usage"]["inputTotal"] == 12
+    assert agent.last_provider_receipt["usageLedger"]["status"] == "persisted"

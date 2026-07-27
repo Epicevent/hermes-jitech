@@ -232,7 +232,11 @@ def _record_provider_attempt(
     if not call_id:
         return None
 
-    provider_receipt = getattr(agent, "last_provider_receipt", None)
+    provider_receipt = (
+        getattr(agent, "last_provider_receipt", None)
+        if response is not None
+        else None
+    )
     provider_receipt = (
         dict(provider_receipt) if isinstance(provider_receipt, dict) else None
     )
@@ -242,45 +246,44 @@ def _record_provider_attempt(
     evidence_source = None
     raw_usage = None
 
-    if status == "succeeded":
-        if provider_receipt is not None:
-            model_version = provider_receipt.get("modelVersion")
-            source = provider_receipt.get("evidenceSource")
-            if (
-                isinstance(model_version, str)
-                and model_version
-                and source == "gemini_response.modelVersion"
-            ):
-                actual_provider = requested_provider
-                actual_model = model_version
-                evidence_source = source
-            candidate_response_id = provider_receipt.get("responseId")
-            if isinstance(candidate_response_id, str) and candidate_response_id:
-                response_id = candidate_response_id
-            provider_usage = provider_receipt.get("usageMetadata")
-            if isinstance(provider_usage, dict) and provider_usage:
-                raw_usage = provider_usage
-            candidate_finish = provider_receipt.get("finishReason")
-            if isinstance(candidate_finish, str) and candidate_finish:
-                finish_reason = candidate_finish
+    if provider_receipt is not None:
+        model_version = provider_receipt.get("modelVersion")
+        source = provider_receipt.get("evidenceSource")
+        if (
+            isinstance(model_version, str)
+            and model_version
+            and source == "gemini_response.modelVersion"
+        ):
+            actual_provider = requested_provider
+            actual_model = model_version
+            evidence_source = source
+        candidate_response_id = provider_receipt.get("responseId")
+        if isinstance(candidate_response_id, str) and candidate_response_id:
+            response_id = candidate_response_id
+        provider_usage = provider_receipt.get("usageMetadata")
+        if isinstance(provider_usage, dict) and provider_usage:
+            raw_usage = provider_usage
+        candidate_finish = provider_receipt.get("finishReason")
+        if isinstance(candidate_finish, str) and candidate_finish:
+            finish_reason = candidate_finish
 
-        if actual_model is None and requested_provider not in {"gemini", "google"}:
-            response_model = getattr(response, "model", None)
-            if isinstance(response_model, str) and response_model:
-                actual_provider = requested_provider
-                actual_model = response_model
-                evidence_source = "response.model"
-        if response_id is None:
-            candidate_response_id = getattr(response, "id", None)
-            if isinstance(candidate_response_id, str) and candidate_response_id:
-                response_id = candidate_response_id
-        if raw_usage is None:
-            provider_usage = getattr(response, "provider_usage", None)
-            raw_usage = _provider_raw_usage(
-                provider_usage
-                if provider_usage is not None
-                else getattr(response, "usage", None)
-            )
+    if actual_model is None and requested_provider not in {"gemini", "google"}:
+        response_model = getattr(response, "model", None)
+        if isinstance(response_model, str) and response_model:
+            actual_provider = requested_provider
+            actual_model = response_model
+            evidence_source = "response.model"
+    if response_id is None:
+        candidate_response_id = getattr(response, "id", None)
+        if isinstance(candidate_response_id, str) and candidate_response_id:
+            response_id = candidate_response_id
+    if raw_usage is None:
+        provider_usage = getattr(response, "provider_usage", None)
+        raw_usage = _provider_raw_usage(
+            provider_usage
+            if provider_usage is not None
+            else getattr(response, "usage", None)
+        )
 
     receipt_projection = provider_receipt or {"provider": requested_provider}
     receipt_projection.update({
@@ -299,21 +302,19 @@ def _record_provider_attempt(
         "status": status,
     })
 
-    if not getattr(agent, "_session_db", None) or not getattr(
-        agent, "session_id", None
-    ):
-        _attach_unavailable_usage_ledger(
-            receipt_projection,
-            RuntimeError("provider usage ledger unavailable"),
-        )
-        agent.last_provider_receipt = receipt_projection
-        return None
-
     try:
-        if not agent._session_db_created:
+        session_db = getattr(agent, "_session_db", None)
+        if session_db is None:
+            from hermes_cli.config import get_hermes_home
+            from hermes_state import SessionDB
+
+            session_db = SessionDB(get_hermes_home() / "state.db")
+            agent._session_db = session_db
+        session_id = getattr(agent, "session_id", None)
+        if session_id and not getattr(agent, "_session_db_created", False):
             agent._ensure_db_session()
-        result = agent._session_db.record_provider_call(
-            agent.session_id,
+        result = session_db.record_provider_call(
+            session_id,
             call_id=call_id,
             request_id=request_id,
             api_call_index=api_call_index,
@@ -1734,6 +1735,33 @@ def run_conversation(
                             error_details.append("response.choices is empty")
 
                 if response_invalid:
+                    _record_provider_attempt(
+                        agent,
+                        response,
+                        configured_model=configured_model_for_turn,
+                        configured_provider=configured_provider_for_turn,
+                        requested_model=provider_requested_model,
+                        requested_provider=agent.provider or "unknown",
+                        run_id=provider_run_id,
+                        turn_id=provider_turn_id,
+                        request_id=provider_request_id,
+                        call_id=provider_call_id,
+                        api_call_index=api_call_count,
+                        attempt=provider_call_attempt,
+                        fallback_index=provider_fallback_index,
+                        retry_of=provider_retry_of,
+                        fallback_parent=provider_fallback_parent,
+                        started_at=provider_call_started_at,
+                        completed_at=provider_call_completed_at,
+                        status="failed",
+                        error_category="InvalidProviderResponse",
+                    )
+                    provider_attempt_recorded = True
+                    provider_previous_call_id = (
+                        provider_call_id or provider_previous_call_id
+                    )
+                    provider_previous_fallback_index = provider_fallback_index
+
                     # Stop spinner silently — retry status is now buffered
                     # and only surfaced if every retry+fallback exhausts.
                     if thinking_spinner:

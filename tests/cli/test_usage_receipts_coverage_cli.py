@@ -93,3 +93,68 @@ def test_export_cli_fast_path_is_readonly_and_emits_exact_page(tmp_path):
     assert len(page["coverageManifests"]) == 1
     assert after - before <= {"state.db-shm", "state.db-wal"}
     assert "logs" not in after
+
+
+def test_export_cli_fast_path_honors_active_profile(tmp_path):
+    user_home = tmp_path / "user"
+    hermes_root = user_home / ".hermes"
+    profile_home = hermes_root / "profiles" / "operator"
+    profile_home.mkdir(parents=True)
+    (hermes_root / "active_profile").write_text("operator", encoding="utf-8")
+
+    from hermes_state import SessionDB
+
+    db = SessionDB(profile_home / "state.db")
+    try:
+        db.record_provider_call(
+            None,
+            call_id="00000000-0000-4000-8000-000000000708",
+            request_id=None,
+            api_call_index=1,
+            attempt=1,
+            fallback_index=0,
+            configured_provider="openai",
+            configured_model="profile-model",
+            requested_provider="openai",
+            requested_model="profile-model",
+            actual_provider=None,
+            actual_model=None,
+            response_id=None,
+            evidence_source=None,
+            finish_reason=None,
+            usage=None,
+            started_at=1.0,
+            completed_at=2.0,
+            trigger="manual",
+        )
+    finally:
+        db.close()
+
+    env = os.environ.copy()
+    env.pop("HERMES_HOME", None)
+    env["HOME"] = str(user_home)
+    env["USERPROFILE"] = str(user_home)
+    env["PYTHONUTF8"] = "1"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "hermes_cli.main",
+            "usage-receipts",
+            "export",
+            "--after",
+            "0",
+            "--limit",
+            "500",
+        ],
+        cwd=Path(__file__).parents[2],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    page = json.loads(result.stdout)
+
+    assert page["count"] == 1
+    assert page["receipts"][0]["configured"]["model"] == "profile-model"
+    assert not (hermes_root / "state.db").exists()
