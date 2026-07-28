@@ -7,6 +7,7 @@ import importlib.metadata
 import json
 import os
 import re
+from pathlib import Path
 
 from plugins.kwrag_slot.manifest import load_component_manifest, load_resource_profile
 
@@ -41,9 +42,10 @@ def _status() -> dict[str, object]:
     resource_digest = os.environ.get("JITECH_RETRIEVAL_RESOURCE_PROFILE_DIGEST", "")
     if resource_digest != resource["profileDigest"]:
         raise RuntimeError("runtime resource profile digest does not match the image")
-    nas_root = os.environ.get("OPENCLAW_NAS_CONTAINER_PATH", "")
-    if not nas_root.startswith("/"):
+    workspace_root = os.environ.get("HERMES_WORKSPACE_DIR", "")
+    if not workspace_root.startswith("/"):
         raise RuntimeError("runtime NAS root is unavailable")
+    nas_root = Path(workspace_root) / "nas_docs"
     try:
         mount_read_only = bool(os.statvfs(nas_root).f_flag & getattr(os, "ST_RDONLY", 1))
     except (AttributeError, OSError) as exc:

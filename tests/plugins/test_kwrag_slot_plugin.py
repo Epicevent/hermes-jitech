@@ -155,7 +155,7 @@ def test_embedded_wheel_and_disabled_status_bind_exact_component(monkeypatch) ->
     monkeypatch.setenv("JITECH_RETRIEVAL_COMPONENT_DIGEST", manifest["component_wheel"]["sha256"])
     monkeypatch.setenv("JITECH_RETRIEVAL_BINDING_DIGEST", "sha256:" + "d" * 64)
     monkeypatch.setenv("JITECH_RETRIEVAL_RESOURCE_PROFILE_DIGEST", resource["profileDigest"])
-    monkeypatch.setenv("OPENCLAW_NAS_CONTAINER_PATH", "/workspace/nas_docs")
+    monkeypatch.setenv("HERMES_WORKSPACE_DIR", "/workspace")
     monkeypatch.setattr("plugins.kwrag_slot.cli.os.statvfs", lambda _path: SimpleNamespace(f_flag=1), raising=False)
     status = _status()
     assert set(status) == {
@@ -197,7 +197,7 @@ def test_status_fails_closed_before_enabled_product_invocation(monkeypatch) -> N
     monkeypatch.setenv("JITECH_RETRIEVAL_COMPONENT_DIGEST", manifest["component_wheel"]["sha256"])
     monkeypatch.setenv("JITECH_RETRIEVAL_BINDING_DIGEST", "sha256:" + "d" * 64)
     monkeypatch.setenv("JITECH_RETRIEVAL_RESOURCE_PROFILE_DIGEST", resource["profileDigest"])
-    monkeypatch.setenv("OPENCLAW_NAS_CONTAINER_PATH", "/workspace/nas_docs")
+    monkeypatch.setenv("HERMES_WORKSPACE_DIR", "/workspace")
     monkeypatch.setattr("plugins.kwrag_slot.cli.os.statvfs", lambda _path: SimpleNamespace(f_flag=1), raising=False)
     with pytest.raises(RuntimeError, match="approved product invocation"):
         _status()
