@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Protocol
 
@@ -110,12 +110,51 @@ class HermesSlotRetrievalBinding:
         return cls(False, component_digest, None, None, None, 0)
 
 
-@dataclass(frozen=True)
+@dataclass
 class HermesSlotRetrievalResult:
     results: tuple[dict[str, Any], ...]
-    consumption_receipt: dict[str, Any]
-    consumption_receipt_digest: str
-    consumption_receipt_status: str
+    result_receipt: dict[str, Any]
+    result_receipt_digest: str
+    result_receipt_status: str
+    consumption_receipt: dict[str, Any] | None = None
+    consumption_receipt_digest: str | None = None
+    consumption_receipt_status: str = "pending"
+    _receipt_sink: ConsumptionReceiptSink | None = field(repr=False, compare=False, default=None)
+
+    def record_prompt_consumption(
+        self,
+        *,
+        session_binding_digest: str,
+        prompt_context_digest: str,
+    ) -> str:
+        if self.consumption_receipt_status != "pending" or self.consumption_receipt is not None:
+            raise HermesSlotRetrievalError("retrieval evidence was already consumed")
+        receipt = {
+            "schema_version": "hermes-kwrag-consumption-receipt-v1",
+            "consumer_family": "hermes",
+            "consumption_status": "assembled_into_ephemeral_user_context",
+            "component_digest": self.result_receipt["component_digest"],
+            "runtime_binding_digest": self.result_receipt["runtime_binding_digest"],
+            "session_binding_digest": _digest(session_binding_digest, "session binding digest"),
+            "prompt_context_digest": _digest(prompt_context_digest, "prompt context digest"),
+            "request_id": self.result_receipt["request_id"],
+            "operation_id": self.result_receipt["operation_id"],
+            "run_id": self.result_receipt["run_id"],
+            "attempt": self.result_receipt["attempt"],
+            "result_digest": self.result_receipt["result_digest"],
+            "operation_receipt_digest": self.result_receipt["operation_receipt_digest"],
+            "result_receipt_digest": self.result_receipt_digest,
+        }
+        receipt_digest = "sha256:" + hashlib.sha256(canonical_json_bytes(receipt)).hexdigest()
+        if self._receipt_sink is None:
+            raise HermesSlotRetrievalError("consumption receipt sink is unavailable")
+        written_digest = self._receipt_sink.write(receipt)
+        if written_digest != receipt_digest:
+            raise HermesSlotRetrievalError("written consumption receipt digest is not bound")
+        self.consumption_receipt = receipt
+        self.consumption_receipt_digest = receipt_digest
+        self.consumption_receipt_status = "written"
+        return receipt_digest
 
 
 class HermesSlotRetrievalConsumer:
@@ -150,9 +189,9 @@ class HermesSlotRetrievalConsumer:
             max_result_characters=self._binding.max_result_characters,
         )
         receipt = {
-            "schema_version": "hermes-kwrag-consumption-receipt-v1",
+            "schema_version": "hermes-kwrag-result-receipt-v1",
             "consumer_family": "hermes",
-            "consumption_status": "accepted_by_product_adapter",
+            "adapter_status": "verified_by_product_adapter",
             "component_digest": self._binding.component_digest,
             "runtime_binding_digest": self._binding.runtime_binding_digest,
             "request_id": verified.request_id,
@@ -171,10 +210,11 @@ class HermesSlotRetrievalConsumer:
         receipt_digest = "sha256:" + hashlib.sha256(receipt_bytes).hexdigest()
         written_digest = self._receipt_sink.write(receipt)
         if written_digest != receipt_digest:
-            raise HermesSlotRetrievalError("written consumption receipt digest is not bound")
+            raise HermesSlotRetrievalError("written result receipt digest is not bound")
         return HermesSlotRetrievalResult(
             results=tuple(verified.results()),
-            consumption_receipt=receipt,
-            consumption_receipt_digest=receipt_digest,
-            consumption_receipt_status="written",
+            result_receipt=receipt,
+            result_receipt_digest=receipt_digest,
+            result_receipt_status="written",
+            _receipt_sink=self._receipt_sink,
         )
