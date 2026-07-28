@@ -1,0 +1,7 @@
+name: kwrag_slot
+version: 0.1.0
+description: "Default-off in-process KWRAG slot consumer and status CLI."
+author: Epicevent
+kind: standalone
+platforms:
+  - linux

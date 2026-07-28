@@ -154,6 +154,31 @@ COPY pyproject.toml uv.lock ./
 RUN touch ./README.md
 RUN uv sync --frozen --no-install-project --extra all --extra messaging --extra anthropic --extra bedrock --extra azure-identity
 
+# KWRAG is an embedded, default-off product component.  Its pure-Python wheel
+# is verified before installation so a product image cannot silently consume a
+# different local artifact.  The component opens no host port and chooses no
+# retrieval backend or invocation policy.
+COPY vendor/kwrag/kwrag_product_service-0.1.0-py3-none-any.whl /tmp/kwrag_product_service-0.1.0-py3-none-any.whl
+RUN printf '%s  %s\n' \
+        '7f6e4ace39c8d868e0517040be0a82742b791dd44744afdae66d54e596b25478' \
+        '/tmp/kwrag_product_service-0.1.0-py3-none-any.whl' \
+        | sha256sum -c - && \
+    uv pip install --no-cache-dir --no-deps /tmp/kwrag_product_service-0.1.0-py3-none-any.whl && \
+    rm /tmp/kwrag_product_service-0.1.0-py3-none-any.whl
+
+LABEL com.epicevent.agent-runtime.retrieval.schema="jitech-embedded-retrieval/v1" \
+      com.epicevent.agent-runtime.retrieval.component-digest="sha256:7f6e4ace39c8d868e0517040be0a82742b791dd44744afdae66d54e596b25478" \
+      com.epicevent.agent-runtime.retrieval.contract-digest="sha256:ccf826f0fe6f7edc36b6d5eacdee87277859d2f6dae3a4ea4cab5f51cba183db" \
+      com.epicevent.agent-runtime.retrieval.component-manifest-digest="sha256:c1e0e8ed1462db8663d8063e4e97ba4530c4f1a7bf3f24a514807eb56c19baf6" \
+      com.epicevent.agent-runtime.retrieval.source-archive-digest="sha256:6c04a7d297410708a0300b3ab3193e047c950c924bc7edc6d4ae7ae127efb97a" \
+      com.epicevent.agent-runtime.retrieval.source-revision="832684981b5203911d299b65d32e01816da06cf3" \
+      com.epicevent.agent-runtime.retrieval.transport="in_process" \
+      com.epicevent.agent-runtime.retrieval.default-enabled="false" \
+      com.epicevent.agent-runtime.retrieval.host-port-count="0" \
+      com.epicevent.agent-runtime.retrieval.nas-read-only="true" \
+      com.epicevent.agent-runtime.retrieval.resource.json='{"cpuReservationMillicores":500,"gpuAccess":"none","memoryReservationBytes":536870912,"pidsReservation":64,"profileDigest":"sha256:2d4ff46a2d76e712421a9758ecb0ae1d262e2d42ea00cee888c103477e6709ed"}' \
+      com.epicevent.agent-runtime.retrieval.verify-command.json='["hermes","kwrag-slot","status","--json"]'
+
 # ---------- Source code ----------
 # .dockerignore excludes node_modules, so the installs above survive.
 COPY --chown=hermes:hermes . .
