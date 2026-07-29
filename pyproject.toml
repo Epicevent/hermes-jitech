@@ -234,6 +234,7 @@ plugins = [
   # <platform>" (#34034), web-search providers go missing (#28149), etc.
   "**/plugin.yaml",
   "**/plugin.yml",
+  "kwrag_slot/*.json",
 ]
 
 [tool.setuptools.packages.find]
