@@ -53,6 +53,8 @@ def test_image_binds_embedded_component_and_default_off_status(built_image, tmp_
             "run",
             "--rm",
             "--read-only",
+            "--tmpfs",
+            "/run",
             "--mount",
             f"type=bind,src={tmp_path},dst=/workspace/nas_docs,readonly",
             "-e",

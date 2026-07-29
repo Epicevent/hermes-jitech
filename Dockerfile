@@ -162,7 +162,9 @@ COPY vendor/kwrag/kwrag_product_service-0.1.0-py3-none-any.whl /tmp/kwrag_produc
 RUN printf '%s  %s\n' \
         '7f6e4ace39c8d868e0517040be0a82742b791dd44744afdae66d54e596b25478' \
         '/tmp/kwrag_product_service-0.1.0-py3-none-any.whl' \
-        | sha256sum -c - && \
+        > /tmp/kwrag_product_service.sha256 && \
+    sha256sum -c /tmp/kwrag_product_service.sha256 && \
+    rm /tmp/kwrag_product_service.sha256 && \
     uv pip install --no-cache-dir --no-deps /tmp/kwrag_product_service-0.1.0-py3-none-any.whl && \
     rm /tmp/kwrag_product_service-0.1.0-py3-none-any.whl
 
