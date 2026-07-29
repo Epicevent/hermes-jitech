@@ -145,6 +145,18 @@ def test_plugin_registers_only_operator_cli() -> None:
     assert manager._hooks == {}
 
 
+def test_bundled_status_cli_is_available_without_enabling_retrieval() -> None:
+    plugin_dir = ROOT / "plugins" / "kwrag_slot"
+    manifest = PluginManager()._parse_manifest(
+        plugin_dir / "plugin.yaml",
+        plugin_dir,
+        source="bundled",
+        prefix="",
+    )
+    assert manifest is not None
+    assert manifest.kind == "backend"
+
+
 def test_embedded_wheel_and_disabled_status_bind_exact_component(monkeypatch) -> None:
     manifest = load_component_manifest()
     resource = load_resource_profile()
