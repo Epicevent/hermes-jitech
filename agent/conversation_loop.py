@@ -25,7 +25,7 @@ import ssl
 import threading
 import time
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from agent.anthropic_adapter import _is_oauth_token
 from agent.auxiliary_client import set_runtime_main
@@ -62,6 +62,10 @@ from agent.nous_rate_guard import (
 from agent.process_bootstrap import _install_safe_stdio
 from agent.prompt_caching import apply_anthropic_cache_control
 from agent.retry_utils import jittered_backoff
+from agent.request_dispatch import (
+    RequestDispatchHandoff,
+    snapshot_allowed_provider_routes,
+)
 from agent.trajectory import has_incomplete_scratchpad
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
 from hermes_constants import display_hermes_home as _dhh_fn, PARTIAL_STREAM_STUB_ID
@@ -649,6 +653,11 @@ def run_conversation(
     task_id: str = None,
     stream_callback: Optional[callable] = None,
     persist_user_message: Optional[str] = None,
+    ephemeral_user_context: Optional[str] = None,
+    ephemeral_user_context_on_request: Optional[Callable[[dict[str, Any]], None]] = None,
+    ephemeral_user_context_on_outcome: Optional[
+        Callable[[str, str, Optional[str]], None]
+    ] = None,
 ) -> Dict[str, Any]:
     """
     Run a complete conversation with tool calling until completion.
@@ -664,11 +673,57 @@ def run_conversation(
         persist_user_message: Optional clean user message to store in
             transcripts/history when user_message contains API-only
             synthetic prefixes.
-                or queuing follow-up prefetch work.
+        ephemeral_user_context: Optional API-only context appended to the
+            current user message on provider requests. It is never added to
+            the in-memory conversation, persisted transcript, or returned
+            message history. Persistent Codex app-server sessions reject this
+            option because their reused provider thread cannot provide that
+            request-only guarantee. Nonempty context requires both receipt
+            callbacks below; unledgered context is rejected before any
+            conversation side effect.
+        ephemeral_user_context_on_request: Optional one-shot commit callback
+            invoked immediately before the first provider dispatch, after the
+            request copy contains ephemeral_user_context. It receives the
+            content-free exact provider-attempt binding and is never invoked
+            for a pre-dispatch failure.
+        ephemeral_user_context_on_outcome: Optional append-only terminal
+            outcome callback for that exact provider-attempt binding.
 
     Returns:
         Dict: Complete conversation result with final response and message history
     """
+    if (
+        getattr(agent, "api_mode", None) == "codex_app_server"
+        and isinstance(ephemeral_user_context, str)
+        and ephemeral_user_context
+    ):
+        raise ValueError(
+            "ephemeral_user_context is not supported by persistent "
+            "codex_app_server sessions"
+        )
+    if ephemeral_user_context_on_request is not None:
+        if not callable(ephemeral_user_context_on_request):
+            raise TypeError("ephemeral_user_context_on_request must be callable")
+        if not ephemeral_user_context:
+            raise ValueError(
+                "ephemeral_user_context_on_request requires ephemeral_user_context"
+            )
+    if (
+        ephemeral_user_context_on_outcome is not None
+        and not callable(ephemeral_user_context_on_outcome)
+    ):
+        raise TypeError("ephemeral_user_context_on_outcome must be callable")
+    if (ephemeral_user_context_on_request is None) != (
+        ephemeral_user_context_on_outcome is None
+    ):
+        raise ValueError(
+            "ephemeral request commit and outcome callbacks must be provided together"
+        )
+    if ephemeral_user_context and ephemeral_user_context_on_request is None:
+        raise ValueError(
+            "ephemeral_user_context requires request commit and outcome callbacks"
+        )
+
     # Guard stdio against OSError from broken pipes (systemd/headless/daemon).
     # Installed once, transparent when streams are healthy, prevents crash on write.
     _install_safe_stdio()
@@ -727,6 +782,10 @@ def run_conversation(
         user_message = _sanitize_surrogates(user_message)
     if isinstance(persist_user_message, str):
         persist_user_message = _sanitize_surrogates(persist_user_message)
+    if isinstance(ephemeral_user_context, str):
+        ephemeral_user_context = _sanitize_surrogates(ephemeral_user_context)
+    elif ephemeral_user_context is not None:
+        raise TypeError("ephemeral_user_context must be a string")
 
     # Store stream callback for _interruptible_api_call to pick up
     agent._stream_callback = stream_callback
@@ -872,6 +931,119 @@ def run_conversation(
     messages.append(user_msg)
     current_turn_user_idx = len(messages) - 1
     agent._persist_user_message_idx = current_turn_user_idx
+
+    def _compress_context_for_current_turn(
+        messages_to_compress: list[dict[str, Any]],
+        compression_system_message: str | None,
+        **compression_kwargs: Any,
+    ) -> tuple[list[dict[str, Any]], str]:
+        """Compress while rebinding the current user turn in the new list.
+
+        Context compressors replace message dictionaries and may move the
+        protected tail. A stale numeric index can therefore omit request-only
+        context while a consumption receipt already says it was assembled.
+        Mark the current turn only for the duration of compression and remove
+        the private marker before return. Request-only evidence requires an
+        exact anchor; ordinary turns retain the legacy last-user fallback for
+        third-party compressors that discard unknown message metadata.
+        """
+
+        nonlocal current_turn_user_idx
+        if not 0 <= current_turn_user_idx < len(messages_to_compress):
+            raise RuntimeError("current user turn is unavailable before compression")
+        current_message = messages_to_compress[current_turn_user_idx]
+        if not isinstance(current_message, dict) or current_message.get("role") != "user":
+            raise RuntimeError("current user turn is invalid before compression")
+
+        marker_key = "_hermes_current_turn_anchor"
+        if marker_key in current_message:
+            raise RuntimeError("current user turn already has a compression anchor")
+        marker_value = str(uuid.uuid4())
+        current_message[marker_key] = marker_value
+        compressed_messages: list[dict[str, Any]] | None = None
+        try:
+            compressed_messages, compressed_system_prompt = agent._compress_context(
+                messages_to_compress,
+                compression_system_message,
+                **compression_kwargs,
+            )
+            matches = [
+                idx
+                for idx, message in enumerate(compressed_messages)
+                if isinstance(message, dict) and message.get(marker_key) == marker_value
+            ]
+            if len(matches) == 1:
+                current_turn_user_idx = matches[0]
+            elif ephemeral_user_context:
+                raise RuntimeError(
+                    "context compression did not preserve exactly one current user turn"
+                )
+            else:
+                fallback_matches = [
+                    idx
+                    for idx, message in enumerate(compressed_messages)
+                    if isinstance(message, dict) and message.get("role") == "user"
+                ]
+                if not fallback_matches:
+                    raise RuntimeError(
+                        "context compression did not preserve a current user turn"
+                    )
+                current_turn_user_idx = fallback_matches[-1]
+            agent._persist_user_message_idx = current_turn_user_idx
+            return compressed_messages, compressed_system_prompt
+        finally:
+            current_message.pop(marker_key, None)
+            if compressed_messages is not None:
+                for message in compressed_messages:
+                    if isinstance(message, dict):
+                        message.pop(marker_key, None)
+
+    def _repair_message_sequence_for_current_turn(
+        messages_to_repair: list[dict[str, Any]],
+    ) -> int:
+        """Repair structure and rebind the exact current user turn."""
+
+        nonlocal current_turn_user_idx
+        if not 0 <= current_turn_user_idx < len(messages_to_repair):
+            raise RuntimeError("current user turn is unavailable before message repair")
+        current_message = messages_to_repair[current_turn_user_idx]
+        if not isinstance(current_message, dict) or current_message.get("role") != "user":
+            raise RuntimeError("current user turn is invalid before message repair")
+
+        marker_key = "_hermes_current_turn_anchor"
+        if marker_key in current_message:
+            raise RuntimeError("current user turn already has a repair anchor")
+        marker_value = str(uuid.uuid4())
+        current_message[marker_key] = marker_value
+        try:
+            repairs = agent._repair_message_sequence(messages_to_repair)
+            matches = [
+                idx
+                for idx, message in enumerate(messages_to_repair)
+                if isinstance(message, dict) and message.get(marker_key) == marker_value
+            ]
+            if len(matches) == 1:
+                current_turn_user_idx = matches[0]
+            elif ephemeral_user_context:
+                raise RuntimeError(
+                    "message repair did not preserve exactly one current user turn"
+                )
+            else:
+                fallback_matches = [
+                    idx
+                    for idx, message in enumerate(messages_to_repair)
+                    if isinstance(message, dict) and message.get("role") == "user"
+                ]
+                if not fallback_matches:
+                    raise RuntimeError("message repair did not preserve a current user turn")
+                current_turn_user_idx = fallback_matches[-1]
+            agent._persist_user_message_idx = current_turn_user_idx
+            return repairs
+        finally:
+            current_message.pop(marker_key, None)
+            for message in messages_to_repair:
+                if isinstance(message, dict):
+                    message.pop(marker_key, None)
     
     if not agent.quiet_mode:
         _print_preview = _summarize_user_message_for_log(user_message)
@@ -930,7 +1102,7 @@ def run_conversation(
             # context windows (each pass summarises the middle N turns).
             for _pass in range(3):
                 _orig_len = len(messages)
-                messages, active_system_prompt = agent._compress_context(
+                messages, active_system_prompt = _compress_context_for_current_turn(
                     messages, system_message, approx_tokens=_preflight_tokens,
                     task_id=effective_task_id,
                 )
@@ -1007,7 +1179,113 @@ def run_conversation(
     truncated_tool_call_retries = 0
     truncated_response_parts: List[str] = []
     compression_attempts = 0
+    ephemeral_user_context_request_committed = False
+    ephemeral_first_response_accepted = False
+    ephemeral_provider_attempt_binding_digest: str | None = None
+    ephemeral_provider_attempt_outcome_recorded = False
     _turn_exit_reason = "unknown"  # Diagnostic: why the loop ended
+
+    def _count_exact_ephemeral_context(value: Any) -> int:
+        if isinstance(value, str):
+            return value.count(ephemeral_user_context or "")
+        if isinstance(value, list):
+            return sum(_count_exact_ephemeral_context(item) for item in value)
+        if isinstance(value, dict):
+            return sum(_count_exact_ephemeral_context(item) for item in value.values())
+        return 0
+
+    def _validate_ephemeral_context_in_final_request(
+        final_api_kwargs: Dict[str, Any],
+    ) -> None:
+        if not isinstance(ephemeral_user_context, str) or not ephemeral_user_context:
+            raise RuntimeError("ephemeral user context is unavailable at dispatch")
+        request_messages = final_api_kwargs.get("messages")
+        if not isinstance(request_messages, list):
+            request_messages = final_api_kwargs.get("input")
+        if not isinstance(request_messages, list):
+            raise RuntimeError(
+                "provider request has no message collection for ephemeral context"
+            )
+        exact_occurrences = 0
+        for item in request_messages:
+            if not isinstance(item, dict) or item.get("role") != "user":
+                continue
+            exact_occurrences += _count_exact_ephemeral_context(item.get("content"))
+        if exact_occurrences != 1:
+            raise RuntimeError(
+                "final provider request does not contain exactly one unmodified "
+                "ephemeral user context"
+            )
+
+    def _commit_ephemeral_context_for_first_request(
+        *,
+        assembled: bool,
+        final_api_kwargs: Dict[str, Any],
+        provider_attempt_binding: dict[str, Any],
+    ) -> None:
+        nonlocal ephemeral_user_context_request_committed
+        nonlocal ephemeral_provider_attempt_binding_digest
+        if (
+            ephemeral_user_context_on_request is None
+            or ephemeral_user_context_request_committed
+        ):
+            return
+        if not assembled:
+            raise RuntimeError(
+                "ephemeral user context was not assembled into the provider request"
+            )
+        _validate_ephemeral_context_in_final_request(final_api_kwargs)
+        ephemeral_user_context_on_request(provider_attempt_binding)
+        ephemeral_provider_attempt_binding_digest = str(
+            provider_attempt_binding["providerAttemptBindingDigest"]
+        )
+        ephemeral_user_context_request_committed = True
+
+    def _record_ephemeral_provider_attempt_outcome(
+        status: str,
+        provider_attempt_binding_digest: str,
+        error_category: str | None = None,
+    ) -> None:
+        nonlocal ephemeral_provider_attempt_outcome_recorded
+        if not ephemeral_user_context_request_committed:
+            return
+        if ephemeral_provider_attempt_outcome_recorded:
+            return
+        if (
+            ephemeral_user_context_on_outcome is None
+            or ephemeral_provider_attempt_binding_digest is None
+        ):
+            raise RuntimeError("ephemeral provider attempt outcome callback is unavailable")
+        if provider_attempt_binding_digest != ephemeral_provider_attempt_binding_digest:
+            raise RuntimeError("ephemeral provider attempt outcome binding mismatch")
+        ephemeral_user_context_on_outcome(
+            status,
+            provider_attempt_binding_digest,
+            error_category,
+        )
+        ephemeral_provider_attempt_outcome_recorded = True
+
+    ephemeral_user_context_dispatch_handoff = (
+        RequestDispatchHandoff(
+            lambda binding, final_kwargs: _commit_ephemeral_context_for_first_request(
+                assembled=True,
+                final_api_kwargs=final_kwargs,
+                provider_attempt_binding=binding,
+            ),
+            interrupted=lambda: bool(agent._interrupt_requested),
+            interrupted_message=(
+                "Retrieval evidence request was abandoned before provider dispatch"
+            ),
+            max_attempts=1,
+            callback_accepts_attempt_binding=True,
+            outcome_callback=_record_ephemeral_provider_attempt_outcome,
+            configured_provider=str(configured_provider_for_turn or "unknown"),
+            configured_model=str(configured_model_for_turn or "unknown"),
+            allowed_provider_routes=snapshot_allowed_provider_routes(agent),
+        )
+        if ephemeral_user_context_on_request is not None
+        else None
+    )
 
     # Per-turn file-mutation verifier state.  Keyed by resolved path;
     # each failed ``write_file`` / ``patch`` call records the error
@@ -1082,6 +1360,24 @@ def run_conversation(
                 agent._safe_print("\n⚡ Breaking out of tool loop due to interrupt...")
             break
         
+        if (
+            ephemeral_user_context_request_committed
+            and not ephemeral_first_response_accepted
+        ):
+            agent._cleanup_task_resources(effective_task_id)
+            agent._persist_session(messages, conversation_history)
+            return {
+                "final_response": None,
+                "messages": messages,
+                "api_calls": api_call_count,
+                "completed": False,
+                "failed": True,
+                "error": (
+                    "retrieval evidence first provider response was not "
+                    "accepted; a clean follow-up request is forbidden"
+                ),
+            }
+
         api_call_count += 1
         provider_request_id = str(uuid.uuid4())
         agent._api_call_count = api_call_count
@@ -1207,7 +1503,7 @@ def run_conversation(
         # landed after an orphan tool result). Most providers return
         # empty content on malformed sequences, which would otherwise
         # retrigger the empty-retry loop indefinitely.
-        repaired_seq = agent._repair_message_sequence(messages)
+        repaired_seq = _repair_message_sequence_for_current_turn(messages)
         if repaired_seq > 0:
             request_logger.info(
                 "Repaired %s message-alternation violations before request (session=%s)",
@@ -1216,6 +1512,7 @@ def run_conversation(
             )
 
         api_messages = []
+        ephemeral_user_context_assembled = False
         for idx, msg in enumerate(messages):
             api_msg = msg.copy()
 
@@ -1226,6 +1523,11 @@ def run_conversation(
             # never mutated, so nothing leaks into session persistence.
             if idx == current_turn_user_idx and msg.get("role") == "user":
                 _injections = []
+                if (
+                    ephemeral_user_context
+                    and not ephemeral_user_context_request_committed
+                ):
+                    _injections.append(ephemeral_user_context)
                 if _ext_prefetch_cache:
                     _fenced = build_memory_context_block(_ext_prefetch_cache)
                     if _fenced:
@@ -1236,6 +1538,8 @@ def run_conversation(
                     _base = api_msg.get("content", "")
                     if isinstance(_base, str):
                         api_msg["content"] = _base + "\n\n" + "\n\n".join(_injections)
+                        if ephemeral_user_context:
+                            ephemeral_user_context_assembled = True
 
             # For ALL assistant messages, pass reasoning back to the API
             # This ensures multi-turn reasoning context is preserved
@@ -1447,6 +1751,7 @@ def run_conversation(
         provider_attempt_recorded = False
 
         while retry_count < max_retries:
+            ephemeral_dispatch_for_attempt = None
             # ── Nous Portal rate limit guard ──────────────────────
             # If another session already recorded that Nous is rate-
             # limited, skip the API call entirely.  Each attempt
@@ -1611,9 +1916,26 @@ def run_conversation(
                     provider_fallback_parent = provider_active_fallback_parent
                     provider_call_started_at = time.time()
                     provider_attempt_recorded = False
-                    response = agent._interruptible_streaming_api_call(
-                        api_kwargs, on_first_delta=_stop_spinner
-                    )
+                    if (
+                        ephemeral_user_context_dispatch_handoff is None
+                        or ephemeral_user_context_request_committed
+                    ):
+                        response = agent._interruptible_streaming_api_call(
+                            api_kwargs,
+                            on_first_delta=_stop_spinner,
+                        )
+                    else:
+                        ephemeral_dispatch_for_attempt = (
+                            ephemeral_user_context_dispatch_handoff
+                        )
+                        ephemeral_dispatch_for_attempt.bind_provider_call_identity(
+                            provider_call_id
+                        )
+                        response = agent._interruptible_streaming_api_call(
+                            api_kwargs,
+                            on_first_delta=_stop_spinner,
+                            on_request_dispatch=ephemeral_dispatch_for_attempt,
+                        )
                 else:
                     provider_call_id = str(uuid.uuid4())
                     provider_requested_model = agent.model
@@ -1633,8 +1955,39 @@ def run_conversation(
                     provider_fallback_parent = provider_active_fallback_parent
                     provider_call_started_at = time.time()
                     provider_attempt_recorded = False
-                    response = agent._interruptible_api_call(api_kwargs)
+                    if (
+                        ephemeral_user_context_dispatch_handoff is None
+                        or ephemeral_user_context_request_committed
+                    ):
+                        response = agent._interruptible_api_call(api_kwargs)
+                    else:
+                        ephemeral_dispatch_for_attempt = (
+                            ephemeral_user_context_dispatch_handoff
+                        )
+                        ephemeral_dispatch_for_attempt.bind_provider_call_identity(
+                            provider_call_id
+                        )
+                        response = agent._interruptible_api_call(
+                            api_kwargs,
+                            on_request_dispatch=ephemeral_dispatch_for_attempt,
+                        )
                 provider_call_completed_at = time.time()
+
+                if (
+                    ephemeral_dispatch_for_attempt is not None
+                    and ephemeral_dispatch_for_attempt.outcome_persistence_error
+                    is not None
+                ):
+                    agent._cleanup_task_resources(effective_task_id)
+                    agent._persist_session(messages, conversation_history)
+                    return {
+                        "final_response": None,
+                        "messages": messages,
+                        "api_calls": api_call_count,
+                        "completed": False,
+                        "failed": True,
+                        "error": "retrieval provider-attempt outcome persistence failed",
+                    }
                 
                 api_duration = time.time() - api_start_time
                 
@@ -1645,7 +1998,7 @@ def run_conversation(
                     thinking_spinner = None
                 if agent.thinking_callback:
                     agent.thinking_callback("")
-                
+
                 if not agent.quiet_mode:
                     agent._vprint(f"{agent.log_prefix}⏱️  API call completed in {api_duration:.2f}s")
                 
@@ -1761,6 +2114,26 @@ def run_conversation(
                         provider_call_id or provider_previous_call_id
                     )
                     provider_previous_fallback_index = provider_fallback_index
+
+                    if (
+                        ephemeral_dispatch_for_attempt is not None
+                        and ephemeral_user_context_request_committed
+                    ):
+                        # The SDK returned a response object/stream handle, so
+                        # the linked terminal outcome is already durable.  An
+                        # invalid response must not be remapped to a clean turn
+                        # or a fallback model while this evidence transaction
+                        # remains the source request.
+                        agent._cleanup_task_resources(effective_task_id)
+                        agent._persist_session(messages, conversation_history)
+                        return {
+                            "final_response": None,
+                            "messages": messages,
+                            "api_calls": api_call_count,
+                            "completed": False,
+                            "failed": True,
+                            "error": "retrieval evidence provider response was invalid",
+                        }
 
                     # Stop spinner silently — retry status is now buffered
                     # and only surfaced if every retry+fallback exhausts.
@@ -2131,6 +2504,23 @@ def run_conversation(
                         assistant_message = _trunc_msg
                         if assistant_message is not None and _trunc_has_tool_calls:
                             if truncated_tool_call_retries < 1:
+                                if (
+                                    ephemeral_user_context_request_committed
+                                    and not ephemeral_first_response_accepted
+                                ):
+                                    agent._cleanup_task_resources(effective_task_id)
+                                    agent._persist_session(messages, conversation_history)
+                                    return {
+                                        "final_response": None,
+                                        "messages": messages,
+                                        "api_calls": api_call_count,
+                                        "completed": False,
+                                        "failed": True,
+                                        "error": (
+                                            "retrieval evidence first provider response "
+                                            "was truncated; an unledgered retry is forbidden"
+                                        ),
+                                    }
                                 truncated_tool_call_retries += 1
                                 agent._buffer_vprint(
                                     f"⚠️  Truncated tool call detected — retrying API call..."
@@ -2175,6 +2565,7 @@ def run_conversation(
                         # First message was truncated - mark as failed
                         agent._flush_status_buffer()
                         agent._vprint(f"{agent.log_prefix}❌ First response truncated - cannot recover", force=True)
+                        agent._cleanup_task_resources(effective_task_id)
                         agent._persist_session(messages, conversation_history)
                         return {
                             "final_response": None,
@@ -2412,7 +2803,11 @@ def run_conversation(
 
             except InterruptedError:
                 provider_call_completed_at = time.time()
-                if not provider_attempt_recorded:
+                provider_dispatch_committed = (
+                    ephemeral_dispatch_for_attempt is None
+                    or ephemeral_dispatch_for_attempt.sdk_entry_intent_committed
+                )
+                if not provider_attempt_recorded and provider_dispatch_committed:
                     _record_provider_attempt(
                         agent,
                         None,
@@ -2435,15 +2830,36 @@ def run_conversation(
                         error_category="InterruptedError",
                     )
                     provider_attempt_recorded = True
-                provider_previous_call_id = (
-                    provider_call_id or provider_previous_call_id
-                )
-                provider_previous_fallback_index = provider_fallback_index
+                if provider_attempt_recorded:
+                    provider_previous_call_id = (
+                        provider_call_id or provider_previous_call_id
+                    )
+                    provider_previous_fallback_index = provider_fallback_index
+                elif ephemeral_dispatch_for_attempt is not None:
+                    provider_call_attempt = max(0, provider_call_attempt - 1)
                 if thinking_spinner:
                     thinking_spinner.stop("")
                     thinking_spinner = None
                 if agent.thinking_callback:
                     agent.thinking_callback("")
+                if (
+                    ephemeral_dispatch_for_attempt is not None
+                    and ephemeral_user_context_request_committed
+                ):
+                    agent._cleanup_task_resources(effective_task_id)
+                    agent._persist_session(messages, conversation_history)
+                    return {
+                        "final_response": None,
+                        "messages": messages,
+                        "api_calls": api_call_count,
+                        "completed": False,
+                        "failed": True,
+                        "interrupted": True,
+                        "error": (
+                            "retrieval evidence provider attempt was interrupted "
+                            "after dispatch handoff commitment"
+                        ),
+                    }
                 api_elapsed = time.time() - api_start_time
                 agent._vprint(f"{agent.log_prefix}⚡ Interrupted during API call.", force=True)
                 agent._persist_session(messages, conversation_history)
@@ -2453,7 +2869,11 @@ def run_conversation(
 
             except Exception as api_error:
                 provider_call_completed_at = time.time()
-                if not provider_attempt_recorded:
+                provider_dispatch_committed = (
+                    ephemeral_dispatch_for_attempt is None
+                    or ephemeral_dispatch_for_attempt.sdk_entry_intent_committed
+                )
+                if not provider_attempt_recorded and provider_dispatch_committed:
                     _record_provider_attempt(
                         agent,
                         None,
@@ -2476,10 +2896,13 @@ def run_conversation(
                         error_category=type(api_error).__name__,
                     )
                     provider_attempt_recorded = True
-                provider_previous_call_id = (
-                    provider_call_id or provider_previous_call_id
-                )
-                provider_previous_fallback_index = provider_fallback_index
+                if provider_attempt_recorded:
+                    provider_previous_call_id = (
+                        provider_call_id or provider_previous_call_id
+                    )
+                    provider_previous_fallback_index = provider_fallback_index
+                elif ephemeral_dispatch_for_attempt is not None:
+                    provider_call_attempt = max(0, provider_call_attempt - 1)
                 # Stop spinner silently — retry status is buffered and
                 # only flushed when every retry+fallback is exhausted.
                 if thinking_spinner:
@@ -2487,6 +2910,27 @@ def run_conversation(
                     thinking_spinner = None
                 if agent.thinking_callback:
                     agent.thinking_callback("")
+
+                if (
+                    ephemeral_dispatch_for_attempt is not None
+                    and ephemeral_user_context_request_committed
+                ):
+                    # The handoff owns the exact first-attempt outcome receipt.
+                    # Do not enter credential recovery, retry, fallback,
+                    # compression, or a later clean request from this error.
+                    agent._cleanup_task_resources(effective_task_id)
+                    agent._persist_session(messages, conversation_history)
+                    return {
+                        "final_response": None,
+                        "messages": messages,
+                        "api_calls": api_call_count,
+                        "completed": False,
+                        "failed": True,
+                        "error": (
+                            "retrieval evidence provider attempt ended after "
+                            f"dispatch commitment: {type(api_error).__name__}"
+                        ),
+                    }
 
                 # -----------------------------------------------------------
                 # UnicodeEncodeError recovery.  Two common causes:
@@ -3176,7 +3620,7 @@ def run_conversation(
                     compression_attempts += 1
                     if compression_attempts <= max_compression_attempts:
                         original_len = len(messages)
-                        messages, active_system_prompt = agent._compress_context(
+                        messages, active_system_prompt = _compress_context_for_current_turn(
                             messages, system_message,
                             approx_tokens=approx_tokens,
                             task_id=effective_task_id,
@@ -3350,7 +3794,7 @@ def run_conversation(
                     agent._buffer_status(f"⚠️  Request payload too large (413) — compression attempt {compression_attempts}/{max_compression_attempts}...")
 
                     original_len = len(messages)
-                    messages, active_system_prompt = agent._compress_context(
+                    messages, active_system_prompt = _compress_context_for_current_turn(
                         messages, system_message, approx_tokens=approx_tokens,
                         task_id=effective_task_id,
                     )
@@ -3506,7 +3950,7 @@ def run_conversation(
                     agent._buffer_status(f"🗜️ Context too large (~{approx_tokens:,} tokens) — compressing ({compression_attempts}/{max_compression_attempts})...")
 
                     original_len = len(messages)
-                    messages, active_system_prompt = agent._compress_context(
+                    messages, active_system_prompt = _compress_context_for_current_turn(
                         messages, system_message, approx_tokens=approx_tokens,
                         task_id=effective_task_id,
                     )
@@ -4371,6 +4815,12 @@ def run_conversation(
                                 pass
                     break
 
+                # Tool validation, canonical assistant construction, durable
+                # message append, and actual tool execution all succeeded.
+                # This is the first nonterminal point where a clean
+                # tool-result continuation is authorized.
+                ephemeral_first_response_accepted = True
+
                 # Reset per-turn retry counters after successful tool
                 # execution so a single truncation doesn't poison the
                 # entire conversation.
@@ -4424,7 +4874,7 @@ def run_conversation(
 
                 if agent.compression_enabled and _compressor.should_compress(_real_tokens):
                     agent._safe_print("  ⟳ compacting context…")
-                    messages, active_system_prompt = agent._compress_context(
+                    messages, active_system_prompt = _compress_context_for_current_turn(
                         messages, system_message,
                         approx_tokens=agent.context_compressor.last_prompt_tokens,
                         task_id=effective_task_id,
@@ -4770,6 +5220,10 @@ def run_conversation(
                     messages.pop()
 
                 messages.append(final_msg)
+                # Final text is accepted only after normalization, canonical
+                # assistant construction, and history append have succeeded.
+                # ``_safe_print`` below is non-raising by contract.
+                ephemeral_first_response_accepted = True
                 
                 _turn_exit_reason = f"text_response(finish_reason={finish_reason})"
                 if not agent.quiet_mode:
@@ -4833,6 +5287,24 @@ def run_conversation(
                 messages.append({"role": "assistant", "content": final_response})
                 break
     
+    if (
+        ephemeral_user_context_request_committed
+        and not ephemeral_first_response_accepted
+    ):
+        agent._cleanup_task_resources(effective_task_id)
+        agent._persist_session(messages, conversation_history)
+        return {
+            "final_response": None,
+            "messages": messages,
+            "api_calls": api_call_count,
+            "completed": False,
+            "failed": True,
+            "error": (
+                "retrieval evidence first provider response was not accepted; "
+                "a clean follow-up request is forbidden"
+            ),
+        }
+
     if final_response is None and (
         api_call_count >= agent.max_iterations
         or agent.iteration_budget.remaining <= 0

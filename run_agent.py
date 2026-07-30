@@ -51,7 +51,7 @@ import threading
 from types import SimpleNamespace
 import urllib.request
 import uuid
-from typing import List, Dict, Any, Optional
+from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import urlparse, parse_qs, urlunparse
 # NOTE: `from openai import OpenAI` is deliberately NOT at module top — the
 # SDK pulls ~240 ms of imports. We expose `OpenAI` as a thin proxy object
@@ -2927,15 +2927,37 @@ class AIAgent:
                 exc,
             )
 
-    def _run_codex_stream(self, api_kwargs: dict, client: Any = None, on_first_delta: callable = None):
+    def _run_codex_stream(
+        self,
+        api_kwargs: dict,
+        client: Any = None,
+        on_first_delta: callable = None,
+        on_request_dispatch: callable = None,
+    ):
         """Forwarder — see ``agent.codex_runtime.run_codex_stream``."""
         from agent.codex_runtime import run_codex_stream
-        return run_codex_stream(self, api_kwargs, client, on_first_delta)
+        return run_codex_stream(
+            self,
+            api_kwargs,
+            client,
+            on_first_delta,
+            on_request_dispatch=on_request_dispatch,
+        )
 
-    def _run_codex_create_stream_fallback(self, api_kwargs: dict, client: Any = None):
+    def _run_codex_create_stream_fallback(
+        self,
+        api_kwargs: dict,
+        client: Any = None,
+        on_request_dispatch: callable = None,
+    ):
         """Forwarder — see ``agent.codex_runtime.run_codex_create_stream_fallback``."""
         from agent.codex_runtime import run_codex_create_stream_fallback
-        return run_codex_create_stream_fallback(self, api_kwargs, client)
+        return run_codex_create_stream_fallback(
+            self,
+            api_kwargs,
+            client,
+            on_request_dispatch=on_request_dispatch,
+        )
 
     def _try_refresh_codex_client_credentials(self, *, force: bool = True) -> bool:
         if self.api_mode != "codex_responses" or self.provider not in {"openai-codex", "xai-oauth"}:
@@ -3123,19 +3145,19 @@ class AIAgent:
             return False
 
         try:
-            self._anthropic_client.close()
-        except Exception:
-            pass
-
-        try:
-            self._anthropic_client = build_anthropic_client(
+            replacement_client = build_anthropic_client(
                 new_token,
                 getattr(self, "_anthropic_base_url", None),
                 timeout=get_provider_request_timeout(self.provider, self.model),
             )
         except Exception as exc:
             logger.warning("Failed to rebuild Anthropic client after credential refresh: %s", exc)
-            return False
+            raise RuntimeError(
+                "Failed to prepare refreshed Anthropic request client"
+            ) from exc
+
+        previous_client = self._anthropic_client
+        self._anthropic_client = replacement_client
 
         self._anthropic_api_key = new_token
         # Update OAuth flag — token type may have changed (API key ↔ OAuth).
@@ -3144,6 +3166,10 @@ class AIAgent:
         # identity-injection guard).
         from agent.anthropic_adapter import _is_oauth_token
         self._is_anthropic_oauth = _is_oauth_token(new_token) if self.provider == "anthropic" else False
+        try:
+            previous_client.close()
+        except Exception:
+            pass
         return True
 
     def _apply_client_headers_for_base_url(self, base_url: str) -> None:
@@ -3243,10 +3269,51 @@ class AIAgent:
             return False
         return pool.has_available()
 
-    def _anthropic_messages_create(self, api_kwargs: dict):
+    def _anthropic_messages_create(
+        self,
+        api_kwargs: dict,
+        *,
+        on_request_dispatch: callable = None,
+    ):
+        from agent.request_dispatch import (
+            coerce_request_dispatch_handoff,
+            endpoint_identity_for_dispatch,
+            provider_leaf_adapter_identity,
+            require_authoritative_leaf_adapter,
+        )
+
         if self.api_mode == "anthropic_messages":
             self._try_refresh_anthropic_client_credentials()
-        return self._anthropic_client.messages.create(**api_kwargs)
+        anthropic_client = self._anthropic_client
+        dispatch_handoff = coerce_request_dispatch_handoff(
+            on_request_dispatch,
+            interrupted=lambda: bool(self._interrupt_requested),
+            interrupted_message="Anthropic request was abandoned before provider dispatch",
+        )
+        return dispatch_handoff.commit_and_claim_dispatch(
+            lambda bound_kwargs: anthropic_client.messages.create(
+                **bound_kwargs
+            ),
+            provider=str(self.provider or "unknown"),
+            api_mode=str(self.api_mode or "anthropic_messages"),
+            model=str(api_kwargs.get("model") or self.model or "unknown"),
+            sdk_method="anthropic.messages.create",
+            leaf_adapter=(
+                require_authoritative_leaf_adapter(anthropic_client)
+                if dispatch_handoff.requires_exact_provider_attempt_binding
+                else provider_leaf_adapter_identity(anthropic_client)
+            ),
+            endpoint_identity=endpoint_identity_for_dispatch(
+                anthropic_client,
+                provider=str(self.provider or "unknown"),
+                configured_base_url=getattr(self, "_anthropic_base_url", ""),
+                require_exact=(
+                    dispatch_handoff.requires_exact_provider_attempt_binding
+                ),
+            ),
+            fallback_index=int(getattr(self, "_fallback_index", 0) or 0),
+            request_kwargs=api_kwargs,
+        )
 
     def _rebuild_anthropic_client(self) -> None:
         """Rebuild the Anthropic client after an interrupt or stale call.
@@ -3274,10 +3341,19 @@ class AIAgent:
                 drop_context_1m_beta=_drop_1m,
             )
 
-    def _interruptible_api_call(self, api_kwargs: dict):
+    def _interruptible_api_call(
+        self,
+        api_kwargs: dict,
+        *,
+        on_request_dispatch: callable = None,
+    ):
         """Forwarder — see ``agent.chat_completion_helpers.interruptible_api_call``."""
         from agent.chat_completion_helpers import interruptible_api_call
-        return interruptible_api_call(self, api_kwargs)
+        return interruptible_api_call(
+            self,
+            api_kwargs,
+            on_request_dispatch=on_request_dispatch,
+        )
 
     # ── Unified streaming API call ─────────────────────────────────────────
 
@@ -3446,11 +3522,20 @@ class AIAgent:
         )
 
     def _interruptible_streaming_api_call(
-        self, api_kwargs: dict, *, on_first_delta: callable = None
+        self,
+        api_kwargs: dict,
+        *,
+        on_first_delta: callable = None,
+        on_request_dispatch: callable = None,
     ):
         """Forwarder — see ``agent.chat_completion_helpers.interruptible_streaming_api_call``."""
         from agent.chat_completion_helpers import interruptible_streaming_api_call
-        return interruptible_streaming_api_call(self, api_kwargs, on_first_delta=on_first_delta)
+        return interruptible_streaming_api_call(
+            self,
+            api_kwargs,
+            on_first_delta=on_first_delta,
+            on_request_dispatch=on_request_dispatch,
+        )
 
     def _try_activate_fallback(self, reason: "FailoverReason | None" = None) -> bool:
         """Forwarder — see ``agent.chat_completion_helpers.try_activate_fallback``."""
@@ -4365,6 +4450,13 @@ class AIAgent:
         task_id: str = None,
         stream_callback: Optional[callable] = None,
         persist_user_message: Optional[str] = None,
+        ephemeral_user_context: Optional[str] = None,
+        ephemeral_user_context_on_request: Optional[
+            Callable[[dict[str, Any]], None]
+        ] = None,
+        ephemeral_user_context_on_outcome: Optional[
+            Callable[[str, str, Optional[str]], None]
+        ] = None,
     ) -> Dict[str, Any]:
         """Forwarder — see ``agent.conversation_loop.run_conversation``."""
         from agent.conversation_loop import run_conversation
@@ -4397,6 +4489,9 @@ class AIAgent:
                 task_id,
                 stream_callback,
                 persist_user_message,
+                ephemeral_user_context,
+                ephemeral_user_context_on_request,
+                ephemeral_user_context_on_outcome,
             )
 
     def chat(self, message: str, stream_callback: Optional[callable] = None) -> str:

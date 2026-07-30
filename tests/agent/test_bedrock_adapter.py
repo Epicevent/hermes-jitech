@@ -11,6 +11,7 @@ Covers:
 
 import json
 import os
+import threading
 import time
 from contextlib import contextmanager
 from types import ModuleType, SimpleNamespace
@@ -890,6 +891,85 @@ class TestClientCache:
         assert len(_bedrock_runtime_client_cache) == 0
         assert len(_bedrock_control_client_cache) == 0
 
+    def test_runtime_factory_caches_created_client(self, monkeypatch):
+        from agent import bedrock_adapter
+
+        bedrock_adapter.reset_client_cache()
+        exact_client = type("BedrockRuntime", (), {})()
+        boto3 = SimpleNamespace(client=MagicMock(return_value=exact_client))
+        botocore_module = ModuleType("botocore")
+        config_module = ModuleType("botocore.config")
+        config_module.Config = MagicMock(return_value="fixture-config")
+        botocore_module.config = config_module
+
+        monkeypatch.setattr(bedrock_adapter, "_require_boto3", lambda: boto3)
+        with patch.dict(
+            "sys.modules",
+            {
+                "botocore": botocore_module,
+                "botocore.config": config_module,
+            },
+        ):
+            observed = bedrock_adapter._get_bedrock_runtime_client("eu-west-1")
+        assert observed is exact_client
+
+    def test_runtime_factory_serializes_concurrent_creation_and_registration(
+        self,
+        monkeypatch,
+    ):
+        from agent import bedrock_adapter
+
+        bedrock_adapter.reset_client_cache()
+        exact_client = type("BedrockRuntime", (), {})()
+        factory_started = threading.Event()
+        release_factory = threading.Event()
+        factory_calls = []
+        results = []
+        errors = []
+
+        def create_client(service_name, **_kwargs):
+            factory_calls.append(service_name)
+            factory_started.set()
+            assert release_factory.wait(timeout=5)
+            return exact_client
+
+        boto3 = SimpleNamespace(client=create_client)
+        botocore_module = ModuleType("botocore")
+        config_module = ModuleType("botocore.config")
+        config_module.Config = MagicMock(return_value="fixture-config")
+        botocore_module.config = config_module
+        monkeypatch.setattr(bedrock_adapter, "_require_boto3", lambda: boto3)
+
+        def get_client():
+            try:
+                results.append(
+                    bedrock_adapter._get_bedrock_runtime_client("eu-west-1")
+                )
+            except BaseException as exc:
+                errors.append(exc)
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "botocore": botocore_module,
+                "botocore.config": config_module,
+            },
+        ):
+            first = threading.Thread(target=get_client, daemon=True)
+            second = threading.Thread(target=get_client, daemon=True)
+            first.start()
+            assert factory_started.wait(timeout=5)
+            second.start()
+            time.sleep(0.05)
+            assert factory_calls == ["bedrock-runtime"]
+            release_factory.set()
+            first.join(timeout=5)
+            second.join(timeout=5)
+
+        assert not errors
+        assert results == [exact_client, exact_client]
+        assert factory_calls == ["bedrock-runtime"]
+
 
 # ---------------------------------------------------------------------------
 # Streaming with callbacks
@@ -1280,7 +1360,10 @@ class TestInvalidateRuntimeClient:
         _bedrock_runtime_client_cache["us-east-1"] = "dead-client"
         _bedrock_runtime_client_cache["us-west-2"] = "live-client"
 
-        evicted = invalidate_runtime_client("us-east-1")
+        evicted = invalidate_runtime_client(
+            "us-east-1",
+            expected_client="dead-client",
+        )
 
         assert evicted is True
         assert "us-east-1" not in _bedrock_runtime_client_cache
@@ -1289,7 +1372,167 @@ class TestInvalidateRuntimeClient:
     def test_returns_false_when_region_not_cached(self):
         from agent.bedrock_adapter import invalidate_runtime_client, reset_client_cache
         reset_client_cache()
-        assert invalidate_runtime_client("eu-west-1") is False
+        assert invalidate_runtime_client(
+            "eu-west-1",
+            expected_client=object(),
+        ) is False
+
+    def test_requires_the_exact_expected_client_argument(self):
+        from agent.bedrock_adapter import invalidate_runtime_client
+
+        with pytest.raises(TypeError, match="expected_client"):
+            invalidate_runtime_client("eu-west-1")  # type: ignore[call-arg]
+
+    def test_stale_old_client_cannot_evict_healthy_replacement(self):
+        from agent import bedrock_adapter
+
+        bedrock_adapter.reset_client_cache()
+        old_client = type("BedrockRuntime", (), {})()
+        replacement = type("BedrockRuntime", (), {})()
+        region = "eu-west-1"
+        bedrock_adapter._bedrock_runtime_client_cache[region] = old_client
+
+        assert bedrock_adapter.invalidate_runtime_client(
+            region,
+            expected_client=old_client,
+        )
+        bedrock_adapter._bedrock_runtime_client_cache[region] = replacement
+
+        assert not bedrock_adapter.invalidate_runtime_client(
+            region,
+            expected_client=old_client,
+        )
+        assert bedrock_adapter._bedrock_runtime_client_cache[region] is replacement
+
+    @staticmethod
+    def _dispatch_agent() -> SimpleNamespace:
+        return SimpleNamespace(
+            last_provider_receipt=None,
+            _interrupt_requested=False,
+            api_mode="bedrock_converse",
+            provider="bedrock",
+            model="anthropic.claude-test-v1:0",
+            _fallback_index=0,
+            _base_url_lower="",
+            _base_url_hostname="",
+            _compute_non_stream_stale_timeout=lambda _kwargs: 60.0,
+            _touch_activity=lambda _message: None,
+            _abort_request_openai_client=lambda *_args, **_kwargs: None,
+            _close_request_openai_client=lambda *_args, **_kwargs: None,
+            _buffer_status=lambda _message: None,
+            _has_stream_consumers=lambda: False,
+            _fire_stream_delta=lambda _text: None,
+            _fire_tool_gen_started=lambda _name: None,
+            _fire_reasoning_delta=lambda _text: None,
+            reasoning_callback=None,
+            stream_delta_callback=None,
+        )
+
+    def test_nonstream_dispatch_invalidates_only_the_exact_failing_client(self):
+        from agent.chat_completion_helpers import interruptible_api_call
+
+        stale = ConnectionError("stale bedrock connection")
+        client = MagicMock()
+        client.converse.side_effect = stale
+        invalidate = MagicMock(return_value=True)
+        with (
+            patch(
+                "agent.bedrock_adapter._get_bedrock_runtime_client",
+                return_value=client,
+            ),
+            patch(
+                "agent.bedrock_adapter.is_stale_connection_error",
+                return_value=True,
+            ),
+            patch(
+                "agent.bedrock_adapter.invalidate_runtime_client",
+                invalidate,
+            ),
+            pytest.raises(ConnectionError, match="stale bedrock connection"),
+        ):
+            interruptible_api_call(
+                self._dispatch_agent(),
+                {
+                    "model": "anthropic.claude-test-v1:0",
+                    "messages": [],
+                    "__bedrock_region__": "eu-west-1",
+                    "__bedrock_converse__": True,
+                },
+            )
+
+        invalidate.assert_called_once_with("eu-west-1", expected_client=client)
+
+    def test_stream_dispatch_invalidates_only_the_exact_failing_client(self):
+        from agent.chat_completion_helpers import interruptible_streaming_api_call
+
+        stale = ConnectionError("stale bedrock stream")
+        client = MagicMock()
+        client.converse_stream.side_effect = stale
+        invalidate = MagicMock(return_value=True)
+        with (
+            patch(
+                "agent.bedrock_adapter._get_bedrock_runtime_client",
+                return_value=client,
+            ),
+            patch(
+                "agent.bedrock_adapter.is_stale_connection_error",
+                return_value=True,
+            ),
+            patch(
+                "agent.bedrock_adapter.invalidate_runtime_client",
+                invalidate,
+            ),
+            pytest.raises(ConnectionError, match="stale bedrock stream"),
+        ):
+            interruptible_streaming_api_call(
+                self._dispatch_agent(),
+                {
+                    "model": "anthropic.claude-test-v1:0",
+                    "messages": [],
+                    "__bedrock_region__": "eu-west-1",
+                    "__bedrock_converse__": True,
+                },
+            )
+
+        invalidate.assert_called_once_with("eu-west-1", expected_client=client)
+
+    def test_lazy_stream_failure_invalidates_only_the_exact_failing_client(self):
+        from agent.chat_completion_helpers import interruptible_streaming_api_call
+
+        stale = ConnectionError("stale lazy bedrock event stream")
+        client = MagicMock()
+        client.converse_stream.return_value = {"stream": object()}
+        invalidate = MagicMock(return_value=True)
+        with (
+            patch(
+                "agent.bedrock_adapter._get_bedrock_runtime_client",
+                return_value=client,
+            ),
+            patch(
+                "agent.bedrock_adapter.stream_converse_with_callbacks",
+                side_effect=stale,
+            ),
+            patch(
+                "agent.bedrock_adapter.is_stale_connection_error",
+                return_value=True,
+            ),
+            patch(
+                "agent.bedrock_adapter.invalidate_runtime_client",
+                invalidate,
+            ),
+            pytest.raises(ConnectionError, match="stale lazy bedrock event stream"),
+        ):
+            interruptible_streaming_api_call(
+                self._dispatch_agent(),
+                {
+                    "model": "anthropic.claude-test-v1:0",
+                    "messages": [],
+                    "__bedrock_region__": "eu-west-1",
+                    "__bedrock_converse__": True,
+                },
+            )
+
+        invalidate.assert_called_once_with("eu-west-1", expected_client=client)
 
 
 class TestIsStaleConnectionError:

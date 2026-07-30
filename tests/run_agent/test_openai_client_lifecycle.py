@@ -153,6 +153,48 @@ def test_stale_non_stream_close_is_single_owner(monkeypatch):
     assert request_client.close_calls == 1
 
 
+def test_stored_ordinary_response_beats_watchdog_while_worker_closes(monkeypatch):
+    response = {"ok": "billed-response"}
+    close_started = threading.Event()
+
+    class SlowCloseRequestClient(FakeRequestClient):
+        def close(self):
+            close_started.set()
+            time.sleep(0.5)
+            super().close()
+
+    request_client = SlowCloseRequestClient(lambda **kwargs: response)
+    factory = OpenAIFactory([request_client])
+    monkeypatch.setattr(run_agent, "OpenAI", factory)
+
+    agent = _build_agent()
+    agent._compute_non_stream_stale_timeout = lambda api_payload: 0.01
+
+    result = agent._interruptible_api_call({"model": agent.model, "messages": []})
+
+    assert close_started.is_set()
+    assert result is response
+    assert request_client.close_calls == 1
+
+
+def test_watchdog_wins_before_late_ordinary_response(monkeypatch):
+    def late_response(**kwargs):
+        time.sleep(0.5)
+        return {"too_late": True}
+
+    request_client = FakeRequestClient(late_response)
+    factory = OpenAIFactory([request_client])
+    monkeypatch.setattr(run_agent, "OpenAI", factory)
+
+    agent = _build_agent()
+    agent._compute_non_stream_stale_timeout = lambda api_payload: 0.01
+
+    with pytest.raises(TimeoutError, match="timed out"):
+        agent._interruptible_api_call({"model": agent.model, "messages": []})
+
+    assert request_client.close_calls == 1
+
+
 def test_closed_shared_client_is_recreated_before_request(monkeypatch):
     stale_shared = FakeSharedClient(lambda **kwargs: (_ for _ in ()).throw(AssertionError("stale shared client used")))
     stale_shared._client.is_closed = True

@@ -25,6 +25,21 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 
+from agent.request_dispatch import (
+    RequestDispatchHandoff,
+    snapshot_allowed_provider_routes,
+)
+
+
+def _stream_test_client():
+    from openai import OpenAI
+
+    client = OpenAI(api_key="fixture-key", base_url="https://example.com/v1")
+    client.chat = SimpleNamespace(
+        completions=SimpleNamespace(create=MagicMock())
+    )
+    return client
+
 
 # ── Helpers (mirrors test_partial_stream_finish_reason.py) ────────────────
 
@@ -43,6 +58,7 @@ def _make_agent():
         api_key="test-key",
         base_url="https://example.com/v1",
         model="test/model",
+        provider="openrouter",
         quiet_mode=True,
         skip_context_files=True,
         skip_memory=True,
@@ -102,11 +118,24 @@ class TestKillEscalation:
         with escalation the turn must fail within stale + grace, not 19.5
         minutes."""
         release = threading.Event()
-        mock_client = MagicMock()
+        mock_client = _stream_test_client()
         mock_client.chat.completions.create.side_effect = (
             lambda *a, **kw: _BlockingStream(release)
         )
         mock_create.return_value = mock_client
+
+        # This test exercises watchdog/dispatch arbitration, not provider-leaf
+        # capability.  Production OpenAI leaves intentionally fail closed for
+        # retrieval evidence until an atomic serialized-request adapter exists.
+        def require_synthetic_atomic_test_boundary(client):
+            if client is mock_client:
+                return "tests.fixture.AtomicSerializedRequestAdapter"
+            raise AssertionError("unexpected provider client in watchdog fixture")
+
+        monkeypatch.setattr(
+            "agent.chat_completion_helpers.require_authoritative_leaf_adapter",
+            require_synthetic_atomic_test_boundary,
+        )
 
         monkeypatch.setenv("HERMES_STREAM_STALE_TIMEOUT", "0.5")
         monkeypatch.setenv("HERMES_STREAM_KILL_GRACE_SECONDS", "0.4")
@@ -115,11 +144,43 @@ class TestKillEscalation:
         agent = _make_agent()
         statuses = []
         monkeypatch.setattr(agent, "_buffer_status", lambda m: statuses.append(m))
+        outcome_attempts = []
+
+        def fail_outcome(status, digest, error_category):
+            outcome_attempts.append((status, digest, error_category))
+            raise OSError("outcome fsync failed")
+
+        handoff = RequestDispatchHandoff(
+            lambda _binding, _kwargs: None,
+            interrupted=lambda: bool(agent._interrupt_requested),
+            interrupted_message="stale stream abandoned before dispatch",
+            max_attempts=1,
+            callback_accepts_attempt_binding=True,
+            outcome_callback=fail_outcome,
+            configured_provider=str(agent.provider or "unknown"),
+            configured_model=agent.model,
+            allowed_provider_routes=snapshot_allowed_provider_routes(agent),
+        )
+        handoff.bind_provider_call_identity(
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        )
+        abandon_calls = []
+        original_abandon = handoff.abandon
+
+        def observed_abandon(**kwargs) -> bool:
+            result = original_abandon(**kwargs)
+            abandon_calls.append(result)
+            return result
+
+        handoff.abandon = observed_abandon  # type: ignore[method-assign]
 
         start = time.time()
         try:
             with pytest.raises(TimeoutError, match="stream abandoned"):
-                agent._interruptible_streaming_api_call({})
+                agent._interruptible_streaming_api_call(
+                    {},
+                    on_request_dispatch=handoff,
+                )
         finally:
             release.set()  # let the abandoned daemon worker exit
         elapsed = time.time() - start
@@ -132,6 +193,17 @@ class TestKillEscalation:
         assert mock_abort.call_count >= 2
         assert any("abandon" in s.lower() for s in statuses), (
             "user-visible status must say the stalled stream was abandoned"
+        )
+        assert handoff.state == "dispatch_owned"
+        assert handoff.sdk_entry_intent_committed is True
+        assert handoff.future_attempts_closed is True
+        assert handoff.terminal_outcome_status == "unknown"
+        assert isinstance(handoff.outcome_persistence_error, OSError)
+        assert len(outcome_attempts) == 1
+        assert outcome_attempts[0][0] == "unknown"
+        assert outcome_attempts[0][2] == "WatchdogTimeout"
+        assert abandon_calls == [False], (
+            "terminal escalation must close future attempts through the shared handoff"
         )
 
         # Zombie safety: once the worker wakes it must self-clean — the
@@ -163,7 +235,7 @@ class TestKillEscalation:
             _BlockingStream(release, exc=httpx.ReadTimeout("simulated kill")),
             iter([_make_stream_chunk(content="ok", finish_reason="stop")]),
         ]
-        mock_client = MagicMock()
+        mock_client = _stream_test_client()
         mock_client.chat.completions.create.side_effect = (
             lambda *a, **kw: streams.pop(0)
         )
@@ -213,7 +285,7 @@ class TestKillEscalation:
             _BlockingStream(release, exc=httpx.ReadTimeout("simulated kill")),
             iter([_make_stream_chunk(content="ok", finish_reason="stop")]),
         ]
-        mock_client = MagicMock()
+        mock_client = _stream_test_client()
         mock_client.chat.completions.create.side_effect = (
             lambda *a, **kw: streams.pop(0)
         )
