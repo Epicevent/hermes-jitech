@@ -1039,9 +1039,11 @@ def test_provider_outcome_file_swap_after_replay_read_fails_closed(
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX public path binding contract")
+@pytest.mark.parametrize("replacement_kind", ["directory", "symlink"])
 def test_provider_outcome_publication_parent_swap_before_final_file_check(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    replacement_kind: str,
 ) -> None:
     from plugins.kwrag_slot.consumer import (
         FileConsumptionReceiptSink,
@@ -1069,11 +1071,14 @@ def test_provider_outcome_publication_parent_swap_before_final_file_check(
         if write_finished and not swapped:
             swapped = True
             outcome_root.rename(detached_root)
-            outcome_root.mkdir(mode=0o700)
-            outcome_root.chmod(0o700)
-            replacement = outcome_root / outcome_name
-            replacement.write_bytes(b"")
-            replacement.chmod(0o600)
+            if replacement_kind == "symlink":
+                os.symlink(detached_root, outcome_root, target_is_directory=True)
+            else:
+                outcome_root.mkdir(mode=0o700)
+                outcome_root.chmod(0o700)
+                replacement = outcome_root / outcome_name
+                replacement.write_bytes(b"")
+                replacement.chmod(0o600)
         original_assert_file(*args, **kwargs)
 
     monkeypatch.setattr(sink, "_write_all", observe_write)
@@ -1089,14 +1094,19 @@ def test_provider_outcome_publication_parent_swap_before_final_file_check(
         )
 
     assert swapped is True
-    assert (outcome_root / outcome_name).read_bytes() == b""
+    if replacement_kind == "symlink":
+        assert outcome_root.is_symlink()
+    else:
+        assert (outcome_root / outcome_name).read_bytes() == b""
     assert list(detached_root.iterdir()) == []
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX public path binding contract")
+@pytest.mark.parametrize("replacement_kind", ["directory", "symlink"])
 def test_provider_outcome_replay_parent_swap_before_final_file_check(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    replacement_kind: str,
 ) -> None:
     from plugins.kwrag_slot.consumer import (
         FileConsumptionReceiptSink,
@@ -1127,11 +1137,14 @@ def test_provider_outcome_replay_parent_swap_before_final_file_check(
         if read_finished and not swapped:
             swapped = True
             outcome_root.rename(detached_root)
-            outcome_root.mkdir(mode=0o700)
-            outcome_root.chmod(0o700)
-            replacement = outcome_root / outcome_name
-            replacement.write_bytes(b"")
-            replacement.chmod(0o600)
+            if replacement_kind == "symlink":
+                os.symlink(detached_root, outcome_root, target_is_directory=True)
+            else:
+                outcome_root.mkdir(mode=0o700)
+                outcome_root.chmod(0o700)
+                replacement = outcome_root / outcome_name
+                replacement.write_bytes(b"")
+                replacement.chmod(0o600)
         original_assert_file(*args, **kwargs)
 
     monkeypatch.setattr(sink, "_read_all", observe_read)
@@ -1144,7 +1157,10 @@ def test_provider_outcome_replay_parent_swap_before_final_file_check(
         sink.write_once(identity, receipt)
 
     assert swapped is True
-    assert (outcome_root / outcome_name).read_bytes() == b""
+    if replacement_kind == "symlink":
+        assert outcome_root.is_symlink()
+    else:
+        assert (outcome_root / outcome_name).read_bytes() == b""
     assert (detached_root / outcome_name).read_bytes() == (
         canonical_json_bytes(receipt) + b"\n"
     )
@@ -1299,9 +1315,11 @@ def test_consumption_receipt_file_swap_during_final_parent_check_rolls_back(
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX public path binding contract")
+@pytest.mark.parametrize("replacement_kind", ["directory", "symlink"])
 def test_consumption_receipt_parent_swap_before_final_file_check_rolls_back(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    replacement_kind: str,
 ) -> None:
     from plugins.kwrag_slot.consumer import (
         FileConsumptionReceiptSink,
@@ -1329,10 +1347,13 @@ def test_consumption_receipt_parent_swap_before_final_file_check_rolls_back(
         if write_finished and not swapped:
             swapped = True
             receipt_parent.rename(detached_parent)
-            receipt_parent.mkdir(mode=0o700)
-            receipt_parent.chmod(0o700)
-            receipt_path.write_bytes(b"")
-            receipt_path.chmod(0o600)
+            if replacement_kind == "symlink":
+                os.symlink(detached_parent, receipt_parent, target_is_directory=True)
+            else:
+                receipt_parent.mkdir(mode=0o700)
+                receipt_parent.chmod(0o700)
+                receipt_path.write_bytes(b"")
+                receipt_path.chmod(0o600)
         original_assert_file(*args, **kwargs)
 
     monkeypatch.setattr(sink, "_write_all", observe_write)
@@ -1345,7 +1366,10 @@ def test_consumption_receipt_parent_swap_before_final_file_check_rolls_back(
         sink.write({"schema_version": "fixture-consumption-v1"})
 
     assert swapped is True
-    assert receipt_path.read_bytes() == b""
+    if replacement_kind == "symlink":
+        assert receipt_parent.is_symlink()
+    else:
+        assert receipt_path.read_bytes() == b""
     assert list(detached_parent.iterdir()) == []
 
 

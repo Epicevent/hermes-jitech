@@ -222,24 +222,58 @@ class FileConsumptionReceiptSink:
         ):
             raise OSError("consumption receipt file was substituted")
 
-    @staticmethod
-    def _assert_public_file_path_identity(
-        path: Path,
-        expected: tuple[int, int],
-        *,
-        label: str,
+    def _assert_public_receipt_path_identity(
+        self,
+        expected_parent: tuple[int, int],
+        expected_file: tuple[int, int],
     ) -> None:
-        """Linearize success against the artifact's current public pathname."""
+        """Linearize receipt publication through a fully no-follow path walk."""
 
-        info = os.stat(path, follow_symlinks=False)
-        if (
-            not stat.S_ISREG(info.st_mode)
-            or info.st_nlink != 1
-            or info.st_uid != _effective_user_id()
-            or stat.S_IMODE(info.st_mode) != 0o600
-            or (info.st_dev, info.st_ino) != expected
-        ):
-            raise OSError(f"{label} public pathname was substituted")
+        opened, parent = self._open_existing_posix_receipt_parent()
+        try:
+            parent_info = os.fstat(parent)
+            if (parent_info.st_dev, parent_info.st_ino) != expected_parent:
+                raise OSError("consumption receipt parent was substituted")
+            self._assert_receipt_file_path_identity(parent, expected_file)
+        finally:
+            for descriptor in reversed(opened):
+                os.close(descriptor)
+
+    def _assert_public_outcome_path_identity(
+        self,
+        *,
+        expected_parent: tuple[int, int],
+        outcome_root_name: str,
+        expected_outcome_root: tuple[int, int],
+        outcome_name: str,
+        expected_file: tuple[int, int],
+    ) -> None:
+        """Linearize outcome publication through a fully no-follow path walk."""
+
+        opened, parent = self._open_existing_posix_receipt_parent()
+        try:
+            parent_info = os.fstat(parent)
+            if (parent_info.st_dev, parent_info.st_ino) != expected_parent:
+                raise OSError("consumption receipt parent was substituted")
+            flags = (
+                os.O_RDONLY
+                | os.O_DIRECTORY
+                | os.O_NOFOLLOW
+                | getattr(os, "O_CLOEXEC", 0)
+            )
+            outcome_directory = os.open(outcome_root_name, flags, dir_fd=parent)
+            opened.append(outcome_directory)
+            root_info = os.fstat(outcome_directory)
+            if (root_info.st_dev, root_info.st_ino) != expected_outcome_root:
+                raise OSError("provider attempt outcome directory was substituted")
+            self._assert_named_outcome_file_identity(
+                outcome_directory,
+                outcome_name,
+                expected_file,
+            )
+        finally:
+            for descriptor in reversed(opened):
+                os.close(descriptor)
 
     @staticmethod
     def _assert_named_directory_identity(
@@ -376,10 +410,9 @@ class FileConsumptionReceiptSink:
                             parent,
                             receipt_identity,
                         )
-                        self._assert_public_file_path_identity(
-                            self._path,
+                        self._assert_public_receipt_path_identity(
+                            parent_identity,
                             receipt_identity,
-                            label="consumption receipt file",
                         )
                     except BaseException:
                         os.ftruncate(descriptor, original_size)
@@ -528,10 +561,12 @@ class FileConsumptionReceiptSink:
                         outcome_name,
                         outcome_file_identity,
                     )
-                    self._assert_public_file_path_identity(
-                        outcome_root / outcome_name,
-                        outcome_file_identity,
-                        label="provider attempt outcome file",
+                    self._assert_public_outcome_path_identity(
+                        expected_parent=self._trusted_parent_identity,
+                        outcome_root_name=outcome_root.name,
+                        expected_outcome_root=outcome_root_identity,
+                        outcome_name=outcome_name,
+                        expected_file=outcome_file_identity,
                     )
                 finally:
                     os.close(descriptor)
@@ -566,10 +601,12 @@ class FileConsumptionReceiptSink:
                         outcome_name,
                         outcome_file_identity,
                     )
-                    self._assert_public_file_path_identity(
-                        outcome_root / outcome_name,
-                        outcome_file_identity,
-                        label="provider attempt outcome file",
+                    self._assert_public_outcome_path_identity(
+                        expected_parent=self._trusted_parent_identity,
+                        outcome_root_name=outcome_root.name,
+                        expected_outcome_root=outcome_root_identity,
+                        outcome_name=outcome_name,
+                        expected_file=outcome_file_identity,
                     )
                 except BaseException:
                     os.ftruncate(descriptor, 0)

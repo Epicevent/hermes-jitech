@@ -1442,6 +1442,98 @@ class TestInvalidateRuntimeClient:
         )
         assert bedrock_adapter._bedrock_runtime_client_cache[region] is replacement
 
+    @staticmethod
+    def _dispatch_agent() -> SimpleNamespace:
+        return SimpleNamespace(
+            last_provider_receipt=None,
+            _interrupt_requested=False,
+            api_mode="bedrock_converse",
+            provider="bedrock",
+            model="anthropic.claude-test-v1:0",
+            _fallback_index=0,
+            _base_url_lower="",
+            _base_url_hostname="",
+            _compute_non_stream_stale_timeout=lambda _kwargs: 60.0,
+            _touch_activity=lambda _message: None,
+            _abort_request_openai_client=lambda *_args, **_kwargs: None,
+            _close_request_openai_client=lambda *_args, **_kwargs: None,
+            _buffer_status=lambda _message: None,
+            _has_stream_consumers=lambda: False,
+            _fire_stream_delta=lambda _text: None,
+            _fire_tool_gen_started=lambda _name: None,
+            _fire_reasoning_delta=lambda _text: None,
+            reasoning_callback=None,
+            stream_delta_callback=None,
+        )
+
+    def test_nonstream_dispatch_invalidates_only_the_exact_failing_client(self):
+        from agent.chat_completion_helpers import interruptible_api_call
+
+        stale = ConnectionError("stale bedrock connection")
+        client = MagicMock()
+        client.converse.side_effect = stale
+        invalidate = MagicMock(return_value=True)
+        with (
+            patch(
+                "agent.bedrock_adapter._get_bedrock_runtime_client",
+                return_value=client,
+            ),
+            patch(
+                "agent.bedrock_adapter.is_stale_connection_error",
+                return_value=True,
+            ),
+            patch(
+                "agent.bedrock_adapter.invalidate_runtime_client",
+                invalidate,
+            ),
+            pytest.raises(ConnectionError, match="stale bedrock connection"),
+        ):
+            interruptible_api_call(
+                self._dispatch_agent(),
+                {
+                    "model": "anthropic.claude-test-v1:0",
+                    "messages": [],
+                    "__bedrock_region__": "eu-west-1",
+                    "__bedrock_converse__": True,
+                },
+            )
+
+        invalidate.assert_called_once_with("eu-west-1", expected_client=client)
+
+    def test_stream_dispatch_invalidates_only_the_exact_failing_client(self):
+        from agent.chat_completion_helpers import interruptible_streaming_api_call
+
+        stale = ConnectionError("stale bedrock stream")
+        client = MagicMock()
+        client.converse_stream.side_effect = stale
+        invalidate = MagicMock(return_value=True)
+        with (
+            patch(
+                "agent.bedrock_adapter._get_bedrock_runtime_client",
+                return_value=client,
+            ),
+            patch(
+                "agent.bedrock_adapter.is_stale_connection_error",
+                return_value=True,
+            ),
+            patch(
+                "agent.bedrock_adapter.invalidate_runtime_client",
+                invalidate,
+            ),
+            pytest.raises(ConnectionError, match="stale bedrock stream"),
+        ):
+            interruptible_streaming_api_call(
+                self._dispatch_agent(),
+                {
+                    "model": "anthropic.claude-test-v1:0",
+                    "messages": [],
+                    "__bedrock_region__": "eu-west-1",
+                    "__bedrock_converse__": True,
+                },
+            )
+
+        invalidate.assert_called_once_with("eu-west-1", expected_client=client)
+
 
 class TestIsStaleConnectionError:
     """Classifier that decides whether an exception warrants client eviction."""

@@ -384,7 +384,7 @@ def interruptible_api_call(agent, api_kwargs: dict, *, on_request_dispatch=None)
                     # Evict the cached client on stale-connection failures
                     # so the outer retry loop builds a fresh client/pool.
                     if is_stale_connection_error(_bedrock_exc):
-                        invalidate_runtime_client(region)
+                        invalidate_runtime_client(region, expected_client=client)
                     raise
                 result["response"] = normalize_converse_response(raw_response)
             else:
@@ -1881,7 +1881,7 @@ def interruptible_streaming_api_call(
                     # Evict the cached client on stale-connection failures
                     # so the outer retry loop builds a fresh client/pool.
                     if is_stale_connection_error(_bedrock_exc):
-                        invalidate_runtime_client(region)
+                        invalidate_runtime_client(region, expected_client=client)
                     raise
 
                 def _on_text(text):
