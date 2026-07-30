@@ -61,7 +61,11 @@ _bedrock_runtime_client_cache: Dict[str, Any] = {}
 _bedrock_control_client_cache: Dict[str, Any] = {}
 _bedrock_runtime_client_identity_cache: Dict[
     int,
-    Tuple[weakref.ReferenceType[Any], type[Any]],
+    Tuple[
+        weakref.ReferenceType[Any],
+        type[Any],
+        Tuple[Tuple[str, Any], ...],
+    ],
 ] = {}
 _bedrock_client_cache_lock = threading.RLock()
 
@@ -160,6 +164,7 @@ def _validate_generated_bedrock_runtime_leaf(client: Any) -> type[Any]:
 
 def _register_bedrock_runtime_client(client: Any) -> None:
     expected_type = _validate_generated_bedrock_runtime_leaf(client)
+    base_implementation = tuple(sorted(expected_type.__bases__[0].__dict__.items()))
     client_id = id(client)
 
     def remove_dead(reference: weakref.ReferenceType[Any]) -> None:
@@ -169,7 +174,11 @@ def _register_bedrock_runtime_client(client: Any) -> None:
                 _bedrock_runtime_client_identity_cache.pop(client_id, None)
 
     reference = weakref.ref(client, remove_dead)
-    _bedrock_runtime_client_identity_cache[client_id] = (reference, expected_type)
+    _bedrock_runtime_client_identity_cache[client_id] = (
+        reference,
+        expected_type,
+        base_implementation,
+    )
 
 
 def _get_bedrock_runtime_client(region: str):
@@ -199,11 +208,22 @@ def is_authoritative_bedrock_runtime_client(client: Any) -> bool:
         registered = _bedrock_runtime_client_identity_cache.get(id(client))
         if registered is None:
             return False
-        reference, expected_type = registered
+        reference, expected_type, base_implementation = registered
         if reference() is not client or type(client) is not expected_type:
             return False
         try:
-            return _validate_generated_bedrock_runtime_leaf(client) is expected_type
+            if _validate_generated_bedrock_runtime_leaf(client) is not expected_type:
+                return False
+            current_base = tuple(
+                sorted(expected_type.__bases__[0].__dict__.items())
+            )
+            return len(current_base) == len(base_implementation) and all(
+                current_name == expected_name and current_value is expected_value
+                for (current_name, current_value), (
+                    expected_name,
+                    expected_value,
+                ) in zip(current_base, base_implementation)
+            )
         except (ImportError, TypeError):
             return False
 

@@ -952,6 +952,7 @@ class TestClientCache:
         _bedrock_runtime_client_identity_cache[id(dummy)] = (
             weakref.ref(dummy),
             type(dummy),
+            tuple(sorted(type(dummy).__bases__[0].__dict__.items())),
         )
         _bedrock_control_client_cache["test"] = "dummy"
         reset_client_cache()
@@ -993,6 +994,33 @@ class TestClientCache:
             assert not bedrock_adapter.is_authoritative_bedrock_runtime_client(
                 exact_client
             )
+
+    def test_registered_leaf_rejects_inherited_dispatch_mutation_until_restored(
+        self,
+    ):
+        from agent import bedrock_adapter
+
+        bedrock_adapter.reset_client_cache()
+        client, client_type, botocore_module, client_module = (
+            _synthetic_bedrock_runtime_leaf()
+        )
+        base_client = client_type.__bases__[0]
+        original_make_api_call = base_client._make_api_call
+        with patch.dict(
+            "sys.modules",
+            {"botocore": botocore_module, "botocore.client": client_module},
+        ):
+            bedrock_adapter._register_bedrock_runtime_client(client)
+            assert bedrock_adapter.is_authoritative_bedrock_runtime_client(client)
+
+            base_client._make_api_call = lambda self, operation_name, kwargs: (
+                operation_name,
+                {**kwargs, "modelId": "substituted"},
+            )
+            assert not bedrock_adapter.is_authoritative_bedrock_runtime_client(client)
+
+            base_client._make_api_call = original_make_api_call
+            assert bedrock_adapter.is_authoritative_bedrock_runtime_client(client)
 
     @pytest.mark.parametrize("spoof_kind", ["subclass", "reshaped"])
     def test_runtime_factory_rejects_non_generated_leaf_before_cache(

@@ -920,6 +920,21 @@ def test_bedrock_snapshot_and_live_leaf_bind_the_same_regional_endpoint(
         route["endpointIdentity"]
     )
 
+    base_client = client_type.__bases__[0]
+    original_make_api_call = base_client._make_api_call
+    sdk_call = MagicMock()
+    base_client._make_api_call = lambda self, operation_name, kwargs: (
+        operation_name,
+        {**kwargs, "modelId": "substituted"},
+    )
+    with pytest.raises(FinalProviderBindingUnsupported):
+        require_authoritative_leaf_adapter(client)
+    sdk_call.assert_not_called()
+    base_client._make_api_call = original_make_api_call
+    assert require_authoritative_leaf_adapter(client) == (
+        "botocore.client.BedrockRuntime"
+    )
+
     spoof_type = type(
         "BedrockRuntime",
         (client_type,),
