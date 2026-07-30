@@ -1040,7 +1040,7 @@ def test_provider_outcome_file_swap_after_replay_read_fails_closed(
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX public path binding contract")
 @pytest.mark.parametrize("replacement_kind", ["directory", "symlink"])
-def test_provider_outcome_publication_parent_swap_before_final_file_check(
+def test_provider_outcome_publication_detach_after_parent_open_fails_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     replacement_kind: str,
@@ -1056,19 +1056,12 @@ def test_provider_outcome_publication_parent_swap_before_final_file_check(
     outcome_root = tmp_path / "outcome-public-parent-swap.jsonl.outcomes"
     detached_root = tmp_path / "detached-publication-outcomes"
     outcome_name = "9" * 64 + ".json"
-    original_write_all = sink._write_all
-    original_assert_file = sink._assert_named_outcome_file_identity
-    write_finished = False
+    original_public_open = sink._open_public_file_no_symlinks
     swapped = False
 
-    def observe_write(descriptor: int, raw: bytes) -> None:
-        nonlocal write_finished
-        original_write_all(descriptor, raw)
-        write_finished = True
-
-    def swap_before_relative_file_check(*args, **kwargs) -> None:
+    def swap_after_parent_open(path: Path) -> int:
         nonlocal swapped
-        if write_finished and not swapped:
+        if not swapped:
             swapped = True
             outcome_root.rename(detached_root)
             if replacement_kind == "symlink":
@@ -1079,13 +1072,12 @@ def test_provider_outcome_publication_parent_swap_before_final_file_check(
                 replacement = outcome_root / outcome_name
                 replacement.write_bytes(b"")
                 replacement.chmod(0o600)
-        original_assert_file(*args, **kwargs)
+        return original_public_open(path)
 
-    monkeypatch.setattr(sink, "_write_all", observe_write)
     monkeypatch.setattr(
         sink,
-        "_assert_named_outcome_file_identity",
-        swap_before_relative_file_check,
+        "_open_public_file_no_symlinks",
+        swap_after_parent_open,
     )
     with pytest.raises(HermesSlotRetrievalError, match="persisted safely"):
         sink.write_once(
@@ -1103,7 +1095,7 @@ def test_provider_outcome_publication_parent_swap_before_final_file_check(
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX public path binding contract")
 @pytest.mark.parametrize("replacement_kind", ["directory", "symlink"])
-def test_provider_outcome_replay_parent_swap_before_final_file_check(
+def test_provider_outcome_replay_detach_after_parent_open_fails_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     replacement_kind: str,
@@ -1121,20 +1113,12 @@ def test_provider_outcome_replay_parent_swap_before_final_file_check(
     outcome_root = tmp_path / "outcome-replay-parent-swap.jsonl.outcomes"
     detached_root = tmp_path / "detached-replay-outcomes"
     outcome_name = "a" * 64 + ".json"
-    original_read_all = sink._read_all
-    original_assert_file = sink._assert_named_outcome_file_identity
-    read_finished = False
+    original_public_open = sink._open_public_file_no_symlinks
     swapped = False
 
-    def observe_read(descriptor: int) -> bytes:
-        nonlocal read_finished
-        raw = original_read_all(descriptor)
-        read_finished = True
-        return raw
-
-    def swap_before_relative_file_check(*args, **kwargs) -> None:
+    def swap_after_parent_open(path: Path) -> int:
         nonlocal swapped
-        if read_finished and not swapped:
+        if not swapped:
             swapped = True
             outcome_root.rename(detached_root)
             if replacement_kind == "symlink":
@@ -1145,13 +1129,12 @@ def test_provider_outcome_replay_parent_swap_before_final_file_check(
                 replacement = outcome_root / outcome_name
                 replacement.write_bytes(b"")
                 replacement.chmod(0o600)
-        original_assert_file(*args, **kwargs)
+        return original_public_open(path)
 
-    monkeypatch.setattr(sink, "_read_all", observe_read)
     monkeypatch.setattr(
         sink,
-        "_assert_named_outcome_file_identity",
-        swap_before_relative_file_check,
+        "_open_public_file_no_symlinks",
+        swap_after_parent_open,
     )
     with pytest.raises(HermesSlotRetrievalError, match="persisted safely"):
         sink.write_once(identity, receipt)
@@ -1316,7 +1299,7 @@ def test_consumption_receipt_file_swap_during_final_parent_check_rolls_back(
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX public path binding contract")
 @pytest.mark.parametrize("replacement_kind", ["directory", "symlink"])
-def test_consumption_receipt_parent_swap_before_final_file_check_rolls_back(
+def test_consumption_receipt_detach_after_parent_open_rolls_back(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     replacement_kind: str,
@@ -1332,19 +1315,12 @@ def test_consumption_receipt_parent_swap_before_final_file_check_rolls_back(
     detached_parent = tmp_path / "detached-public-ledger"
     receipt_path = receipt_parent / "consumption.jsonl"
     sink = FileConsumptionReceiptSink(receipt_path)
-    original_write_all = sink._write_all
-    original_assert_file = sink._assert_receipt_file_path_identity
-    write_finished = False
+    original_public_open = sink._open_public_file_no_symlinks
     swapped = False
 
-    def observe_write(descriptor: int, raw: bytes) -> None:
-        nonlocal write_finished
-        original_write_all(descriptor, raw)
-        write_finished = True
-
-    def swap_before_relative_file_check(*args, **kwargs) -> None:
+    def swap_after_parent_open(path: Path) -> int:
         nonlocal swapped
-        if write_finished and not swapped:
+        if not swapped:
             swapped = True
             receipt_parent.rename(detached_parent)
             if replacement_kind == "symlink":
@@ -1354,13 +1330,12 @@ def test_consumption_receipt_parent_swap_before_final_file_check_rolls_back(
                 receipt_parent.chmod(0o700)
                 receipt_path.write_bytes(b"")
                 receipt_path.chmod(0o600)
-        original_assert_file(*args, **kwargs)
+        return original_public_open(path)
 
-    monkeypatch.setattr(sink, "_write_all", observe_write)
     monkeypatch.setattr(
         sink,
-        "_assert_receipt_file_path_identity",
-        swap_before_relative_file_check,
+        "_open_public_file_no_symlinks",
+        swap_after_parent_open,
     )
     with pytest.raises(HermesSlotRetrievalError, match="approved POSIX ledger"):
         sink.write({"schema_version": "fixture-consumption-v1"})

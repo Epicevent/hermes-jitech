@@ -7,11 +7,14 @@ stopping, prompt assembly, and whether returned evidence is shown to a model.
 
 from __future__ import annotations
 
+import ctypes
+import errno
 import hashlib
 import json
 import os
 import re
 import stat
+import sys
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -222,58 +225,71 @@ class FileConsumptionReceiptSink:
         ):
             raise OSError("consumption receipt file was substituted")
 
-    def _assert_public_receipt_path_identity(
+    @staticmethod
+    def _open_public_file_no_symlinks(path: Path) -> int:
+        """Open one complete Linux pathname without following any symlink."""
+
+        if sys.platform != "linux":
+            raise OSError(
+                errno.ENOTSUP,
+                "openat2 public-path verification is unavailable",
+            )
+        machine = os.uname().machine.lower()
+        if machine not in {"x86_64", "amd64", "aarch64", "arm64"}:
+            raise OSError(
+                errno.ENOTSUP,
+                f"openat2 syscall number is not bound for {machine}",
+            )
+
+        class _OpenHow(ctypes.Structure):
+            _fields_ = [
+                ("flags", ctypes.c_uint64),
+                ("mode", ctypes.c_uint64),
+                ("resolve", ctypes.c_uint64),
+            ]
+
+        # openat2 is syscall 437 on the customer amd64/arm64 Linux targets.
+        syscall_openat2 = 437
+        at_fdcwd = -100
+        resolve_no_symlinks = 0x04
+        flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+        how = _OpenHow(flags=flags, mode=0, resolve=resolve_no_symlinks)
+        raw_path = os.fsencode(os.path.abspath(os.fspath(path)))
+        libc = ctypes.CDLL(None, use_errno=True)
+        descriptor = libc.syscall(
+            ctypes.c_long(syscall_openat2),
+            ctypes.c_int(at_fdcwd),
+            ctypes.c_char_p(raw_path),
+            ctypes.byref(how),
+            ctypes.c_size_t(ctypes.sizeof(how)),
+        )
+        if descriptor < 0:
+            error_number = ctypes.get_errno()
+            raise OSError(error_number, os.strerror(error_number), raw_path)
+        return int(descriptor)
+
+    def _assert_public_file_path_identity(
         self,
-        expected_parent: tuple[int, int],
+        path: Path,
         expected_file: tuple[int, int],
-    ) -> None:
-        """Linearize receipt publication through a fully no-follow path walk."""
-
-        opened, parent = self._open_existing_posix_receipt_parent()
-        try:
-            parent_info = os.fstat(parent)
-            if (parent_info.st_dev, parent_info.st_ino) != expected_parent:
-                raise OSError("consumption receipt parent was substituted")
-            self._assert_receipt_file_path_identity(parent, expected_file)
-        finally:
-            for descriptor in reversed(opened):
-                os.close(descriptor)
-
-    def _assert_public_outcome_path_identity(
-        self,
         *,
-        expected_parent: tuple[int, int],
-        outcome_root_name: str,
-        expected_outcome_root: tuple[int, int],
-        outcome_name: str,
-        expected_file: tuple[int, int],
+        label: str,
     ) -> None:
-        """Linearize outcome publication through a fully no-follow path walk."""
+        """Linearize a full public path and file inode in one openat2 lookup."""
 
-        opened, parent = self._open_existing_posix_receipt_parent()
+        descriptor = self._open_public_file_no_symlinks(path)
         try:
-            parent_info = os.fstat(parent)
-            if (parent_info.st_dev, parent_info.st_ino) != expected_parent:
-                raise OSError("consumption receipt parent was substituted")
-            flags = (
-                os.O_RDONLY
-                | os.O_DIRECTORY
-                | os.O_NOFOLLOW
-                | getattr(os, "O_CLOEXEC", 0)
-            )
-            outcome_directory = os.open(outcome_root_name, flags, dir_fd=parent)
-            opened.append(outcome_directory)
-            root_info = os.fstat(outcome_directory)
-            if (root_info.st_dev, root_info.st_ino) != expected_outcome_root:
-                raise OSError("provider attempt outcome directory was substituted")
-            self._assert_named_outcome_file_identity(
-                outcome_directory,
-                outcome_name,
-                expected_file,
-            )
+            info = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_nlink != 1
+                or info.st_uid != _effective_user_id()
+                or stat.S_IMODE(info.st_mode) != 0o600
+                or (info.st_dev, info.st_ino) != expected_file
+            ):
+                raise OSError(f"{label} public pathname was substituted")
         finally:
-            for descriptor in reversed(opened):
-                os.close(descriptor)
+            os.close(descriptor)
 
     @staticmethod
     def _assert_named_directory_identity(
@@ -410,9 +426,10 @@ class FileConsumptionReceiptSink:
                             parent,
                             receipt_identity,
                         )
-                        self._assert_public_receipt_path_identity(
-                            parent_identity,
+                        self._assert_public_file_path_identity(
+                            self._path,
                             receipt_identity,
+                            label="consumption receipt file",
                         )
                     except BaseException:
                         os.ftruncate(descriptor, original_size)
@@ -561,12 +578,10 @@ class FileConsumptionReceiptSink:
                         outcome_name,
                         outcome_file_identity,
                     )
-                    self._assert_public_outcome_path_identity(
-                        expected_parent=self._trusted_parent_identity,
-                        outcome_root_name=outcome_root.name,
-                        expected_outcome_root=outcome_root_identity,
-                        outcome_name=outcome_name,
-                        expected_file=outcome_file_identity,
+                    self._assert_public_file_path_identity(
+                        outcome_root / outcome_name,
+                        outcome_file_identity,
+                        label="provider attempt outcome file",
                     )
                 finally:
                     os.close(descriptor)
@@ -601,12 +616,10 @@ class FileConsumptionReceiptSink:
                         outcome_name,
                         outcome_file_identity,
                     )
-                    self._assert_public_outcome_path_identity(
-                        expected_parent=self._trusted_parent_identity,
-                        outcome_root_name=outcome_root.name,
-                        expected_outcome_root=outcome_root_identity,
-                        outcome_name=outcome_name,
-                        expected_file=outcome_file_identity,
+                    self._assert_public_file_path_identity(
+                        outcome_root / outcome_name,
+                        outcome_file_identity,
+                        label="provider attempt outcome file",
                     )
                 except BaseException:
                     os.ftruncate(descriptor, 0)
