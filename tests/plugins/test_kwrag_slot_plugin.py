@@ -814,6 +814,43 @@ def test_public_path_identity_rejects_fifo_without_blocking_and_final_symlink(
         )
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux O_PATH replay contract")
+def test_provider_outcome_replay_rejects_fifo_without_blocking(
+    tmp_path: Path,
+) -> None:
+    from plugins.kwrag_slot.consumer import (
+        FileConsumptionReceiptSink,
+        HermesSlotRetrievalError,
+    )
+
+    tmp_path.chmod(0o700)
+    sink = FileConsumptionReceiptSink(tmp_path / "fifo-replay.jsonl")
+    identity = "sha256:" + "f" * 64
+    receipt = {"schema_version": "fixture-outcome-v1", "status": "unknown"}
+    outcome_root = tmp_path / "fifo-replay.jsonl.outcomes"
+    outcome_root.mkdir(mode=0o700)
+    outcome_root.chmod(0o700)
+    outcome_path = outcome_root / ("f" * 64 + ".json")
+    os.mkfifo(outcome_path, mode=0o600)
+    outcome_path.chmod(0o600)
+    observed: list[BaseException] = []
+    completed = threading.Event()
+
+    def replay_fifo() -> None:
+        try:
+            sink.write_once(identity, receipt)
+        except BaseException as exc:
+            observed.append(exc)
+        finally:
+            completed.set()
+
+    worker = threading.Thread(target=replay_fifo, daemon=True)
+    worker.start()
+    assert completed.wait(timeout=1.0), "outcome replay blocked opening a FIFO"
+    assert len(observed) == 1
+    assert isinstance(observed[0], HermesSlotRetrievalError)
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX single-link contract")
 def test_provider_outcome_sink_rejects_hardlinked_existing_receipt(
     tmp_path: Path,

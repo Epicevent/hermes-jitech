@@ -330,6 +330,51 @@ class FileConsumptionReceiptSink:
         ):
             raise OSError("provider attempt outcome file was substituted")
 
+    def _open_existing_outcome_for_read(
+        self,
+        parent: int,
+        name: str,
+    ) -> tuple[int, tuple[int, int]]:
+        """Pin a regular replay leaf with O_PATH before opening its content."""
+
+        if sys.platform != "linux":
+            raise OSError(
+                errno.ENOTSUP,
+                "provider attempt outcome replay requires Linux O_PATH",
+            )
+        o_path = getattr(os, "O_PATH", None)
+        if o_path is None:
+            raise OSError(errno.ENOTSUP, "Linux O_PATH is unavailable")
+        identity_descriptor = os.open(
+            name,
+            o_path | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=parent,
+        )
+        try:
+            self._verify_outcome_file(
+                identity_descriptor,
+                require_owner_mode=True,
+            )
+            identity_info = os.fstat(identity_descriptor)
+            identity = (identity_info.st_dev, identity_info.st_ino)
+            descriptor = os.open(
+                f"/proc/self/fd/{identity_descriptor}",
+                os.O_RDONLY | getattr(os, "O_CLOEXEC", 0),
+            )
+            try:
+                self._verify_outcome_file(descriptor, require_owner_mode=True)
+                readable_info = os.fstat(descriptor)
+                if (readable_info.st_dev, readable_info.st_ino) != identity:
+                    raise OSError(
+                        "provider attempt outcome replay inode changed"
+                    )
+            except BaseException:
+                os.close(descriptor)
+                raise
+            return descriptor, identity
+        finally:
+            os.close(identity_descriptor)
+
     def _append_receipt_posix(
         self,
         raw: bytes,
@@ -526,37 +571,13 @@ class FileConsumptionReceiptSink:
                     dir_fd=outcome_directory,
                 )
             except FileExistsError:
-                existing_info = os.stat(
-                    outcome_name,
-                    dir_fd=outcome_directory,
-                    follow_symlinks=False,
-                )
-                if (
-                    not stat.S_ISREG(existing_info.st_mode)
-                    or existing_info.st_nlink != 1
-                    or existing_info.st_uid != _effective_user_id()
-                    or stat.S_IMODE(existing_info.st_mode) != 0o600
-                ):
-                    raise OSError("existing provider attempt outcome identity is invalid")
-                descriptor = os.open(
-                    outcome_name,
-                    os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
-                    dir_fd=outcome_directory,
+                descriptor, outcome_file_identity = (
+                    self._open_existing_outcome_for_read(
+                        outcome_directory,
+                        outcome_name,
+                    )
                 )
                 try:
-                    self._verify_outcome_file(descriptor, require_owner_mode=True)
-                    descriptor_info = os.fstat(descriptor)
-                    outcome_file_identity = (
-                        descriptor_info.st_dev,
-                        descriptor_info.st_ino,
-                    )
-                    if outcome_file_identity != (
-                        existing_info.st_dev,
-                        existing_info.st_ino,
-                    ):
-                        raise OSError(
-                            "existing provider attempt outcome was substituted"
-                        )
                     self._assert_named_outcome_file_identity(
                         outcome_directory,
                         outcome_name,
