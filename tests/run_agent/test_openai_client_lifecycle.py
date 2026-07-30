@@ -157,6 +157,8 @@ def test_stale_non_stream_close_is_single_owner(monkeypatch):
 def test_stored_ordinary_response_beats_watchdog_while_worker_closes(monkeypatch):
     response = {"ok": "billed-response"}
     close_started = threading.Event()
+    close_release = threading.Event()
+    close_completed = threading.Event()
     watchdog_clock_observed = threading.Event()
     real_time = time.time
     clock_start = real_time()
@@ -181,8 +183,10 @@ def test_stored_ordinary_response_beats_watchdog_while_worker_closes(monkeypatch
     class SlowCloseRequestClient(FakeRequestClient):
         def close(self):
             close_started.set()
-            time.sleep(0.5)
+            if not close_release.wait(timeout=5):
+                raise AssertionError("watchdog arbitration did not release client close")
             super().close()
+            close_completed.set()
 
     request_client = SlowCloseRequestClient(lambda **kwargs: response)
     factory = OpenAIFactory([request_client])
@@ -191,11 +195,17 @@ def test_stored_ordinary_response_beats_watchdog_while_worker_closes(monkeypatch
     agent = _build_agent()
     agent._compute_non_stream_stale_timeout = lambda api_payload: 0.01
 
-    result = agent._interruptible_api_call({"model": agent.model, "messages": []})
+    try:
+        result = agent._interruptible_api_call({"model": agent.model, "messages": []})
 
-    assert close_started.is_set()
-    assert watchdog_clock_observed.is_set()
-    assert result is response
+        assert close_started.is_set()
+        assert watchdog_clock_observed.is_set()
+        assert not close_completed.is_set()
+        assert result is response
+    finally:
+        close_release.set()
+
+    assert close_completed.wait(timeout=2)
     assert request_client.close_calls == 1
 
 
