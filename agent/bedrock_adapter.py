@@ -56,6 +56,7 @@ except Exception:
 
 _bedrock_runtime_client_cache: Dict[str, Any] = {}
 _bedrock_control_client_cache: Dict[str, Any] = {}
+_bedrock_runtime_client_identity_cache: Dict[str, Tuple[Any, type]] = {}
 
 
 def _require_boto3():
@@ -80,12 +81,23 @@ def _get_bedrock_runtime_client(region: str):
         boto3 = _require_boto3()
         from botocore.config import Config
 
-        _bedrock_runtime_client_cache[region] = boto3.client(
+        client = boto3.client(
             "bedrock-runtime",
             region_name=region,
             config=Config(retries={"total_max_attempts": 1, "mode": "standard"}),
         )
+        _bedrock_runtime_client_cache[region] = client
+        _bedrock_runtime_client_identity_cache[region] = (client, type(client))
     return _bedrock_runtime_client_cache[region]
+
+
+def is_authoritative_bedrock_runtime_client(client: Any) -> bool:
+    """Return whether *client* is the exact leaf created by our boto3 factory."""
+
+    return any(
+        registered is client and type(client) is registered_type
+        for registered, registered_type in _bedrock_runtime_client_identity_cache.values()
+    )
 
 
 def _get_bedrock_control_client(region: str):
@@ -101,6 +113,7 @@ def _get_bedrock_control_client(region: str):
 def reset_client_cache():
     """Clear cached boto3 clients. Used in tests and profile switches."""
     _bedrock_runtime_client_cache.clear()
+    _bedrock_runtime_client_identity_cache.clear()
     _bedrock_control_client_cache.clear()
 
 
@@ -117,6 +130,7 @@ def invalidate_runtime_client(region: str) -> bool:
     """
     existed = region in _bedrock_runtime_client_cache
     _bedrock_runtime_client_cache.pop(region, None)
+    _bedrock_runtime_client_identity_cache.pop(region, None)
     return existed
 
 

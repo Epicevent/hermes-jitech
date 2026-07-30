@@ -830,6 +830,8 @@ def test_malformed_live_endpoint_cannot_fall_back_to_configured_identity() -> No
 def test_bedrock_snapshot_and_live_leaf_bind_the_same_regional_endpoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from agent import bedrock_adapter
+
     agent = SimpleNamespace(
         provider="bedrock",
         model="anthropic.claude-test-v1:0",
@@ -850,15 +852,22 @@ def test_bedrock_snapshot_and_live_leaf_bind_the_same_regional_endpoint(
         endpoint_url="https://bedrock-runtime.eu-west-1.amazonaws.com",
         service_model=SimpleNamespace(service_name="bedrock-runtime"),
     )
+    monkeypatch.setitem(
+        bedrock_adapter._bedrock_runtime_client_identity_cache,
+        "eu-west-1",
+        (client, type(client)),
+    )
 
-    def import_exact_botocore_module(module_name: str):
-        if module_name != "botocore.client":
-            raise ImportError(f"unexpected provider SDK module: {module_name}")
-        return SimpleNamespace(BaseClient=base_client)
+    def import_exact_bedrock_modules(module_name: str):
+        if module_name == "botocore.client":
+            return SimpleNamespace(BaseClient=base_client)
+        if module_name == "agent.bedrock_adapter":
+            return bedrock_adapter
+        raise ImportError(f"unexpected provider SDK module: {module_name}")
 
     monkeypatch.setattr(
         "agent.request_dispatch.importlib.import_module",
-        import_exact_botocore_module,
+        import_exact_bedrock_modules,
     )
 
     assert require_authoritative_leaf_adapter(client) == (
@@ -867,3 +876,13 @@ def test_bedrock_snapshot_and_live_leaf_bind_the_same_regional_endpoint(
     assert provider_endpoint_identity(client, provider="bedrock") == (
         route["endpointIdentity"]
     )
+
+    spoof_type = type(
+        "BedrockRuntime",
+        (base_client,),
+        {"__module__": "botocore.client"},
+    )
+    spoof = spoof_type()
+    spoof.meta = client.meta
+    with pytest.raises(FinalProviderBindingUnsupported):
+        require_authoritative_leaf_adapter(spoof)

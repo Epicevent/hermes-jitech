@@ -191,14 +191,20 @@ def require_authoritative_leaf_adapter(client: Any) -> str:
     if identity == "botocore.client.BedrockRuntime":
         try:
             base_client = getattr(importlib.import_module("botocore.client"), "BaseClient")
+            authoritative = getattr(
+                importlib.import_module("agent.bedrock_adapter"),
+                "is_authoritative_bedrock_runtime_client",
+            )
         except (AttributeError, ImportError) as exc:
             raise FinalProviderBindingUnsupported(
                 "botocore Bedrock leaf type is unavailable"
             ) from exc
         service_model = getattr(getattr(client, "meta", None), "service_model", None)
-        if not isinstance(client, base_client) or getattr(
-            service_model, "service_name", None
-        ) != "bedrock-runtime":
+        if (
+            not isinstance(client, base_client)
+            or not authoritative(client)
+            or getattr(service_model, "service_name", None) != "bedrock-runtime"
+        ):
             raise FinalProviderBindingUnsupported(
                 f"provider leaf request binding is unavailable for {identity}"
             )

@@ -67,6 +67,8 @@ class FileConsumptionReceiptSink:
         self._writer = ReceiptWriter(path)
         self._write_once_lock = threading.Lock()
         self._trusted_parent_identity: tuple[int, int] | None = None
+        self._trusted_receipt_identity: tuple[int, int] | None = None
+        self._trusted_outcome_root_identity: tuple[int, int] | None = None
 
     def write(self, receipt: Mapping[str, Any]) -> str:
         raw = canonical_json_bytes(dict(receipt)) + b"\n"
@@ -74,7 +76,19 @@ class FileConsumptionReceiptSink:
         if os.name == "posix":
             try:
                 with self._write_once_lock:
-                    parent_identity = self._append_receipt_posix(raw)
+                    parent_identity, receipt_identity = self._append_receipt_posix(raw)
+                    if (
+                        self._trusted_parent_identity is not None
+                        and self._trusted_parent_identity != parent_identity
+                    ):
+                        raise OSError("consumption receipt parent identity changed")
+                    if (
+                        self._trusted_receipt_identity is not None
+                        and self._trusted_receipt_identity != receipt_identity
+                    ):
+                        raise OSError("consumption receipt file identity changed")
+                    self._trusted_parent_identity = parent_identity
+                    self._trusted_receipt_identity = receipt_identity
             except OSError as exc:
                 raise HermesSlotRetrievalError(
                     "consumption receipt parent is not an approved POSIX ledger boundary"
@@ -84,15 +98,6 @@ class FileConsumptionReceiptSink:
             result = self._writer.write(dict(receipt))
             if result.status != "written" or result.digest != receipt_digest:
                 raise HermesSlotRetrievalError("consumption receipt was not written")
-        if parent_identity is not None:
-            if (
-                self._trusted_parent_identity is not None
-                and self._trusted_parent_identity != parent_identity
-            ):
-                raise HermesSlotRetrievalError(
-                    "consumption receipt parent identity changed"
-                )
-            self._trusted_parent_identity = parent_identity
         return receipt_digest
 
     def write_once(self, identity: str, receipt: Mapping[str, Any]) -> str:
@@ -107,7 +112,17 @@ class FileConsumptionReceiptSink:
             )
         try:
             with self._write_once_lock:
-                self._write_once_posix(outcome_root, outcome_name, raw)
+                outcome_root_identity = self._write_once_posix(
+                    outcome_root,
+                    outcome_name,
+                    raw,
+                )
+                if (
+                    self._trusted_outcome_root_identity is not None
+                    and self._trusted_outcome_root_identity != outcome_root_identity
+                ):
+                    raise OSError("provider attempt outcome directory identity changed")
+                self._trusted_outcome_root_identity = outcome_root_identity
         except HermesSlotRetrievalError:
             raise
         except OSError as exc:
@@ -190,7 +205,63 @@ class FileConsumptionReceiptSink:
             for descriptor in reversed(opened):
                 os.close(descriptor)
 
-    def _append_receipt_posix(self, raw: bytes) -> tuple[int, int]:
+    def _assert_receipt_file_path_identity(
+        self,
+        parent: int,
+        expected: tuple[int, int],
+    ) -> None:
+        info = os.stat(
+            self._path.name,
+            dir_fd=parent,
+            follow_symlinks=False,
+        )
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_nlink != 1
+            or (info.st_dev, info.st_ino) != expected
+        ):
+            raise OSError("consumption receipt file was substituted")
+
+    @staticmethod
+    def _assert_named_directory_identity(
+        parent: int,
+        name: str,
+        expected: tuple[int, int],
+    ) -> None:
+        flags = (
+            os.O_RDONLY
+            | os.O_DIRECTORY
+            | os.O_NOFOLLOW
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        descriptor = os.open(name, flags, dir_fd=parent)
+        try:
+            info = os.fstat(descriptor)
+            if (info.st_dev, info.st_ino) != expected:
+                raise OSError("provider attempt outcome directory was substituted")
+        finally:
+            os.close(descriptor)
+
+    @staticmethod
+    def _assert_named_outcome_file_identity(
+        parent: int,
+        name: str,
+        expected: tuple[int, int],
+    ) -> None:
+        info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_nlink != 1
+            or info.st_uid != _effective_user_id()
+            or stat.S_IMODE(info.st_mode) != 0o600
+            or (info.st_dev, info.st_ino) != expected
+        ):
+            raise OSError("provider attempt outcome file was substituted")
+
+    def _append_receipt_posix(
+        self,
+        raw: bytes,
+    ) -> tuple[tuple[int, int], tuple[int, int]]:
         opened, parent = self._open_existing_posix_receipt_parent()
         try:
             parent_info = os.fstat(parent)
@@ -210,6 +281,8 @@ class FileConsumptionReceiptSink:
                     follow_symlinks=False,
                 )
             except FileNotFoundError:
+                if self._trusted_receipt_identity is not None:
+                    raise OSError("consumption receipt file identity changed")
                 existed = False
             else:
                 if (
@@ -219,6 +292,11 @@ class FileConsumptionReceiptSink:
                     or stat.S_IMODE(existing_info.st_mode) != 0o600
                 ):
                     raise OSError("consumption receipt file identity is invalid")
+                if self._trusted_receipt_identity is not None and (
+                    existing_info.st_dev,
+                    existing_info.st_ino,
+                ) != self._trusted_receipt_identity:
+                    raise OSError("consumption receipt file identity changed")
 
             open_flags = os.O_RDWR | os.O_APPEND | os.O_CLOEXEC | os.O_NOFOLLOW
             if existed:
@@ -246,6 +324,13 @@ class FileConsumptionReceiptSink:
                 if not existed:
                     os.fchmod(descriptor, 0o600)
                 self._verify_outcome_file(descriptor, require_owner_mode=True)
+                receipt_info = os.fstat(descriptor)
+                receipt_identity = (receipt_info.st_dev, receipt_info.st_ino)
+                if (
+                    self._trusted_receipt_identity is not None
+                    and self._trusted_receipt_identity != receipt_identity
+                ):
+                    raise OSError("consumption receipt file identity changed")
                 import fcntl
 
                 fcntl.flock(descriptor, fcntl.LOCK_EX)
@@ -255,6 +340,7 @@ class FileConsumptionReceiptSink:
                     # pathname still resolves to that inode immediately
                     # before publishing any receipt bytes.
                     self._assert_receipt_parent_path_identity(parent_identity)
+                    self._assert_receipt_file_path_identity(parent, receipt_identity)
                     try:
                         self._write_all(descriptor, raw)
                         os.fsync(descriptor)
@@ -264,12 +350,24 @@ class FileConsumptionReceiptSink:
                         # pathname moved during the write, remove exactly this
                         # append before returning fail-closed.
                         self._assert_receipt_parent_path_identity(parent_identity)
+                        self._assert_receipt_file_path_identity(
+                            parent,
+                            receipt_identity,
+                        )
                     except BaseException:
                         os.ftruncate(descriptor, original_size)
                         os.fsync(descriptor)
                         if not existed:
-                            os.unlink(self._path.name, dir_fd=parent)
-                            os.fsync(parent)
+                            try:
+                                self._assert_receipt_file_path_identity(
+                                    parent,
+                                    receipt_identity,
+                                )
+                            except (FileNotFoundError, OSError):
+                                pass
+                            else:
+                                os.unlink(self._path.name, dir_fd=parent)
+                                os.fsync(parent)
                         raise
                 finally:
                     fcntl.flock(descriptor, fcntl.LOCK_UN)
@@ -277,7 +375,7 @@ class FileConsumptionReceiptSink:
                 os.close(descriptor)
             if not existed:
                 os.fsync(parent)
-            return parent_identity
+            return parent_identity, receipt_identity
         finally:
             for descriptor in reversed(opened):
                 os.close(descriptor)
@@ -287,7 +385,7 @@ class FileConsumptionReceiptSink:
         outcome_root: Path,
         outcome_name: str,
         raw: bytes,
-    ) -> None:
+    ) -> tuple[int, int]:
         directory_flags = (
             os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
         )
@@ -314,6 +412,7 @@ class FileConsumptionReceiptSink:
             )
             opened.append(outcome_directory)
             root_info = os.fstat(outcome_directory)
+            outcome_root_identity = (root_info.st_dev, root_info.st_ino)
             if (
                 not stat.S_ISDIR(root_info.st_mode)
                 or root_info.st_nlink < 1
@@ -321,8 +420,18 @@ class FileConsumptionReceiptSink:
                 or stat.S_IMODE(root_info.st_mode) != 0o700
             ):
                 raise OSError("provider attempt outcome directory identity is invalid")
+            if (
+                self._trusted_outcome_root_identity is not None
+                and self._trusted_outcome_root_identity != outcome_root_identity
+            ):
+                raise OSError("provider attempt outcome directory identity changed")
             if outcome_root_created:
                 os.fsync(current)
+            self._assert_named_directory_identity(
+                current,
+                outcome_root.name,
+                outcome_root_identity,
+            )
 
             flags = (
                 os.O_WRONLY
@@ -358,21 +467,94 @@ class FileConsumptionReceiptSink:
                 )
                 try:
                     self._verify_outcome_file(descriptor, require_owner_mode=True)
+                    descriptor_info = os.fstat(descriptor)
+                    outcome_file_identity = (
+                        descriptor_info.st_dev,
+                        descriptor_info.st_ino,
+                    )
+                    if outcome_file_identity != (
+                        existing_info.st_dev,
+                        existing_info.st_ino,
+                    ):
+                        raise OSError(
+                            "existing provider attempt outcome was substituted"
+                        )
+                    self._assert_named_outcome_file_identity(
+                        outcome_directory,
+                        outcome_name,
+                        outcome_file_identity,
+                    )
                     existing = self._read_all(descriptor)
+                    self._assert_named_outcome_file_identity(
+                        outcome_directory,
+                        outcome_name,
+                        outcome_file_identity,
+                    )
                 finally:
                     os.close(descriptor)
                 if existing != raw:
                     raise HermesSlotRetrievalError(
                         "provider attempt outcome identity collision"
                     )
-                return
+                self._assert_receipt_parent_path_identity(
+                    self._trusted_parent_identity
+                )
+                self._assert_named_directory_identity(
+                    current,
+                    outcome_root.name,
+                    outcome_root_identity,
+                )
+                return outcome_root_identity
             try:
                 self._verify_outcome_file(descriptor, require_owner_mode=True)
-                self._write_all(descriptor, raw)
-                os.fsync(descriptor)
+                descriptor_info = os.fstat(descriptor)
+                outcome_file_identity = (
+                    descriptor_info.st_dev,
+                    descriptor_info.st_ino,
+                )
+                try:
+                    self._assert_named_outcome_file_identity(
+                        outcome_directory,
+                        outcome_name,
+                        outcome_file_identity,
+                    )
+                    self._write_all(descriptor, raw)
+                    os.fsync(descriptor)
+                    self._assert_receipt_parent_path_identity(
+                        self._trusted_parent_identity
+                    )
+                    self._assert_named_directory_identity(
+                        current,
+                        outcome_root.name,
+                        outcome_root_identity,
+                    )
+                    self._assert_named_outcome_file_identity(
+                        outcome_directory,
+                        outcome_name,
+                        outcome_file_identity,
+                    )
+                except BaseException:
+                    os.ftruncate(descriptor, 0)
+                    os.fsync(descriptor)
+                    try:
+                        file_info = os.stat(
+                            outcome_name,
+                            dir_fd=outcome_directory,
+                            follow_symlinks=False,
+                        )
+                        if (file_info.st_dev, file_info.st_ino) == (
+                            outcome_file_identity[0],
+                            outcome_file_identity[1],
+                        ):
+                            os.unlink(outcome_name, dir_fd=outcome_directory)
+                            os.fsync(outcome_directory)
+                    except FileNotFoundError:
+                        pass
+                    raise
             finally:
                 os.close(descriptor)
             os.fsync(outcome_directory)
+            return outcome_root_identity
         finally:
             for descriptor in reversed(opened):
                 os.close(descriptor)

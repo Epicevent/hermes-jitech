@@ -1353,6 +1353,7 @@ def run_conversation(
             ephemeral_user_context_request_committed
             and not ephemeral_first_response_accepted
         ):
+            agent._cleanup_task_resources(effective_task_id)
             agent._persist_session(messages, conversation_history)
             return {
                 "final_response": None,
@@ -2494,6 +2495,7 @@ def run_conversation(
                                     ephemeral_user_context_request_committed
                                     and not ephemeral_first_response_accepted
                                 ):
+                                    agent._cleanup_task_resources(effective_task_id)
                                     agent._persist_session(messages, conversation_history)
                                     return {
                                         "final_response": None,
@@ -5273,6 +5275,7 @@ def run_conversation(
         ephemeral_user_context_request_committed
         and not ephemeral_first_response_accepted
     ):
+        agent._cleanup_task_resources(effective_task_id)
         agent._persist_session(messages, conversation_history)
         return {
             "final_response": None,

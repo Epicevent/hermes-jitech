@@ -881,14 +881,53 @@ class TestClientCache:
     def test_reset_clears_caches(self):
         from agent.bedrock_adapter import (
             _bedrock_runtime_client_cache,
+            _bedrock_runtime_client_identity_cache,
             _bedrock_control_client_cache,
             reset_client_cache,
         )
         _bedrock_runtime_client_cache["test"] = "dummy"
+        _bedrock_runtime_client_identity_cache["test"] = ("dummy", str)
         _bedrock_control_client_cache["test"] = "dummy"
         reset_client_cache()
         assert len(_bedrock_runtime_client_cache) == 0
+        assert len(_bedrock_runtime_client_identity_cache) == 0
         assert len(_bedrock_control_client_cache) == 0
+
+    def test_runtime_factory_registers_only_the_exact_created_leaf(self, monkeypatch):
+        from agent import bedrock_adapter
+
+        bedrock_adapter.reset_client_cache()
+        exact_type = type(
+            "BedrockRuntime",
+            (),
+            {"__module__": "botocore.client"},
+        )
+        exact_client = exact_type()
+        boto3 = SimpleNamespace(client=MagicMock(return_value=exact_client))
+        botocore_module = ModuleType("botocore")
+        config_module = ModuleType("botocore.config")
+        config_module.Config = MagicMock(return_value="fixture-config")
+        botocore_module.config = config_module
+
+        monkeypatch.setattr(bedrock_adapter, "_require_boto3", lambda: boto3)
+        with patch.dict(
+            "sys.modules",
+            {"botocore": botocore_module, "botocore.config": config_module},
+        ):
+            observed = bedrock_adapter._get_bedrock_runtime_client("eu-west-1")
+
+        assert observed is exact_client
+        assert bedrock_adapter.is_authoritative_bedrock_runtime_client(
+            exact_client
+        )
+        spoof_type = type(
+            "BedrockRuntime",
+            (),
+            {"__module__": "botocore.client"},
+        )
+        assert not bedrock_adapter.is_authoritative_bedrock_runtime_client(
+            spoof_type()
+        )
 
 
 # ---------------------------------------------------------------------------

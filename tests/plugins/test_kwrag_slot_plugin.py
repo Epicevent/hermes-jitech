@@ -820,6 +820,120 @@ def test_provider_outcome_sink_fsyncs_new_directory_and_file_publication(
     assert outcome_root.stat().st_ino in fsynced_inodes
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX outcome inode binding contract")
+def test_provider_outcome_directory_swap_during_write_rolls_back_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from plugins.kwrag_slot.consumer import (
+        FileConsumptionReceiptSink,
+        HermesSlotRetrievalError,
+    )
+
+    sink = FileConsumptionReceiptSink(tmp_path / "outcome-swap.jsonl")
+    sink.write({"schema_version": "fixture-ledger-anchor-v1"})
+    outcome_root = tmp_path / "outcome-swap.jsonl.outcomes"
+    detached_root = tmp_path / "detached-outcomes"
+    original_write_all = sink._write_all
+    swapped = False
+
+    def swap_at_outcome_write(descriptor: int, raw: bytes) -> None:
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            outcome_root.rename(detached_root)
+            outcome_root.mkdir(mode=0o700)
+            outcome_root.chmod(0o700)
+        original_write_all(descriptor, raw)
+
+    monkeypatch.setattr(sink, "_write_all", swap_at_outcome_write)
+    with pytest.raises(HermesSlotRetrievalError, match="persisted safely"):
+        sink.write_once(
+            "sha256:" + "4" * 64,
+            {"schema_version": "fixture-outcome-v1", "status": "unknown"},
+        )
+
+    assert list(outcome_root.iterdir()) == []
+    assert list(detached_root.iterdir()) == []
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX outcome inode binding contract")
+def test_provider_outcome_file_swap_during_write_rolls_back_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from plugins.kwrag_slot.consumer import (
+        FileConsumptionReceiptSink,
+        HermesSlotRetrievalError,
+    )
+
+    sink = FileConsumptionReceiptSink(tmp_path / "outcome-file-swap.jsonl")
+    sink.write({"schema_version": "fixture-ledger-anchor-v1"})
+    identity = "sha256:" + "5" * 64
+    outcome_root = tmp_path / "outcome-file-swap.jsonl.outcomes"
+    outcome_path = outcome_root / ("5" * 64 + ".json")
+    detached_path = outcome_root / "detached-outcome.json"
+    original_write_all = sink._write_all
+    swapped = False
+
+    def swap_at_outcome_write(descriptor: int, raw: bytes) -> None:
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            outcome_path.rename(detached_path)
+            outcome_path.write_bytes(b"")
+            outcome_path.chmod(0o600)
+        original_write_all(descriptor, raw)
+
+    monkeypatch.setattr(sink, "_write_all", swap_at_outcome_write)
+    with pytest.raises(HermesSlotRetrievalError, match="persisted safely"):
+        sink.write_once(
+            identity,
+            {"schema_version": "fixture-outcome-v1", "status": "unknown"},
+        )
+
+    assert outcome_path.read_bytes() == b""
+    assert detached_path.read_bytes() == b""
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX outcome inode binding contract")
+def test_provider_outcome_file_swap_during_replay_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from plugins.kwrag_slot.consumer import (
+        FileConsumptionReceiptSink,
+        HermesSlotRetrievalError,
+    )
+
+    sink = FileConsumptionReceiptSink(tmp_path / "outcome-replay-swap.jsonl")
+    sink.write({"schema_version": "fixture-ledger-anchor-v1"})
+    identity = "sha256:" + "6" * 64
+    receipt = {"schema_version": "fixture-outcome-v1", "status": "unknown"}
+    sink.write_once(identity, receipt)
+    outcome_root = tmp_path / "outcome-replay-swap.jsonl.outcomes"
+    outcome_path = outcome_root / ("6" * 64 + ".json")
+    detached_path = outcome_root / "detached-replay.json"
+    original_read_all = sink._read_all
+    swapped = False
+
+    def swap_at_outcome_read(descriptor: int) -> bytes:
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            outcome_path.rename(detached_path)
+            outcome_path.write_bytes(b"")
+            outcome_path.chmod(0o600)
+        return original_read_all(descriptor)
+
+    monkeypatch.setattr(sink, "_read_all", swap_at_outcome_read)
+    with pytest.raises(HermesSlotRetrievalError, match="persisted safely"):
+        sink.write_once(identity, receipt)
+
+    assert outcome_path.read_bytes() == b""
+    assert detached_path.read_bytes() == canonical_json_bytes(receipt) + b"\n"
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX parent boundary contract")
 def test_provider_outcome_sink_requires_preexisting_safe_receipt_parent(
     tmp_path: Path,
@@ -1479,7 +1593,7 @@ def test_unaccepted_first_evidence_response_cannot_start_a_clean_second_request(
         patch.object(agent, "_save_session_log"),
         patch.object(agent, "_flush_messages_to_session_db"),
         patch.object(agent, "_save_trajectory"),
-        patch.object(agent, "_cleanup_task_resources"),
+        patch.object(agent, "_cleanup_task_resources") as cleanup,
     ):
         outcome = run_conversation_with_approved_retrieval(
             agent,
@@ -1495,6 +1609,7 @@ def test_unaccepted_first_evidence_response_cannot_start_a_clean_second_request(
     assert outcome["api_calls"] == 1
     if response_kind == "truncated_tool":
         assert "unledgered retry is forbidden" in outcome["error"]
+        cleanup.assert_called_once()
     else:
         assert "clean follow-up request is forbidden" in outcome["error"]
     assert prepared.consumption_receipt_status == "written"
@@ -1567,7 +1682,7 @@ def test_partial_stream_tool_call_cannot_start_a_clean_second_request(
         patch.object(agent, "_save_session_log"),
         patch.object(agent, "_flush_messages_to_session_db"),
         patch.object(agent, "_save_trajectory"),
-        patch.object(agent, "_cleanup_task_resources"),
+        patch.object(agent, "_cleanup_task_resources") as cleanup,
     ):
         outcome = run_conversation_with_approved_retrieval(
             agent,
@@ -1582,6 +1697,7 @@ def test_partial_stream_tool_call_cannot_start_a_clean_second_request(
     assert outcome["failed"] is True
     assert outcome["api_calls"] == 1
     assert "clean follow-up request is forbidden" in outcome["error"]
+    cleanup.assert_called_once()
     assert prepared.consumption_receipt_status == "written"
 
 
@@ -1979,6 +2095,48 @@ def test_parent_swap_at_consumption_write_fails_before_sdk_and_rolls_back(
         detached_parent.joinpath("parent-swap-before-sdk.jsonl").read_bytes()
         == original_receipt_bytes
     )
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX ledger inode binding contract")
+def test_receipt_file_replacement_between_writes_fails_before_sdk(
+    tmp_path: Path,
+) -> None:
+    from plugins.kwrag_slot.consumer import HermesSlotRetrievalError
+    from plugins.kwrag_slot.prompt_context import run_conversation_with_approved_retrieval
+
+    ledger_parent = tmp_path / "dispatch-ledger-file"
+    ledger_parent.mkdir(mode=0o700)
+    ledger_parent.chmod(0o700)
+    prepared, receipt_path = _prepared_hits(
+        ledger_parent,
+        "receipt-file-replacement.jsonl",
+    )
+    original_receipt_bytes = receipt_path.read_bytes()
+    detached_receipt = ledger_parent / "detached-receipt.jsonl"
+    receipt_path.rename(detached_receipt)
+    receipt_path.write_bytes(b"")
+    receipt_path.chmod(0o600)
+
+    agent = _actual_chat_completions_agent("receipt-file-replacement-session")
+    request_client = _supported_openai_client()
+    with (
+        patch.object(agent, "_create_request_openai_client", return_value=request_client),
+        patch.object(agent, "_close_request_openai_client"),
+        patch.object(agent, "_persist_session"),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+        pytest.raises(HermesSlotRetrievalError),
+    ):
+        run_conversation_with_approved_retrieval(
+            agent,
+            "authorized retrieval turn",
+            prepared,
+        )
+
+    request_client.chat.completions.create.assert_not_called()
+    assert prepared.consumption_receipt_status == "pending"
+    assert detached_receipt.read_bytes() == original_receipt_bytes
+    assert receipt_path.read_bytes() == b""
 
 
 def test_actual_aiagent_commits_exactly_once_at_sdk_dispatch_handoff(
