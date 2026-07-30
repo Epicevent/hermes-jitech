@@ -197,7 +197,7 @@ def _capture_request_provider_receipt(agent, request_client) -> None:
         return
 
 
-def interruptible_api_call(agent, api_kwargs: dict):
+def interruptible_api_call(agent, api_kwargs: dict, *, on_request_dispatch=None):
     """
     Run the API call in a background thread so the main conversation loop
     can detect interrupts without waiting for the full HTTP round-trip.
@@ -215,6 +215,16 @@ def interruptible_api_call(agent, api_kwargs: dict):
     result = {"response": None, "error": None}
     request_client_holder = {"client": None, "owner_tid": None}
     request_client_lock = threading.Lock()
+    request_dispatch_notified = False
+
+    def _notify_request_dispatch() -> None:
+        nonlocal request_dispatch_notified
+        if on_request_dispatch is None or request_dispatch_notified:
+            return
+        if not callable(on_request_dispatch):
+            raise TypeError("on_request_dispatch must be callable")
+        on_request_dispatch()
+        request_dispatch_notified = True
 
     def _set_request_client(client):
         with request_client_lock:
@@ -273,13 +283,27 @@ def interruptible_api_call(agent, api_kwargs: dict):
                         api_kwargs=api_kwargs,
                     )
                 )
-                result["response"] = agent._run_codex_stream(
-                    api_kwargs,
-                    client=request_client,
-                    on_first_delta=getattr(agent, "_codex_on_first_delta", None),
-                )
+                if on_request_dispatch is None:
+                    result["response"] = agent._run_codex_stream(
+                        api_kwargs,
+                        client=request_client,
+                        on_first_delta=getattr(agent, "_codex_on_first_delta", None),
+                    )
+                else:
+                    result["response"] = agent._run_codex_stream(
+                        api_kwargs,
+                        client=request_client,
+                        on_first_delta=getattr(agent, "_codex_on_first_delta", None),
+                        on_request_dispatch=_notify_request_dispatch,
+                    )
             elif agent.api_mode == "anthropic_messages":
-                result["response"] = agent._anthropic_messages_create(api_kwargs)
+                if on_request_dispatch is None:
+                    result["response"] = agent._anthropic_messages_create(api_kwargs)
+                else:
+                    result["response"] = agent._anthropic_messages_create(
+                        api_kwargs,
+                        on_request_dispatch=_notify_request_dispatch,
+                    )
             elif agent.api_mode == "bedrock_converse":
                 # Bedrock uses boto3 directly — no OpenAI client needed.
                 # normalize_converse_response produces an OpenAI-compatible
@@ -295,6 +319,7 @@ def interruptible_api_call(agent, api_kwargs: dict):
                 api_kwargs.pop("__bedrock_converse__", None)
                 client = _get_bedrock_runtime_client(region)
                 try:
+                    _notify_request_dispatch()
                     raw_response = client.converse(**api_kwargs)
                 except Exception as _bedrock_exc:
                     # Evict the cached client on stale-connection failures
@@ -310,6 +335,7 @@ def interruptible_api_call(agent, api_kwargs: dict):
                         api_kwargs=api_kwargs,
                     )
                 )
+                _notify_request_dispatch()
                 result["response"] = request_client.chat.completions.create(**api_kwargs)
                 _capture_request_provider_receipt(agent, request_client)
         except Exception as e:
@@ -1624,7 +1650,13 @@ def cleanup_task_resources(agent, task_id: str) -> None:
 
 
 
-def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=None):
+def interruptible_streaming_api_call(
+    agent,
+    api_kwargs: dict,
+    *,
+    on_first_delta=None,
+    on_request_dispatch=None,
+):
     """Streaming variant of _interruptible_api_call for real-time token delivery.
 
     Handles all three api_modes:
@@ -1644,6 +1676,17 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
     if agent._interrupt_requested:
         raise InterruptedError("Agent interrupted before streaming API call")
 
+    request_dispatch_notified = False
+
+    def _notify_request_dispatch() -> None:
+        nonlocal request_dispatch_notified
+        if on_request_dispatch is None or request_dispatch_notified:
+            return
+        if not callable(on_request_dispatch):
+            raise TypeError("on_request_dispatch must be callable")
+        on_request_dispatch()
+        request_dispatch_notified = True
+
     if agent.api_mode == "codex_responses":
         # Codex streams internally via _run_codex_stream. The main dispatch
         # in _interruptible_api_call already calls it; we just need to
@@ -1651,7 +1694,12 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         # temporarily so _run_codex_stream can pick it up.
         agent._codex_on_first_delta = on_first_delta
         try:
-            return agent._interruptible_api_call(api_kwargs)
+            if on_request_dispatch is None:
+                return agent._interruptible_api_call(api_kwargs)
+            return agent._interruptible_api_call(
+                api_kwargs,
+                on_request_dispatch=_notify_request_dispatch,
+            )
         finally:
             agent._codex_on_first_delta = None
 
@@ -1682,6 +1730,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 api_kwargs.pop("__bedrock_converse__", None)
                 client = _get_bedrock_runtime_client(region)
                 try:
+                    _notify_request_dispatch()
                     raw_response = client.converse_stream(**api_kwargs)
                 except Exception as _bedrock_exc:
                     # Evict the cached client on stale-connection failures
@@ -1851,6 +1900,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         # ``request_client_holder["diag"]`` for closure access.
         _diag = agent._stream_diag_init()
         request_client_holder["diag"] = _diag
+        _notify_request_dispatch()
         stream = request_client.chat.completions.create(**stream_kwargs)
 
         # Capture rate limit headers from the initial HTTP response.
@@ -2100,6 +2150,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         _diag = agent._stream_diag_init()
         request_client_holder["diag"] = _diag
         # Use the Anthropic SDK's streaming context manager
+        _notify_request_dispatch()
         with agent._anthropic_client.messages.stream(**api_kwargs) as stream:
             # The Anthropic SDK exposes the raw httpx response on
             # ``stream.response``.  Snapshot diagnostic headers

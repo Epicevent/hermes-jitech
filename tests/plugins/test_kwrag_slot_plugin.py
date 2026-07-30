@@ -173,6 +173,34 @@ def _prepared_hits(tmp_path: Path, filename: str):
     return prepared, receipt_path
 
 
+def _actual_chat_completions_agent(session_id: str):
+    from run_agent import AIAgent
+
+    with (
+        patch("run_agent.get_tool_definitions", return_value=[]),
+        patch("run_agent.check_toolset_requirements", return_value={}),
+        patch("run_agent.OpenAI"),
+    ):
+        agent = AIAgent(
+            api_key="test-key",
+            base_url="https://openrouter.ai/api/v1",
+            model="test/model",
+            provider="openrouter",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+    agent.session_id = session_id
+    agent.client = MagicMock()
+    agent._cached_system_prompt = "You are helpful."
+    agent._use_prompt_caching = False
+    agent._disable_streaming = True
+    agent._api_max_retries = 1
+    agent.compression_enabled = False
+    agent.save_trajectories = False
+    return agent
+
+
 def test_plugin_registers_only_operator_cli() -> None:
     manager = PluginManager()
     ctx = PluginContext(PluginManifest(name="kwrag_slot"), manager)
@@ -653,6 +681,94 @@ def test_pre_dispatch_failure_does_not_commit_complete_consumption(tmp_path: Pat
     assert receipt_path.read_bytes() == canonical_json_bytes(prepared.result_receipt) + b"\n"
 
 
+def test_actual_aiagent_client_creation_failure_stays_not_consumed(
+    tmp_path: Path,
+) -> None:
+    from plugins.kwrag_slot.consumer import HermesSlotRetrievalError
+    from plugins.kwrag_slot.prompt_context import run_conversation_with_approved_retrieval
+
+    prepared, receipt_path = _prepared_hits(tmp_path, "client-creation-failure.jsonl")
+    agent = _actual_chat_completions_agent("client-creation-failure-session")
+
+    with (
+        patch.object(
+            agent,
+            "_create_request_openai_client",
+            side_effect=RuntimeError("request client creation failed"),
+        ) as create_client,
+        patch.object(agent, "_try_recover_primary_transport", return_value=False),
+        patch.object(agent, "_try_activate_fallback", return_value=False),
+        patch.object(agent, "_persist_session"),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+        pytest.raises(
+            HermesSlotRetrievalError,
+            match="completed before retrieval evidence dispatch",
+        ),
+    ):
+        run_conversation_with_approved_retrieval(
+            agent,
+            "authorized retrieval turn",
+            prepared,
+        )
+
+    create_client.assert_called_once()
+    assert prepared.consumption_receipt is None
+    assert prepared.consumption_receipt_status == "pending"
+    assert prepared.content_free_attestation()["linkageStatus"] == "not_consumed"
+    assert receipt_path.read_bytes() == canonical_json_bytes(prepared.result_receipt) + b"\n"
+
+
+def test_actual_aiagent_commits_exactly_once_immediately_before_sdk_call(
+    tmp_path: Path,
+) -> None:
+    from plugins.kwrag_slot.prompt_context import run_conversation_with_approved_retrieval
+
+    prepared, receipt_path = _prepared_hits(tmp_path, "actual-sdk-dispatch.jsonl")
+    agent = _actual_chat_completions_agent("actual-sdk-dispatch-session")
+    request_client = MagicMock()
+    dispatch_observations: list[str] = []
+
+    def sdk_create(**_kwargs):
+        dispatch_observations.append(prepared.consumption_receipt_status)
+        message = SimpleNamespace(
+            content="answer",
+            tool_calls=None,
+            reasoning=None,
+            reasoning_content=None,
+            reasoning_details=None,
+        )
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=message, finish_reason="stop")],
+            model="fixture-model",
+            usage=None,
+        )
+
+    request_client.chat.completions.create.side_effect = sdk_create
+    with (
+        patch.object(agent, "_create_request_openai_client", return_value=request_client),
+        patch.object(agent, "_close_request_openai_client"),
+        patch.object(agent, "_save_session_log"),
+        patch.object(agent, "_flush_messages_to_session_db"),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+    ):
+        outcome = run_conversation_with_approved_retrieval(
+            agent,
+            "authorized retrieval turn",
+            prepared,
+        )
+
+    assert outcome["final_response"] == "answer"
+    assert dispatch_observations == ["written"]
+    request_client.chat.completions.create.assert_called_once()
+    assert prepared.consumption_receipt_status == "written"
+    lines = receipt_path.read_bytes().splitlines()
+    assert len(lines) == 2
+    assert lines[0] == canonical_json_bytes(prepared.result_receipt)
+    assert lines[1] == canonical_json_bytes(prepared.consumption_receipt)
+
+
 @pytest.mark.parametrize("mutation", ["results", "result_receipt"])
 def test_prompt_assembly_rejects_mutated_verified_evidence(
     tmp_path: Path,
@@ -791,7 +907,8 @@ def test_approved_evidence_reaches_actual_aiagent_request_but_not_returned_histo
     def snapshot(name, messages, *_args, **_kwargs):
         projected[name] = json.loads(json.dumps(messages))
 
-    def respond(api_kwargs, **_kwargs):
+    def respond(api_kwargs, **call_kwargs):
+        call_kwargs["on_request_dispatch"]()
         captured.update(api_kwargs)
         message = SimpleNamespace(
             content="answer",
@@ -923,7 +1040,8 @@ def test_approved_evidence_rebinds_to_current_turn_after_preflight_compression(
             anchored[0].copy(),
         ], "You are helpful after compression."
 
-    def respond(api_kwargs, **_kwargs):
+    def respond(api_kwargs, **call_kwargs):
+        call_kwargs["on_request_dispatch"]()
         captured.update(api_kwargs)
         message = SimpleNamespace(
             content="answer after compression",

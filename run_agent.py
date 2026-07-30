@@ -2927,15 +2927,37 @@ class AIAgent:
                 exc,
             )
 
-    def _run_codex_stream(self, api_kwargs: dict, client: Any = None, on_first_delta: callable = None):
+    def _run_codex_stream(
+        self,
+        api_kwargs: dict,
+        client: Any = None,
+        on_first_delta: callable = None,
+        on_request_dispatch: callable = None,
+    ):
         """Forwarder — see ``agent.codex_runtime.run_codex_stream``."""
         from agent.codex_runtime import run_codex_stream
-        return run_codex_stream(self, api_kwargs, client, on_first_delta)
+        return run_codex_stream(
+            self,
+            api_kwargs,
+            client,
+            on_first_delta,
+            on_request_dispatch=on_request_dispatch,
+        )
 
-    def _run_codex_create_stream_fallback(self, api_kwargs: dict, client: Any = None):
+    def _run_codex_create_stream_fallback(
+        self,
+        api_kwargs: dict,
+        client: Any = None,
+        on_request_dispatch: callable = None,
+    ):
         """Forwarder — see ``agent.codex_runtime.run_codex_create_stream_fallback``."""
         from agent.codex_runtime import run_codex_create_stream_fallback
-        return run_codex_create_stream_fallback(self, api_kwargs, client)
+        return run_codex_create_stream_fallback(
+            self,
+            api_kwargs,
+            client,
+            on_request_dispatch=on_request_dispatch,
+        )
 
     def _try_refresh_codex_client_credentials(self, *, force: bool = True) -> bool:
         if self.api_mode != "codex_responses" or self.provider not in {"openai-codex", "xai-oauth"}:
@@ -3243,9 +3265,16 @@ class AIAgent:
             return False
         return pool.has_available()
 
-    def _anthropic_messages_create(self, api_kwargs: dict):
+    def _anthropic_messages_create(
+        self,
+        api_kwargs: dict,
+        *,
+        on_request_dispatch: callable = None,
+    ):
         if self.api_mode == "anthropic_messages":
             self._try_refresh_anthropic_client_credentials()
+        if on_request_dispatch is not None:
+            on_request_dispatch()
         return self._anthropic_client.messages.create(**api_kwargs)
 
     def _rebuild_anthropic_client(self) -> None:
@@ -3274,10 +3303,19 @@ class AIAgent:
                 drop_context_1m_beta=_drop_1m,
             )
 
-    def _interruptible_api_call(self, api_kwargs: dict):
+    def _interruptible_api_call(
+        self,
+        api_kwargs: dict,
+        *,
+        on_request_dispatch: callable = None,
+    ):
         """Forwarder — see ``agent.chat_completion_helpers.interruptible_api_call``."""
         from agent.chat_completion_helpers import interruptible_api_call
-        return interruptible_api_call(self, api_kwargs)
+        return interruptible_api_call(
+            self,
+            api_kwargs,
+            on_request_dispatch=on_request_dispatch,
+        )
 
     # ── Unified streaming API call ─────────────────────────────────────────
 
@@ -3446,11 +3484,20 @@ class AIAgent:
         )
 
     def _interruptible_streaming_api_call(
-        self, api_kwargs: dict, *, on_first_delta: callable = None
+        self,
+        api_kwargs: dict,
+        *,
+        on_first_delta: callable = None,
+        on_request_dispatch: callable = None,
     ):
         """Forwarder — see ``agent.chat_completion_helpers.interruptible_streaming_api_call``."""
         from agent.chat_completion_helpers import interruptible_streaming_api_call
-        return interruptible_streaming_api_call(self, api_kwargs, on_first_delta=on_first_delta)
+        return interruptible_streaming_api_call(
+            self,
+            api_kwargs,
+            on_first_delta=on_first_delta,
+            on_request_dispatch=on_request_dispatch,
+        )
 
     def _try_activate_fallback(self, reason: "FailoverReason | None" = None) -> bool:
         """Forwarder — see ``agent.chat_completion_helpers.try_activate_fallback``."""

@@ -1776,12 +1776,21 @@ def run_conversation(
                     provider_fallback_parent = provider_active_fallback_parent
                     provider_call_started_at = time.time()
                     provider_attempt_recorded = False
-                    _commit_ephemeral_context_for_first_request(
-                        assembled=ephemeral_user_context_assembled
-                    )
-                    response = agent._interruptible_streaming_api_call(
-                        api_kwargs, on_first_delta=_stop_spinner
-                    )
+                    if ephemeral_user_context_on_request is None:
+                        response = agent._interruptible_streaming_api_call(
+                            api_kwargs,
+                            on_first_delta=_stop_spinner,
+                        )
+                    else:
+                        response = agent._interruptible_streaming_api_call(
+                            api_kwargs,
+                            on_first_delta=_stop_spinner,
+                            on_request_dispatch=(
+                                lambda: _commit_ephemeral_context_for_first_request(
+                                    assembled=ephemeral_user_context_assembled
+                                )
+                            ),
+                        )
                 else:
                     provider_call_id = str(uuid.uuid4())
                     provider_requested_model = agent.model
@@ -1801,10 +1810,17 @@ def run_conversation(
                     provider_fallback_parent = provider_active_fallback_parent
                     provider_call_started_at = time.time()
                     provider_attempt_recorded = False
-                    _commit_ephemeral_context_for_first_request(
-                        assembled=ephemeral_user_context_assembled
-                    )
-                    response = agent._interruptible_api_call(api_kwargs)
+                    if ephemeral_user_context_on_request is None:
+                        response = agent._interruptible_api_call(api_kwargs)
+                    else:
+                        response = agent._interruptible_api_call(
+                            api_kwargs,
+                            on_request_dispatch=(
+                                lambda: _commit_ephemeral_context_for_first_request(
+                                    assembled=ephemeral_user_context_assembled
+                                )
+                            ),
+                        )
                 provider_call_completed_at = time.time()
                 
                 api_duration = time.time() - api_start_time
