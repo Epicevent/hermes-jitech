@@ -129,12 +129,15 @@ class HermesSlotRetrievalResult:
     ) -> str:
         if self.consumption_receipt_status != "pending" or self.consumption_receipt is not None:
             raise HermesSlotRetrievalError("retrieval evidence was already consumed")
+        if self.result_receipt.get("result_status") != "hits" or not self.results:
+            raise HermesSlotRetrievalError("retrieval evidence has no verified hits to consume")
         receipt = {
             "schema_version": "hermes-kwrag-consumption-receipt-v1",
             "consumer_family": "hermes",
             "consumption_status": "assembled_into_ephemeral_user_context",
             "component_digest": self.result_receipt["component_digest"],
             "runtime_binding_digest": self.result_receipt["runtime_binding_digest"],
+            "index_manifest": self.result_receipt["index_manifest"],
             "session_binding_digest": _digest(session_binding_digest, "session binding digest"),
             "prompt_context_digest": _digest(prompt_context_digest, "prompt context digest"),
             "request_id": self.result_receipt["request_id"],
@@ -155,6 +158,28 @@ class HermesSlotRetrievalResult:
         self.consumption_receipt_digest = receipt_digest
         self.consumption_receipt_status = "written"
         return receipt_digest
+
+    def content_free_attestation(self) -> dict[str, Any]:
+        """Project exact result/consumption lineage for an enabled canary."""
+
+        result_status = self.result_receipt.get("result_status")
+        if result_status == "zero_hits":
+            linkage_status = "not_consumed_zero_hits"
+        elif self.consumption_receipt_status == "written":
+            linkage_status = "complete"
+        else:
+            linkage_status = "not_consumed"
+        return {
+            "schema": "jitech-hermes-kwrag-consumption-attestation/v1",
+            "componentDigest": self.result_receipt["component_digest"],
+            "runtimeBindingDigest": self.result_receipt["runtime_binding_digest"],
+            "indexManifestDigest": self.result_receipt["index_manifest"],
+            "resultStatus": result_status,
+            "operationReceiptDigest": self.result_receipt["operation_receipt_digest"],
+            "resultReceiptDigest": self.result_receipt_digest,
+            "consumptionReceiptDigest": self.consumption_receipt_digest,
+            "linkageStatus": linkage_status,
+        }
 
 
 class HermesSlotRetrievalConsumer:

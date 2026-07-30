@@ -649,6 +649,7 @@ def run_conversation(
     task_id: str = None,
     stream_callback: Optional[callable] = None,
     persist_user_message: Optional[str] = None,
+    ephemeral_user_context: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Run a complete conversation with tool calling until completion.
@@ -664,7 +665,10 @@ def run_conversation(
         persist_user_message: Optional clean user message to store in
             transcripts/history when user_message contains API-only
             synthetic prefixes.
-                or queuing follow-up prefetch work.
+        ephemeral_user_context: Optional API-only context appended to the
+            current user message on provider requests. It is never added to
+            the in-memory conversation, persisted transcript, or returned
+            message history.
 
     Returns:
         Dict: Complete conversation result with final response and message history
@@ -727,6 +731,10 @@ def run_conversation(
         user_message = _sanitize_surrogates(user_message)
     if isinstance(persist_user_message, str):
         persist_user_message = _sanitize_surrogates(persist_user_message)
+    if isinstance(ephemeral_user_context, str):
+        ephemeral_user_context = _sanitize_surrogates(ephemeral_user_context)
+    elif ephemeral_user_context is not None:
+        raise TypeError("ephemeral_user_context must be a string")
 
     # Store stream callback for _interruptible_api_call to pick up
     agent._stream_callback = stream_callback
@@ -1062,8 +1070,11 @@ def run_conversation(
     # See agent/transports/codex_app_server_session.py for the adapter
     # and references/codex-app-server-runtime.md for the rationale.
     if agent.api_mode == "codex_app_server":
+        codex_user_message = user_message
+        if ephemeral_user_context:
+            codex_user_message = user_message + "\n\n" + ephemeral_user_context
         return agent._run_codex_app_server_turn(
-            user_message=user_message,
+            user_message=codex_user_message,
             original_user_message=original_user_message,
             messages=messages,
             effective_task_id=effective_task_id,
@@ -1226,6 +1237,8 @@ def run_conversation(
             # never mutated, so nothing leaks into session persistence.
             if idx == current_turn_user_idx and msg.get("role") == "user":
                 _injections = []
+                if ephemeral_user_context:
+                    _injections.append(ephemeral_user_context)
                 if _ext_prefetch_cache:
                     _fenced = build_memory_context_block(_ext_prefetch_cache)
                     if _fenced:

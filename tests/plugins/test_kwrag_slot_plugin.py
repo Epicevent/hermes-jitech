@@ -49,18 +49,20 @@ def _request() -> dict:
     }
 
 
-def _exchange() -> SimpleNamespace:
+def _exchange(results: list[dict] | None = None) -> SimpleNamespace:
     from kwrag.jsonutil import canonical_json_bytes as kwrag_canonical_json_bytes
 
-    results = [{
-        "id": "alpha:segment:7",
-        "corpus": "alpha",
-        "path": "corpus/123/seg/7",
-        "title": "",
-        "snippet": "fixture result",
-        "score": 0.75,
-        "source_ids": ["message-1"],
-    }]
+    if results is None:
+        results = [{
+            "id": "alpha:segment:7",
+            "corpus": "alpha",
+            "path": "corpus/123/seg/7",
+            "title": "",
+            "snippet": "fixture result",
+            "score": 0.75,
+            "source_ids": ["message-1"],
+        }]
+    result_status = "hits" if results else "zero_hits"
     result_digest = "sha256:" + hashlib.sha256(kwrag_canonical_json_bytes(results)).hexdigest()
     receipt = {
         "schema_version": "kwrag-slot-search-operation-receipt-v1",
@@ -77,9 +79,9 @@ def _exchange() -> SimpleNamespace:
         "index_manifest": "sha256:" + "a" * 64,
         "pipeline_fingerprint": "sha256:" + "b" * 64,
         "execution_status": "completed",
-        "result_status": "hits",
+        "result_status": result_status,
         "duration_ms": 12,
-        "result_count": 1,
+        "result_count": len(results),
         "result_digest": result_digest,
         "pipeline_evidence": {
             "status": "available",
@@ -94,8 +96,8 @@ def _exchange() -> SimpleNamespace:
                 "model": None,
                 "revision": None,
             }],
-            "candidate_count": 1,
-            "returned_count": 1,
+            "candidate_count": len(results),
+            "returned_count": len(results),
             "corpus_count": 1,
             "data_boundary": {
                 "bytes_sent_outside_slot": 0,
@@ -128,7 +130,7 @@ def _exchange() -> SimpleNamespace:
         "index_manifest": "sha256:" + "a" * 64,
         "pipeline_fingerprint": "sha256:" + "b" * 64,
         "result_digest": result_digest,
-        "result_status": "hits",
+        "result_status": result_status,
         "operation_receipt": {"status": "written", "digest": receipt_digest},
         "results": results,
         "duration_ms": 12,
@@ -314,8 +316,8 @@ def test_explicit_consumer_binds_operation_result_and_consumption_receipts(tmp_p
         session_id = "session-fixture-1"
 
         def run_conversation(self, message, **kwargs):
-            self.api_message = message
-            self.persisted_message = kwargs.pop("persist_user_message")
+            self.user_message = message
+            self.ephemeral_context = kwargs.pop("ephemeral_user_context")
             self.kwargs = kwargs
             return {"completed": True, "final_response": "fixture answer"}
 
@@ -327,14 +329,16 @@ def test_explicit_consumer_binds_operation_result_and_consumption_receipts(tmp_p
         task_id="task-fixture-1",
     )
     assert outcome["completed"] is True
-    assert agent.persisted_message == "What happened?"
+    assert agent.user_message == "What happened?"
     assert agent.kwargs == {"task_id": "task-fixture-1"}
-    assert agent.api_message.startswith("What happened?\n\n<kwrag_slot_evidence>\n")
-    assert '"snippet":"fixture result"' in agent.api_message
+    assert agent.ephemeral_context.startswith("<kwrag_slot_evidence>\n")
+    assert '"snippet":"fixture result"' in agent.ephemeral_context
+    assert '"index_manifest":"sha256:' + "a" * 64 + '"' in agent.ephemeral_context
     assert prepared.consumption_receipt_status == "written"
     consumption = prepared.consumption_receipt
     assert consumption is not None
     assert consumption["result_receipt_digest"] == prepared.result_receipt_digest
+    assert consumption["index_manifest"] == "sha256:" + "a" * 64
     assert consumption["consumption_status"] == "assembled_into_ephemeral_user_context"
     assert "query" not in consumption and "results" not in consumption and "snippet" not in consumption
     assert prepared.consumption_receipt_digest == (
@@ -343,6 +347,17 @@ def test_explicit_consumer_binds_operation_result_and_consumption_receipts(tmp_p
     assert receipt_path.read_bytes() == (
         canonical_json_bytes(receipt) + b"\n" + canonical_json_bytes(consumption) + b"\n"
     )
+    assert prepared.content_free_attestation() == {
+        "schema": "jitech-hermes-kwrag-consumption-attestation/v1",
+        "componentDigest": component_digest,
+        "runtimeBindingDigest": "sha256:" + "c" * 64,
+        "indexManifestDigest": "sha256:" + "a" * 64,
+        "resultStatus": "hits",
+        "operationReceiptDigest": receipt["operation_receipt_digest"],
+        "resultReceiptDigest": prepared.result_receipt_digest,
+        "consumptionReceiptDigest": prepared.consumption_receipt_digest,
+        "linkageStatus": "complete",
+    }
 
 
 def test_disabled_binding_has_no_runtime_or_residual_slot_identity() -> None:
@@ -529,6 +544,10 @@ def test_approved_evidence_reaches_actual_aiagent_request_but_not_returned_histo
     agent.compression_enabled = False
     agent.save_trajectories = False
     captured: dict[str, object] = {}
+    projected: dict[str, list[dict]] = {}
+
+    def snapshot(name, messages, *_args, **_kwargs):
+        projected[name] = json.loads(json.dumps(messages))
 
     def respond(api_kwargs, **_kwargs):
         captured.update(api_kwargs)
@@ -547,9 +566,17 @@ def test_approved_evidence_reaches_actual_aiagent_request_but_not_returned_histo
 
     with (
         patch.object(agent, "_interruptible_api_call", side_effect=respond),
-        patch.object(agent, "_save_session_log"),
-        patch.object(agent, "_flush_messages_to_session_db"),
-        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_save_session_log", side_effect=lambda messages: snapshot("log", messages)),
+        patch.object(
+            agent,
+            "_flush_messages_to_session_db",
+            side_effect=lambda messages, history=None: snapshot("db", messages, history),
+        ),
+        patch.object(
+            agent,
+            "_save_trajectory",
+            side_effect=lambda messages, *_args: snapshot("trajectory", messages),
+        ),
         patch.object(agent, "_cleanup_task_resources"),
     ):
         outcome = run_conversation_with_approved_retrieval(
@@ -566,5 +593,178 @@ def test_approved_evidence_reaches_actual_aiagent_request_but_not_returned_histo
     returned_user = next(item for item in outcome["messages"] if item.get("role") == "user")
     assert returned_user["content"] == "What happened?"
     assert "fixture result" not in returned_user["content"]
+    assert set(projected) == {"db", "log", "trajectory"}
+    for messages in projected.values():
+        persisted_user = next(item for item in messages if item.get("role") == "user")
+        assert persisted_user["content"] == "What happened?"
+        assert "kwrag_slot_evidence" not in persisted_user["content"]
     assert outcome["final_response"] == "answer"
     assert prepared.consumption_receipt_status == "written"
+
+
+def test_explicit_retrieval_attempt_fails_open_only_for_bounded_outcomes() -> None:
+    from kwrag.slot_consumer import SlotConsumptionError
+    from plugins.kwrag_slot.consumer import HermesSlotRetrievalError
+    from plugins.kwrag_slot.prompt_context import run_conversation_after_explicit_retrieval
+
+    class Agent:
+        session_id = "fail-open-session"
+
+        def __init__(self):
+            self.calls = []
+
+        def run_conversation(self, message, **kwargs):
+            self.calls.append((message, kwargs))
+            return {"completed": True, "messages": [{"role": "user", "content": message}]}
+
+    cases = (
+        ("timeout", lambda: (_ for _ in ()).throw(TimeoutError("bounded timeout"))),
+        (
+            "verification_failed",
+            lambda: (_ for _ in ()).throw(SlotConsumptionError("receipt drift")),
+        ),
+        (
+            "unavailable",
+            lambda: (_ for _ in ()).throw(HermesSlotRetrievalError("component unavailable")),
+        ),
+        ("verification_failed", lambda: None),
+    )
+    for expected_status, retrieve in cases:
+        agent = Agent()
+        run = run_conversation_after_explicit_retrieval(
+            agent,
+            "clean question",
+            retrieve,
+            task_id="explicit-attempt",
+        )
+        assert run.retrieval_status == expected_status
+        assert run.attestation is None
+        assert agent.calls == [("clean question", {"task_id": "explicit-attempt"})]
+
+    agent = Agent()
+    with pytest.raises(RuntimeError, match="programming failure"):
+        run_conversation_after_explicit_retrieval(
+            agent,
+            "clean question",
+            lambda: (_ for _ in ()).throw(RuntimeError("programming failure")),
+        )
+    assert agent.calls == []
+
+
+def test_zero_hits_continue_clean_without_false_consumption(tmp_path: Path) -> None:
+    from plugins.kwrag_slot.consumer import (
+        FileConsumptionReceiptSink,
+        HermesSlotRetrievalBinding,
+        HermesSlotRetrievalConsumer,
+        HermesSlotRetrievalError,
+    )
+    from plugins.kwrag_slot.prompt_context import (
+        run_conversation_after_explicit_retrieval,
+        run_conversation_with_approved_retrieval,
+    )
+
+    binding = HermesSlotRetrievalBinding.from_mapping({
+        "schema_version": "hermes-kwrag-slot-binding-v1",
+        "enabled": True,
+        "component_digest": load_component_manifest()["component_wheel"]["sha256"],
+        "runtime_binding_digest": "sha256:" + "c" * 64,
+        "expected_index_manifest": "sha256:" + "a" * 64,
+        "expected_pipeline_fingerprint": "sha256:" + "b" * 64,
+        "max_result_characters": 100,
+    })
+
+    class Runtime:
+        def search_exchange(self, _request):
+            return _exchange([])
+
+    prepared = HermesSlotRetrievalConsumer(
+        binding,
+        Runtime(),
+        FileConsumptionReceiptSink(tmp_path / "zero-hit-receipts.jsonl"),
+    ).search(_request())
+    assert prepared.result_receipt["result_status"] == "zero_hits"
+
+    class Agent:
+        session_id = "zero-hit-session"
+
+        def __init__(self):
+            self.calls = []
+
+        def run_conversation(self, message, **kwargs):
+            self.calls.append((message, kwargs))
+            return {"completed": True, "messages": [{"role": "user", "content": message}]}
+
+    must_not_dispatch = Agent()
+    with pytest.raises(HermesSlotRetrievalError, match="no verified hits"):
+        run_conversation_with_approved_retrieval(
+            must_not_dispatch,
+            "clean question",
+            prepared,
+        )
+    assert must_not_dispatch.calls == []
+
+    agent = Agent()
+    run = run_conversation_after_explicit_retrieval(
+        agent,
+        "clean question",
+        lambda: prepared,
+    )
+    assert run.retrieval_status == "zero_hits"
+    assert agent.calls == [("clean question", {})]
+    assert prepared.consumption_receipt is None
+    assert prepared.consumption_receipt_status == "pending"
+    assert run.attestation is not None
+    assert run.attestation["indexManifestDigest"] == "sha256:" + "a" * 64
+    assert run.attestation["consumptionReceiptDigest"] is None
+    assert run.attestation["linkageStatus"] == "not_consumed_zero_hits"
+
+
+def test_explicit_retrieval_hits_return_bound_canary_attestation(tmp_path: Path) -> None:
+    from plugins.kwrag_slot.consumer import (
+        FileConsumptionReceiptSink,
+        HermesSlotRetrievalBinding,
+        HermesSlotRetrievalConsumer,
+    )
+    from plugins.kwrag_slot.prompt_context import run_conversation_after_explicit_retrieval
+
+    binding = HermesSlotRetrievalBinding.from_mapping({
+        "schema_version": "hermes-kwrag-slot-binding-v1",
+        "enabled": True,
+        "component_digest": load_component_manifest()["component_wheel"]["sha256"],
+        "runtime_binding_digest": "sha256:" + "c" * 64,
+        "expected_index_manifest": "sha256:" + "a" * 64,
+        "expected_pipeline_fingerprint": "sha256:" + "b" * 64,
+        "max_result_characters": 100,
+    })
+
+    class Runtime:
+        def search_exchange(self, _request):
+            return _exchange()
+
+    prepared = HermesSlotRetrievalConsumer(
+        binding,
+        Runtime(),
+        FileConsumptionReceiptSink(tmp_path / "hit-receipts.jsonl"),
+    ).search(_request())
+
+    class Agent:
+        session_id = "hit-session"
+
+        def run_conversation(self, message, **kwargs):
+            self.message = message
+            self.context = kwargs.pop("ephemeral_user_context")
+            assert kwargs == {}
+            return {"completed": True, "messages": [{"role": "user", "content": message}]}
+
+    agent = Agent()
+    run = run_conversation_after_explicit_retrieval(
+        agent,
+        "clean question",
+        lambda: prepared,
+    )
+    assert run.retrieval_status == "consumed"
+    assert agent.message == "clean question"
+    assert "kwrag_slot_evidence" in agent.context
+    assert run.attestation == prepared.content_free_attestation()
+    assert run.attestation["indexManifestDigest"] == "sha256:" + "a" * 64
+    assert run.attestation["linkageStatus"] == "complete"
