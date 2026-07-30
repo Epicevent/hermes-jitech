@@ -32,6 +32,13 @@ _BINDING_FIELDS = {
 }
 
 
+def _effective_user_id() -> int:
+    getter = getattr(os, "geteuid", None)
+    if getter is None:
+        raise OSError("POSIX effective user identity is unavailable")
+    return int(getter())
+
+
 class HermesSlotRetrievalError(ValueError):
     """The explicit Hermes/KWRAG boundary could not be verified."""
 
@@ -136,7 +143,8 @@ class FileConsumptionReceiptSink:
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
             raise OSError("provider attempt outcome is not a single-link regular file")
         if require_owner_mode and (
-            info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600
+            info.st_uid != _effective_user_id()
+            or stat.S_IMODE(info.st_mode) != 0o600
         ):
             raise OSError("provider attempt outcome owner or mode is invalid")
 
@@ -162,7 +170,7 @@ class FileConsumptionReceiptSink:
                 current = following
             parent_info = os.fstat(current)
             if (
-                parent_info.st_uid != os.geteuid()
+                parent_info.st_uid != _effective_user_id()
                 or stat.S_IMODE(parent_info.st_mode) != 0o700
             ):
                 raise OSError("consumption receipt parent owner or mode is invalid")
@@ -207,7 +215,7 @@ class FileConsumptionReceiptSink:
             if (
                 not stat.S_ISDIR(root_info.st_mode)
                 or root_info.st_nlink < 1
-                or root_info.st_uid != os.geteuid()
+                or root_info.st_uid != _effective_user_id()
                 or stat.S_IMODE(root_info.st_mode) != 0o700
             ):
                 raise OSError("provider attempt outcome directory identity is invalid")
@@ -237,7 +245,7 @@ class FileConsumptionReceiptSink:
                 if (
                     not stat.S_ISREG(existing_info.st_mode)
                     or existing_info.st_nlink != 1
-                    or existing_info.st_uid != os.geteuid()
+                    or existing_info.st_uid != _effective_user_id()
                     or stat.S_IMODE(existing_info.st_mode) != 0o600
                 ):
                     raise OSError("existing provider attempt outcome identity is invalid")
