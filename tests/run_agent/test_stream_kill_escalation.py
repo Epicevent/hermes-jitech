@@ -31,7 +31,7 @@ from agent.request_dispatch import (
 )
 
 
-def _supported_openai_client():
+def _stream_test_client():
     from openai import OpenAI
 
     client = OpenAI(api_key="fixture-key", base_url="https://example.com/v1")
@@ -118,11 +118,24 @@ class TestKillEscalation:
         with escalation the turn must fail within stale + grace, not 19.5
         minutes."""
         release = threading.Event()
-        mock_client = _supported_openai_client()
+        mock_client = _stream_test_client()
         mock_client.chat.completions.create.side_effect = (
             lambda *a, **kw: _BlockingStream(release)
         )
         mock_create.return_value = mock_client
+
+        # This test exercises watchdog/dispatch arbitration, not provider-leaf
+        # capability.  Production OpenAI leaves intentionally fail closed for
+        # retrieval evidence until an atomic serialized-request adapter exists.
+        def require_synthetic_atomic_test_boundary(client):
+            if client is mock_client:
+                return "tests.fixture.AtomicSerializedRequestAdapter"
+            raise AssertionError("unexpected provider client in watchdog fixture")
+
+        monkeypatch.setattr(
+            "agent.chat_completion_helpers.require_authoritative_leaf_adapter",
+            require_synthetic_atomic_test_boundary,
+        )
 
         monkeypatch.setenv("HERMES_STREAM_STALE_TIMEOUT", "0.5")
         monkeypatch.setenv("HERMES_STREAM_KILL_GRACE_SECONDS", "0.4")
@@ -222,7 +235,7 @@ class TestKillEscalation:
             _BlockingStream(release, exc=httpx.ReadTimeout("simulated kill")),
             iter([_make_stream_chunk(content="ok", finish_reason="stop")]),
         ]
-        mock_client = _supported_openai_client()
+        mock_client = _stream_test_client()
         mock_client.chat.completions.create.side_effect = (
             lambda *a, **kw: streams.pop(0)
         )
@@ -272,7 +285,7 @@ class TestKillEscalation:
             _BlockingStream(release, exc=httpx.ReadTimeout("simulated kill")),
             iter([_make_stream_chunk(content="ok", finish_reason="stop")]),
         ]
-        mock_client = _supported_openai_client()
+        mock_client = _stream_test_client()
         mock_client.chat.completions.create.side_effect = (
             lambda *a, **kw: streams.pop(0)
         )
