@@ -460,9 +460,15 @@ def test_exact_anthropic_bedrock_leaf_is_supported_without_broadening(
         {"__module__": "anthropic.lib.bedrock._client"},
     )
     module = SimpleNamespace(AnthropicBedrock=expected_type)
+
+    def import_exact_bedrock_module(module_name: str):
+        if module_name != "anthropic.lib.bedrock._client":
+            raise ImportError(f"unexpected provider SDK module: {module_name}")
+        return module
+
     monkeypatch.setattr(
         "agent.request_dispatch.importlib.import_module",
-        lambda _module_name: module,
+        import_exact_bedrock_module,
     )
     assert require_authoritative_leaf_adapter(expected_type()) == (
         "anthropic.lib.bedrock._client.AnthropicBedrock"
@@ -480,6 +486,16 @@ def test_exact_anthropic_bedrock_leaf_is_supported_without_broadening(
     subclass.__module__ = "anthropic.lib.bedrock._client"
     with pytest.raises(FinalProviderBindingUnsupported):
         require_authoritative_leaf_adapter(subclass())
+
+    from agent import request_dispatch
+
+    monkeypatch.setitem(
+        request_dispatch._STATIC_LEAF_CLIENTS,
+        "anthropic.lib.bedrock._client.AnthropicBedrock",
+        ("anthropic.lib.bedrock.wrong", "AnthropicBedrock"),
+    )
+    with pytest.raises(FinalProviderBindingUnsupported, match="unavailable"):
+        require_authoritative_leaf_adapter(expected_type())
 
 
 @pytest.mark.parametrize(
@@ -834,9 +850,15 @@ def test_bedrock_snapshot_and_live_leaf_bind_the_same_regional_endpoint(
         endpoint_url="https://bedrock-runtime.eu-west-1.amazonaws.com",
         service_model=SimpleNamespace(service_name="bedrock-runtime"),
     )
+
+    def import_exact_botocore_module(module_name: str):
+        if module_name != "botocore.client":
+            raise ImportError(f"unexpected provider SDK module: {module_name}")
+        return SimpleNamespace(BaseClient=base_client)
+
     monkeypatch.setattr(
         "agent.request_dispatch.importlib.import_module",
-        lambda _module_name: SimpleNamespace(BaseClient=base_client),
+        import_exact_botocore_module,
     )
 
     assert require_authoritative_leaf_adapter(client) == (

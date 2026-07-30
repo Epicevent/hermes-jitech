@@ -1501,6 +1501,90 @@ def test_unaccepted_first_evidence_response_cannot_start_a_clean_second_request(
     assert prepared.provider_attempt_outcome_status == "written"
 
 
+def test_partial_stream_tool_call_cannot_start_a_clean_second_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from plugins.kwrag_slot.prompt_context import (
+        run_conversation_with_approved_retrieval,
+    )
+
+    prepared, _receipt_path = _prepared_hits(
+        tmp_path,
+        "partial-stream-tool-call.jsonl",
+    )
+    agent = _actual_chat_completions_agent(
+        "partial-stream-tool-call-session"
+    )
+    agent._disable_streaming = False
+    request_client = _supported_openai_client()
+
+    def stream_chunk(*, content=None, tool_calls=None):
+        return SimpleNamespace(
+            choices=[SimpleNamespace(
+                index=0,
+                delta=SimpleNamespace(
+                    content=content,
+                    tool_calls=tool_calls,
+                    reasoning_content=None,
+                    reasoning=None,
+                ),
+                finish_reason=None,
+            )],
+            model="fixture-model",
+            usage=None,
+        )
+
+    def tool_call_delta(*, identifier=None, name=None, arguments=None):
+        return SimpleNamespace(
+            index=0,
+            id=identifier,
+            function=SimpleNamespace(name=name, arguments=arguments),
+        )
+
+    def stalling_stream():
+        yield stream_chunk(content="Preparing the authorized action: ")
+        yield stream_chunk(tool_calls=[tool_call_delta(
+            identifier="call-partial",
+            name="write_file",
+        )])
+        yield stream_chunk(tool_calls=[tool_call_delta(
+            arguments='{"path": "/tmp/result", ',
+        )])
+        raise RuntimeError("simulated provider stream interruption")
+
+    request_client.chat.completions.create.side_effect = (
+        lambda **_kwargs: stalling_stream()
+    )
+    monkeypatch.setenv("HERMES_STREAM_RETRIES", "0")
+
+    with (
+        patch.object(agent, "_create_request_openai_client", return_value=request_client),
+        patch.object(agent, "_close_request_openai_client"),
+        patch.object(agent, "_try_recover_primary_transport") as recover,
+        patch.object(agent, "_try_activate_fallback") as fallback,
+        patch.object(agent, "_persist_session"),
+        patch.object(agent, "_save_session_log"),
+        patch.object(agent, "_flush_messages_to_session_db"),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+    ):
+        outcome = run_conversation_with_approved_retrieval(
+            agent,
+            "authorized retrieval turn",
+            prepared,
+        )
+
+    request_client.chat.completions.create.assert_called_once()
+    recover.assert_not_called()
+    fallback.assert_not_called()
+    assert outcome["completed"] is False
+    assert outcome["failed"] is True
+    assert outcome["api_calls"] == 1
+    assert "clean follow-up request is forbidden" in outcome["error"]
+    assert prepared.consumption_receipt_status == "written"
+
+
 def test_tool_response_local_failure_does_not_authorize_clean_follow_up(
     tmp_path: Path,
 ) -> None:
