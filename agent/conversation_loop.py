@@ -668,11 +668,23 @@ def run_conversation(
         ephemeral_user_context: Optional API-only context appended to the
             current user message on provider requests. It is never added to
             the in-memory conversation, persisted transcript, or returned
-            message history.
+            message history. Persistent Codex app-server sessions reject this
+            option because their reused provider thread cannot provide that
+            request-only guarantee.
 
     Returns:
         Dict: Complete conversation result with final response and message history
     """
+    if (
+        getattr(agent, "api_mode", None) == "codex_app_server"
+        and isinstance(ephemeral_user_context, str)
+        and ephemeral_user_context
+    ):
+        raise ValueError(
+            "ephemeral_user_context is not supported by persistent "
+            "codex_app_server sessions"
+        )
+
     # Guard stdio against OSError from broken pipes (systemd/headless/daemon).
     # Installed once, transparent when streams are healthy, prevents crash on write.
     _install_safe_stdio()
@@ -1070,11 +1082,8 @@ def run_conversation(
     # See agent/transports/codex_app_server_session.py for the adapter
     # and references/codex-app-server-runtime.md for the rationale.
     if agent.api_mode == "codex_app_server":
-        codex_user_message = user_message
-        if ephemeral_user_context:
-            codex_user_message = user_message + "\n\n" + ephemeral_user_context
         return agent._run_codex_app_server_turn(
-            user_message=codex_user_message,
+            user_message=user_message,
             original_user_message=original_user_message,
             messages=messages,
             effective_task_id=effective_task_id,

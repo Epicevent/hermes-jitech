@@ -232,6 +232,25 @@ class TestRunConversationCodexPath:
             agent.run_conversation("hi")
         assert not client_mock.chat.completions.create.called
 
+    def test_request_only_context_is_rejected_before_reused_thread(self, fake_session):
+        """Raw evidence must never enter a Codex thread reused by later turns."""
+        agent = _make_codex_agent()
+        raw_evidence = "<kwrag_slot_evidence>private-fixture</kwrag_slot_evidence>"
+
+        with patch.object(agent, "_spawn_background_review", return_value=None):
+            with pytest.raises(ValueError, match="persistent codex_app_server"):
+                agent.run_conversation(
+                    "authorized retrieval turn",
+                    ephemeral_user_context=raw_evidence,
+                )
+
+            assert getattr(agent, "_codex_session", None) is None
+            result = agent.run_conversation("later clean turn")
+
+        assert result["final_response"] == "echo: later clean turn"
+        assert raw_evidence not in result["final_response"]
+        assert all(raw_evidence not in str(message) for message in result["messages"])
+
 
 class TestReviewForkApiModeDowngrade:
     """When the parent agent runs on codex_app_server, the background

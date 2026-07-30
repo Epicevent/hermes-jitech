@@ -4,13 +4,14 @@ The caller decides whether and when retrieval runs.  This module does not
 select a backend, derive a query, register a model tool, or run automatically.
 It only carries already-verified raw evidence through Hermes' existing
 API-only user-message path while preserving the clean user message in history.
+The serialized result-and-score representation is private and provisional;
+it is not a public prompt contract or an invocation-policy decision.
 """
 
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 from plugins.kwrag_slot.consumer import (
     HermesSlotRetrievalError,
@@ -44,6 +45,10 @@ def run_conversation_with_approved_retrieval(
         raise HermesSlotRetrievalError("user message is invalid")
     if "persist_user_message" in kwargs or "ephemeral_user_context" in kwargs:
         raise HermesSlotRetrievalError("user-message projection is owned by the retrieval seam")
+    if getattr(agent, "api_mode", None) == "codex_app_server":
+        raise HermesSlotRetrievalError(
+            "persistent codex app-server sessions cannot consume retrieval evidence"
+        )
     session_id = str(getattr(agent, "session_id", "") or "")
     if not session_id:
         raise HermesSlotRetrievalError("Hermes session identity is unavailable")
@@ -66,111 +71,3 @@ def run_conversation_with_approved_retrieval(
     if not isinstance(outcome, dict):
         raise HermesSlotRetrievalError("Hermes conversation result is invalid")
     return outcome
-
-
-@dataclass(frozen=True)
-class HermesSlotConversationRun:
-    """Content-free retrieval disposition plus the normal Hermes outcome."""
-
-    conversation: dict[str, Any]
-    retrieval_status: str
-    attestation: dict[str, Any] | None
-
-
-def _run_clean_turn(
-    agent: Any,
-    user_message: str,
-    *,
-    retrieval_status: str,
-    attestation: dict[str, Any] | None = None,
-    **kwargs: Any,
-) -> HermesSlotConversationRun:
-    outcome = agent.run_conversation(user_message, **kwargs)
-    if not isinstance(outcome, dict):
-        raise HermesSlotRetrievalError("Hermes conversation result is invalid")
-    return HermesSlotConversationRun(outcome, retrieval_status, attestation)
-
-
-def run_conversation_after_explicit_retrieval(
-    agent: Any,
-    user_message: str,
-    retrieve: Callable[[], HermesSlotRetrievalResult],
-    **kwargs: Any,
-) -> HermesSlotConversationRun:
-    """Run one caller-authorized attempt and fail open to a clean Hermes turn.
-
-    This function does not decide whether retrieval should run, construct a
-    query, select a backend, retry, or fall back to another backend. The caller
-    supplies one already-authorized attempt. Only built-in timeout and the
-    strict KWRAG/Hermes verification boundary are converted to a clean turn;
-    unrelated programming failures still propagate.
-    """
-
-    if not isinstance(user_message, str) or not user_message:
-        raise HermesSlotRetrievalError("user message is invalid")
-    if "persist_user_message" in kwargs or "ephemeral_user_context" in kwargs:
-        raise HermesSlotRetrievalError("user-message projection is owned by the retrieval seam")
-    try:
-        result = retrieve()
-    except TimeoutError:
-        return _run_clean_turn(
-            agent,
-            user_message,
-            retrieval_status="timeout",
-            **kwargs,
-        )
-    except HermesSlotRetrievalError:
-        return _run_clean_turn(
-            agent,
-            user_message,
-            retrieval_status="unavailable",
-            **kwargs,
-        )
-    except Exception as exc:
-        try:
-            from kwrag.slot_consumer import SlotConsumptionError
-        except ImportError:
-            raise
-        if not isinstance(exc, SlotConsumptionError):
-            raise
-        return _run_clean_turn(
-            agent,
-            user_message,
-            retrieval_status="verification_failed",
-            **kwargs,
-        )
-
-    if not isinstance(result, HermesSlotRetrievalResult):
-        return _run_clean_turn(
-            agent,
-            user_message,
-            retrieval_status="verification_failed",
-            **kwargs,
-        )
-    if result.result_receipt.get("result_status") == "zero_hits":
-        return _run_clean_turn(
-            agent,
-            user_message,
-            retrieval_status="zero_hits",
-            attestation=result.content_free_attestation(),
-            **kwargs,
-        )
-    if result.result_receipt.get("result_status") != "hits":
-        return _run_clean_turn(
-            agent,
-            user_message,
-            retrieval_status="verification_failed",
-            **kwargs,
-        )
-
-    conversation = run_conversation_with_approved_retrieval(
-        agent,
-        user_message,
-        result,
-        **kwargs,
-    )
-    return HermesSlotConversationRun(
-        conversation,
-        "consumed",
-        result.content_free_attestation(),
-    )
