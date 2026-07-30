@@ -452,19 +452,30 @@ def test_provider_call_identity_cannot_be_reused_or_swapped_after_commit() -> No
 
 
 def test_exact_anthropic_bedrock_leaf_is_supported_without_broadening() -> None:
-    bedrock_type = type(
-        "AnthropicBedrock",
-        (),
-        {"__module__": "anthropic.lib.bedrock._client"},
+    from anthropic.lib.bedrock._client import AnthropicBedrock
+
+    leaf = AnthropicBedrock(
+        aws_access_key="fixture-access-key",
+        aws_secret_key="fixture-secret-key",
+        aws_region="us-east-1",
     )
-    leaf = bedrock_type()
     assert require_authoritative_leaf_adapter(leaf) == (
         "anthropic.lib.bedrock._client.AnthropicBedrock"
     )
 
-    subclass = type("AnthropicBedrockProxy", (bedrock_type,), {})
+    spoof_type = type(
+        "AnthropicBedrock",
+        (),
+        {"__module__": "anthropic.lib.bedrock._client"},
+    )
     with pytest.raises(FinalProviderBindingUnsupported):
-        require_authoritative_leaf_adapter(subclass())
+        require_authoritative_leaf_adapter(spoof_type())
+
+    subclass = type("AnthropicBedrock", (AnthropicBedrock,), {})
+    subclass.__module__ = "anthropic.lib.bedrock._client"
+    forged_subclass = object.__new__(subclass)
+    with pytest.raises(FinalProviderBindingUnsupported):
+        require_authoritative_leaf_adapter(forged_subclass)
 
 
 @pytest.mark.parametrize(
@@ -564,8 +575,10 @@ def test_unknown_or_subclass_leaf_is_not_positive_capability(client) -> None:
 
 
 def test_exact_supported_leaf_family_is_positive_capability() -> None:
-    client_type = type("OpenAI", (), {"__module__": "openai"})
-    assert require_authoritative_leaf_adapter(client_type()) == "openai.OpenAI"
+    from openai import OpenAI
+
+    client = OpenAI(api_key="fixture-key")
+    assert require_authoritative_leaf_adapter(client) == "openai.OpenAI"
 
 
 def test_codex_final_callsite_rejects_unbound_facade_before_receipt_or_sdk() -> None:
@@ -795,6 +808,8 @@ def test_malformed_live_endpoint_cannot_fall_back_to_configured_identity() -> No
 
 
 def test_bedrock_snapshot_and_live_leaf_bind_the_same_regional_endpoint() -> None:
+    import boto3
+
     agent = SimpleNamespace(
         provider="bedrock",
         model="anthropic.claude-test-v1:0",
@@ -804,14 +819,11 @@ def test_bedrock_snapshot_and_live_leaf_bind_the_same_regional_endpoint() -> Non
         _fallback_chain=[],
     )
     route = snapshot_allowed_provider_routes(agent)[0]
-    client_type = type(
-        "BedrockRuntime",
-        (),
-        {"__module__": "botocore.client"},
-    )
-    client = client_type()
-    client.meta = SimpleNamespace(
-        endpoint_url="https://bedrock-runtime.eu-west-1.amazonaws.com"
+    client = boto3.client(
+        "bedrock-runtime",
+        region_name="eu-west-1",
+        aws_access_key_id="fixture-access-key",
+        aws_secret_access_key="fixture-secret-key",
     )
 
     assert require_authoritative_leaf_adapter(client) == (

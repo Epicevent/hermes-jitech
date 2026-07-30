@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import math
 import os
@@ -29,12 +30,14 @@ class FinalProviderBindingUnsupported(RuntimeError):
     """The selected provider reshapes requests below the bound SDK seam."""
 
 
-_SUPPORTED_LEAF_CLIENTS = {
-    "anthropic.Anthropic",
-    "anthropic.lib.bedrock._client.AnthropicBedrock",
-    "botocore.client.BedrockRuntime",
-    "openai.OpenAI",
-    "openai.lib.azure.AzureOpenAI",
+_STATIC_LEAF_CLIENTS = {
+    "anthropic.Anthropic": ("anthropic", "Anthropic"),
+    "anthropic.lib.bedrock._client.AnthropicBedrock": (
+        "anthropic.lib.bedrock._client",
+        "AnthropicBedrock",
+    ),
+    "openai.OpenAI": ("openai", "OpenAI"),
+    "openai.lib.azure.AzureOpenAI": ("openai.lib.azure", "AzureOpenAI"),
 }
 
 
@@ -161,11 +164,42 @@ def require_authoritative_leaf_adapter(client: Any) -> str:
     """Accept only concrete SDK leaves whose kwargs are the final request shape."""
 
     identity = provider_leaf_adapter_identity(client)
-    if identity not in _SUPPORTED_LEAF_CLIENTS:
+    static_leaf = _STATIC_LEAF_CLIENTS.get(identity)
+    if static_leaf is not None:
+        module_name, class_name = static_leaf
+        try:
+            expected_type = getattr(importlib.import_module(module_name), class_name)
+        except (AttributeError, ImportError) as exc:
+            raise FinalProviderBindingUnsupported(
+                f"provider SDK leaf type is unavailable for {identity}"
+            ) from exc
+        if type(client) is not expected_type:
+            raise FinalProviderBindingUnsupported(
+                f"provider leaf request binding is unavailable for {identity}"
+            )
+        return identity
+
+    if identity == "botocore.client.BedrockRuntime":
+        try:
+            base_client = getattr(importlib.import_module("botocore.client"), "BaseClient")
+        except (AttributeError, ImportError) as exc:
+            raise FinalProviderBindingUnsupported(
+                "botocore Bedrock leaf type is unavailable"
+            ) from exc
+        service_model = getattr(getattr(client, "meta", None), "service_model", None)
+        if not isinstance(client, base_client) or getattr(
+            service_model, "service_name", None
+        ) != "bedrock-runtime":
+            raise FinalProviderBindingUnsupported(
+                f"provider leaf request binding is unavailable for {identity}"
+            )
+        return identity
+
+    if identity not in _STATIC_LEAF_CLIENTS:
         raise FinalProviderBindingUnsupported(
             f"provider leaf request binding is unavailable for {identity}"
         )
-    return identity
+    raise AssertionError("unreachable provider leaf identity")
 
 
 def canonical_endpoint_identity(value: Any, *, provider: str) -> str:

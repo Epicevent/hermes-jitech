@@ -31,12 +31,10 @@ from agent.request_dispatch import (
 )
 
 
-_SupportedOpenAILeaf = type("OpenAI", (), {"__module__": "openai"})
-
-
 def _supported_openai_client():
-    client = _SupportedOpenAILeaf()
-    client.base_url = "https://example.com/v1"
+    from openai import OpenAI
+
+    client = OpenAI(api_key="fixture-key", base_url="https://example.com/v1")
     client.chat = SimpleNamespace(
         completions=SimpleNamespace(create=MagicMock())
     )

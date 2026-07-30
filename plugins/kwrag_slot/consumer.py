@@ -220,16 +220,28 @@ class FileConsumptionReceiptSink:
                 ):
                     raise OSError("consumption receipt file identity is invalid")
 
-            descriptor = os.open(
-                self._path.name,
-                os.O_WRONLY
-                | os.O_CREAT
-                | os.O_APPEND
-                | os.O_CLOEXEC
-                | os.O_NOFOLLOW,
-                0o600,
-                dir_fd=parent,
-            )
+            open_flags = os.O_RDWR | os.O_APPEND | os.O_CLOEXEC | os.O_NOFOLLOW
+            if existed:
+                descriptor = os.open(
+                    self._path.name,
+                    open_flags,
+                    dir_fd=parent,
+                )
+            else:
+                try:
+                    descriptor = os.open(
+                        self._path.name,
+                        open_flags | os.O_CREAT | os.O_EXCL,
+                        0o600,
+                        dir_fd=parent,
+                    )
+                except FileExistsError:
+                    existed = True
+                    descriptor = os.open(
+                        self._path.name,
+                        open_flags,
+                        dir_fd=parent,
+                    )
             try:
                 if not existed:
                     os.fchmod(descriptor, 0o600)
@@ -237,13 +249,28 @@ class FileConsumptionReceiptSink:
                 import fcntl
 
                 fcntl.flock(descriptor, fcntl.LOCK_EX)
+                original_size = os.fstat(descriptor).st_size
                 try:
                     # Keep the approved directory fd open, and prove the
                     # pathname still resolves to that inode immediately
                     # before publishing any receipt bytes.
                     self._assert_receipt_parent_path_identity(parent_identity)
-                    self._write_all(descriptor, raw)
-                    os.fsync(descriptor)
+                    try:
+                        self._write_all(descriptor, raw)
+                        os.fsync(descriptor)
+                        # A same-UID peer can rename the directory while the
+                        # held fd remains valid.  Success therefore requires a
+                        # post-publication identity check as well.  If the
+                        # pathname moved during the write, remove exactly this
+                        # append before returning fail-closed.
+                        self._assert_receipt_parent_path_identity(parent_identity)
+                    except BaseException:
+                        os.ftruncate(descriptor, original_size)
+                        os.fsync(descriptor)
+                        if not existed:
+                            os.unlink(self._path.name, dir_fd=parent)
+                            os.fsync(parent)
+                        raise
                 finally:
                     fcntl.flock(descriptor, fcntl.LOCK_UN)
             finally:

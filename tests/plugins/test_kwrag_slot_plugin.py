@@ -40,21 +40,13 @@ def _embedded_component_on_path(monkeypatch):
             sys.modules.pop(name, None)
 
 
-_SupportedOpenAILeaf = type("OpenAI", (), {"__module__": "openai"})
-_SupportedAnthropicLeaf = type("Anthropic", (), {"__module__": "anthropic"})
-_SupportedAnthropicBedrockLeaf = type(
-    "AnthropicBedrock",
-    (),
-    {"__module__": "anthropic.lib.bedrock._client"},
-)
-
-
 def _supported_openai_client(
     *,
     base_url: str = "https://openrouter.ai/api/v1",
 ):
-    client = _SupportedOpenAILeaf()
-    client.base_url = base_url
+    from openai import OpenAI
+
+    client = OpenAI(api_key="fixture-key", base_url=base_url)
     client.chat = SimpleNamespace(
         completions=SimpleNamespace(create=MagicMock())
     )
@@ -69,8 +61,9 @@ def _supported_anthropic_client(
     *,
     base_url: str = "https://api.anthropic.com",
 ):
-    client = _SupportedAnthropicLeaf()
-    client.base_url = base_url
+    from anthropic import Anthropic
+
+    client = Anthropic(api_key="fixture-key", base_url=base_url)
     client.messages = SimpleNamespace(
         create=MagicMock(),
         stream=MagicMock(),
@@ -80,7 +73,13 @@ def _supported_anthropic_client(
 
 
 def _supported_anthropic_bedrock_client():
-    client = _SupportedAnthropicBedrockLeaf()
+    from anthropic.lib.bedrock._client import AnthropicBedrock
+
+    client = AnthropicBedrock(
+        aws_access_key="fixture-access-key",
+        aws_secret_key="fixture-secret-key",
+        aws_region="us-east-1",
+    )
     client.messages = SimpleNamespace(
         create=MagicMock(),
         stream=MagicMock(),
@@ -861,6 +860,41 @@ def test_consumption_receipt_parent_swap_before_append_writes_zero_bytes(
         "_assert_receipt_parent_path_identity",
         swap_before_identity_assert,
     )
+    with pytest.raises(HermesSlotRetrievalError, match="approved POSIX ledger"):
+        sink.write({"schema_version": "fixture-consumption-v1"})
+
+    assert list(receipt_parent.iterdir()) == []
+    assert list(detached_parent.iterdir()) == []
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX parent inode binding contract")
+def test_consumption_receipt_parent_swap_at_first_write_rolls_back_to_zero_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from plugins.kwrag_slot.consumer import (
+        FileConsumptionReceiptSink,
+        HermesSlotRetrievalError,
+    )
+
+    receipt_parent = tmp_path / "trusted-write-ledger"
+    receipt_parent.mkdir(mode=0o700)
+    receipt_parent.chmod(0o700)
+    detached_parent = tmp_path / "detached-write-ledger"
+    sink = FileConsumptionReceiptSink(receipt_parent / "consumption.jsonl")
+    original_write_all = sink._write_all
+    swapped = False
+
+    def swap_at_first_write(descriptor: int, raw: bytes) -> None:
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            receipt_parent.rename(detached_parent)
+            receipt_parent.mkdir(mode=0o700)
+            receipt_parent.chmod(0o700)
+        original_write_all(descriptor, raw)
+
+    monkeypatch.setattr(sink, "_write_all", swap_at_first_write)
     with pytest.raises(HermesSlotRetrievalError, match="approved POSIX ledger"):
         sink.write({"schema_version": "fixture-consumption-v1"})
 
@@ -1782,6 +1816,62 @@ def test_actual_aiagent_client_creation_failure_stays_not_consumed(
     assert attestation["dispatchHandoffStatus"] == "not_committed"
     assert attestation["transportOutcomeStatus"] == "not_attempted"
     assert receipt_path.read_bytes() == canonical_json_bytes(prepared.result_receipt) + b"\n"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX parent inode binding contract")
+def test_parent_swap_at_consumption_write_fails_before_sdk_and_rolls_back(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from plugins.kwrag_slot.consumer import HermesSlotRetrievalError
+    from plugins.kwrag_slot.prompt_context import run_conversation_with_approved_retrieval
+
+    ledger_parent = tmp_path / "dispatch-ledger"
+    ledger_parent.mkdir(mode=0o700)
+    ledger_parent.chmod(0o700)
+    detached_parent = tmp_path / "detached-dispatch-ledger"
+    prepared, receipt_path = _prepared_hits(
+        ledger_parent,
+        "parent-swap-before-sdk.jsonl",
+    )
+    original_receipt_bytes = receipt_path.read_bytes()
+    sink = prepared._receipt_sink
+    original_write_all = sink._write_all
+    swapped = False
+
+    def swap_at_consumption_write(descriptor: int, raw: bytes) -> None:
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            ledger_parent.rename(detached_parent)
+            ledger_parent.mkdir(mode=0o700)
+            ledger_parent.chmod(0o700)
+        original_write_all(descriptor, raw)
+
+    monkeypatch.setattr(sink, "_write_all", swap_at_consumption_write)
+    agent = _actual_chat_completions_agent("parent-swap-before-sdk-session")
+    request_client = _supported_openai_client()
+    with (
+        patch.object(agent, "_create_request_openai_client", return_value=request_client),
+        patch.object(agent, "_close_request_openai_client"),
+        patch.object(agent, "_persist_session"),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+        pytest.raises(HermesSlotRetrievalError),
+    ):
+        run_conversation_with_approved_retrieval(
+            agent,
+            "authorized retrieval turn",
+            prepared,
+        )
+
+    request_client.chat.completions.create.assert_not_called()
+    assert prepared.consumption_receipt_status == "pending"
+    assert list(ledger_parent.iterdir()) == []
+    assert (
+        detached_parent.joinpath("parent-swap-before-sdk.jsonl").read_bytes()
+        == original_receipt_bytes
+    )
 
 
 def test_actual_aiagent_commits_exactly_once_at_sdk_dispatch_handoff(
