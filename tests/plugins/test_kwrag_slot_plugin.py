@@ -799,10 +799,12 @@ def test_provider_outcome_replay_rejects_same_inode_content_mutation(
         return raw
 
     monkeypatch.setattr(sink, "_read_all", mutate_after_initial_replay_read)
-    with pytest.raises(HermesSlotRetrievalError, match="changed during replay"):
+    with pytest.raises(HermesSlotRetrievalError, match="persisted safely") as caught:
         sink.write_once(identity, receipt)
 
     assert read_count == 2
+    assert isinstance(caught.value.__cause__, OSError)
+    assert "public bytes changed" in str(caught.value.__cause__)
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX outcome linearization contract")
