@@ -138,6 +138,11 @@ def _exchange(results: list[dict] | None = None) -> SimpleNamespace:
     return SimpleNamespace(response=response, operation_receipt=receipt)
 
 
+def _fixture_result_character_budget() -> int:
+    results = _exchange().response["results"]
+    return len(canonical_json_bytes(results).decode("utf-8"))
+
+
 def test_plugin_registers_only_operator_cli() -> None:
     manager = PluginManager()
     ctx = PluginContext(PluginManifest(name="kwrag_slot"), manager)
@@ -284,7 +289,7 @@ def test_explicit_consumer_binds_operation_result_and_consumption_receipts(tmp_p
         "runtime_binding_digest": "sha256:" + "c" * 64,
         "expected_index_manifest": "sha256:" + "a" * 64,
         "expected_pipeline_fingerprint": "sha256:" + "b" * 64,
-        "max_result_characters": 100,
+        "max_result_characters": _fixture_result_character_budget(),
     })
 
     class Runtime:
@@ -305,6 +310,7 @@ def test_explicit_consumer_binds_operation_result_and_consumption_receipts(tmp_p
     assert receipt["result_digest"] == _exchange().response["result_digest"]
     assert receipt["adapter_status"] == "verified_by_product_adapter"
     assert receipt["result_status"] == "hits"
+    assert receipt["result_characters"] == _fixture_result_character_budget()
     assert "query" not in receipt and "results" not in receipt and "snippet" not in receipt
     assert prepared.result_receipt_digest == (
         "sha256:" + hashlib.sha256(canonical_json_bytes(receipt)).hexdigest()
@@ -360,6 +366,55 @@ def test_explicit_consumer_binds_operation_result_and_consumption_receipts(tmp_p
     }
 
 
+def test_consumer_budgets_complete_canonical_results_with_catch_and_valid_controls(
+    tmp_path: Path,
+) -> None:
+    from kwrag.slot_consumer import SlotConsumptionError
+    from plugins.kwrag_slot.consumer import (
+        FileConsumptionReceiptSink,
+        HermesSlotRetrievalBinding,
+        HermesSlotRetrievalConsumer,
+    )
+
+    component_digest = load_component_manifest()["component_wheel"]["sha256"]
+    full_payload_characters = _fixture_result_character_budget()
+    assert full_payload_characters > len("fixture result")
+    binding_fields = {
+        "schema_version": "hermes-kwrag-slot-binding-v1",
+        "enabled": True,
+        "component_digest": component_digest,
+        "runtime_binding_digest": "sha256:" + "c" * 64,
+        "expected_index_manifest": "sha256:" + "a" * 64,
+        "expected_pipeline_fingerprint": "sha256:" + "b" * 64,
+    }
+
+    class Runtime:
+        def search_exchange(self, _request):
+            return _exchange()
+
+    too_small = HermesSlotRetrievalBinding.from_mapping({
+        **binding_fields,
+        "max_result_characters": full_payload_characters - 1,
+    })
+    with pytest.raises(SlotConsumptionError, match="result character budget is exceeded"):
+        HermesSlotRetrievalConsumer(
+            too_small,
+            Runtime(),
+            FileConsumptionReceiptSink(tmp_path / "too-small.jsonl"),
+        ).search(_request())
+
+    exact = HermesSlotRetrievalBinding.from_mapping({
+        **binding_fields,
+        "max_result_characters": full_payload_characters,
+    })
+    prepared = HermesSlotRetrievalConsumer(
+        exact,
+        Runtime(),
+        FileConsumptionReceiptSink(tmp_path / "exact.jsonl"),
+    ).search(_request())
+    assert prepared.result_receipt["result_characters"] == full_payload_characters
+
+
 def test_disabled_binding_has_no_runtime_or_residual_slot_identity() -> None:
     from plugins.kwrag_slot.consumer import (
         HermesSlotRetrievalBinding,
@@ -397,7 +452,7 @@ def test_enabled_binding_fails_closed_on_component_or_receipt_drift() -> None:
         "runtime_binding_digest": "sha256:" + "c" * 64,
         "expected_index_manifest": "sha256:" + "a" * 64,
         "expected_pipeline_fingerprint": "sha256:" + "b" * 64,
-        "max_result_characters": 100,
+        "max_result_characters": _fixture_result_character_budget(),
     }
     with pytest.raises(HermesSlotRetrievalError, match="embedded component"):
         HermesSlotRetrievalBinding.from_mapping({**base, "component_digest": "sha256:" + "d" * 64})
@@ -428,7 +483,7 @@ def test_consumption_receipt_sink_digest_mismatch_fails_closed() -> None:
         "runtime_binding_digest": "sha256:" + "c" * 64,
         "expected_index_manifest": "sha256:" + "a" * 64,
         "expected_pipeline_fingerprint": "sha256:" + "b" * 64,
-        "max_result_characters": 100,
+        "max_result_characters": _fixture_result_character_budget(),
     })
 
     class Runtime:
@@ -459,7 +514,7 @@ def test_prompt_consumption_is_single_use_and_requires_session_identity(tmp_path
         "runtime_binding_digest": "sha256:" + "c" * 64,
         "expected_index_manifest": "sha256:" + "a" * 64,
         "expected_pipeline_fingerprint": "sha256:" + "b" * 64,
-        "max_result_characters": 100,
+        "max_result_characters": _fixture_result_character_budget(),
     })
 
     class Runtime:
@@ -511,7 +566,7 @@ def test_approved_evidence_reaches_actual_aiagent_request_but_not_returned_histo
         "runtime_binding_digest": "sha256:" + "c" * 64,
         "expected_index_manifest": "sha256:" + "a" * 64,
         "expected_pipeline_fingerprint": "sha256:" + "b" * 64,
-        "max_result_characters": 100,
+        "max_result_characters": _fixture_result_character_budget(),
     })
 
     class Runtime:
@@ -670,7 +725,7 @@ def test_zero_hits_continue_clean_without_false_consumption(tmp_path: Path) -> N
         "runtime_binding_digest": "sha256:" + "c" * 64,
         "expected_index_manifest": "sha256:" + "a" * 64,
         "expected_pipeline_fingerprint": "sha256:" + "b" * 64,
-        "max_result_characters": 100,
+        "max_result_characters": _fixture_result_character_budget(),
     })
 
     class Runtime:
@@ -734,7 +789,7 @@ def test_explicit_retrieval_hits_return_bound_canary_attestation(tmp_path: Path)
         "runtime_binding_digest": "sha256:" + "c" * 64,
         "expected_index_manifest": "sha256:" + "a" * 64,
         "expected_pipeline_fingerprint": "sha256:" + "b" * 64,
-        "max_result_characters": 100,
+        "max_result_characters": _fixture_result_character_budget(),
     })
 
     class Runtime:
