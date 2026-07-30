@@ -13,6 +13,7 @@ sys.modules.setdefault("firecrawl", types.SimpleNamespace(Firecrawl=object))
 sys.modules.setdefault("fal_client", types.SimpleNamespace())
 
 import run_agent
+from agent import chat_completion_helpers
 
 
 class FakeRequestClient:
@@ -76,6 +77,28 @@ def _connection_error():
     )
 
 
+def _gate_watchdog_clock_until(monkeypatch, terminal_publish_completed):
+    watchdog_clock_observed = threading.Event()
+    real_time = time.time
+    clock_start = real_time()
+
+    def ordered_watchdog_time():
+        # Keep elapsed time below the watchdog threshold until the worker has
+        # published its terminal result and entered request-client cleanup.
+        if terminal_publish_completed.is_set():
+            if threading.current_thread() is threading.main_thread():
+                watchdog_clock_observed.set()
+            return clock_start + 1.0
+        return clock_start
+
+    monkeypatch.setattr(
+        chat_completion_helpers.time,
+        "time",
+        ordered_watchdog_time,
+    )
+    return watchdog_clock_observed
+
+
 def test_retry_after_api_connection_error_recreates_request_client(monkeypatch):
     first_request = FakeRequestClient(lambda **kwargs: (_ for _ in ()).throw(_connection_error()))
     second_request = FakeRequestClient(lambda **kwargs: {"ok": True})
@@ -136,32 +159,62 @@ def test_non_streaming_request_without_receipt_clears_previous_receipt(monkeypat
 
 
 def test_stale_non_stream_close_is_single_owner(monkeypatch):
-    def slow_responder(**kwargs):
-        time.sleep(0.1)
-        raise _connection_error()
+    close_started = threading.Event()
+    close_release = threading.Event()
+    close_completed = threading.Event()
+    watchdog_clock_observed = _gate_watchdog_clock_until(
+        monkeypatch,
+        close_started,
+    )
 
-    request_client = FakeRequestClient(slow_responder)
+    class HeldCloseRequestClient(FakeRequestClient):
+        def close(self):
+            close_started.set()
+            if not close_release.wait(timeout=5):
+                raise AssertionError("watchdog arbitration did not release client close")
+            super().close()
+            close_completed.set()
+
+    request_client = HeldCloseRequestClient(
+        lambda **kwargs: (_ for _ in ()).throw(_connection_error())
+    )
     factory = OpenAIFactory([request_client])
     monkeypatch.setattr(run_agent, "OpenAI", factory)
 
     agent = _build_agent()
     agent._compute_non_stream_stale_timeout = lambda api_payload: 0.01
 
-    with pytest.raises(APIConnectionError):
-        agent._interruptible_api_call({"model": agent.model, "messages": []})
+    try:
+        with pytest.raises(APIConnectionError):
+            agent._interruptible_api_call({"model": agent.model, "messages": []})
 
+        assert close_started.is_set()
+        assert watchdog_clock_observed.is_set()
+        assert not close_completed.is_set()
+    finally:
+        close_release.set()
+
+    assert close_completed.wait(timeout=2)
     assert request_client.close_calls == 1
 
 
 def test_stored_ordinary_response_beats_watchdog_while_worker_closes(monkeypatch):
     response = {"ok": "billed-response"}
     close_started = threading.Event()
+    close_release = threading.Event()
+    close_completed = threading.Event()
+    watchdog_clock_observed = _gate_watchdog_clock_until(
+        monkeypatch,
+        close_started,
+    )
 
     class SlowCloseRequestClient(FakeRequestClient):
         def close(self):
             close_started.set()
-            time.sleep(0.5)
+            if not close_release.wait(timeout=5):
+                raise AssertionError("watchdog arbitration did not release client close")
             super().close()
+            close_completed.set()
 
     request_client = SlowCloseRequestClient(lambda **kwargs: response)
     factory = OpenAIFactory([request_client])
@@ -170,10 +223,17 @@ def test_stored_ordinary_response_beats_watchdog_while_worker_closes(monkeypatch
     agent = _build_agent()
     agent._compute_non_stream_stale_timeout = lambda api_payload: 0.01
 
-    result = agent._interruptible_api_call({"model": agent.model, "messages": []})
+    try:
+        result = agent._interruptible_api_call({"model": agent.model, "messages": []})
 
-    assert close_started.is_set()
-    assert result is response
+        assert close_started.is_set()
+        assert watchdog_clock_observed.is_set()
+        assert not close_completed.is_set()
+        assert result is response
+    finally:
+        close_release.set()
+
+    assert close_completed.wait(timeout=2)
     assert request_client.close_calls == 1
 
 
