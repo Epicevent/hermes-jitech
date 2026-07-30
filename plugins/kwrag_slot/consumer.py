@@ -184,6 +184,88 @@ class FileConsumptionReceiptSink:
         return b"".join(chunks)
 
     @staticmethod
+    def _cleanup_failed_outcome_publication(
+        *,
+        outcome_directory: int,
+        descriptor: int,
+        outcome_file_identity: tuple[int, int],
+        outcome_name: str,
+        temporary_name: str,
+    ) -> list[BaseException]:
+        """Best-effort cleanup without letting a second interrupt mask the owner.
+
+        Publication cleanup can itself receive an asynchronous ``BaseException``
+        after an unlink/fsync syscall has already taken effect.  Recheck both
+        possible names, retry an interrupted operation, durably publish their
+        absence, and scrub the held inode only after it is no longer public.
+        The caller re-raises the original publication failure.
+        """
+
+        cleanup_errors: list[BaseException] = []
+        expected_identity = outcome_file_identity[:2]
+
+        # Two passes are intentional: if the first unlink takes effect and then
+        # raises asynchronously, the second pass observes the name as absent.
+        for _attempt in range(2):
+            for cleanup_name in (outcome_name, temporary_name):
+                try:
+                    file_info = os.stat(
+                        cleanup_name,
+                        dir_fd=outcome_directory,
+                        follow_symlinks=False,
+                    )
+                    if (file_info.st_dev, file_info.st_ino) == expected_identity:
+                        os.unlink(cleanup_name, dir_fd=outcome_directory)
+                except FileNotFoundError:
+                    continue
+                except BaseException as exc:  # preserve the original owner
+                    cleanup_errors.append(exc)
+
+        still_public = False
+        for cleanup_name in (outcome_name, temporary_name):
+            try:
+                file_info = os.stat(
+                    cleanup_name,
+                    dir_fd=outcome_directory,
+                    follow_symlinks=False,
+                )
+                if (file_info.st_dev, file_info.st_ino) == expected_identity:
+                    still_public = True
+            except FileNotFoundError:
+                continue
+            except BaseException as exc:
+                cleanup_errors.append(exc)
+                still_public = True
+
+        # Sync even when unlink raised: the syscall may have completed before
+        # the asynchronous exception was delivered.
+        for cleanup_action in (
+            lambda: os.fsync(outcome_directory),
+            *(
+                ()
+                if still_public
+                else (
+                    lambda: os.ftruncate(descriptor, 0),
+                    lambda: os.fsync(descriptor),
+                )
+            ),
+        ):
+            try:
+                cleanup_action()
+            except BaseException as exc:
+                cleanup_errors.append(exc)
+                try:
+                    cleanup_action()
+                except BaseException as retry_exc:
+                    cleanup_errors.append(retry_exc)
+
+        if still_public:
+            cleanup_errors.append(
+                OSError("failed outcome inode remains published after cleanup")
+            )
+        return cleanup_errors
+
+    @staticmethod
     def _hash_exact_prefix(descriptor: int, size: int) -> Any:
         if size < 0:
             raise ValueError("receipt prefix size must be nonnegative")
@@ -890,32 +972,26 @@ class FileConsumptionReceiptSink:
                     expected_bytes=raw,
                     expected_size=len(raw),
                 )
-            except BaseException:
+            except BaseException as publication_error:
                 # Do not trust a Python flag to say whether renameat2 already
                 # published: an asynchronous BaseException can arrive after
                 # the syscall succeeds but before the next assignment.  Find
                 # every public name that still owns our exact inode, unlink it
                 # first, and only then scrub the held (now unpublished) inode.
-                unlinked = False
-                for cleanup_name in (outcome_name, temporary_name):
-                    try:
-                        file_info = os.stat(
-                            cleanup_name,
-                            dir_fd=outcome_directory,
-                            follow_symlinks=False,
-                        )
-                        if (file_info.st_dev, file_info.st_ino) == (
-                            outcome_file_identity[0],
-                            outcome_file_identity[1],
-                        ):
-                            os.unlink(cleanup_name, dir_fd=outcome_directory)
-                            unlinked = True
-                    except FileNotFoundError:
-                        continue
-                if unlinked:
-                    os.fsync(outcome_directory)
-                os.ftruncate(descriptor, 0)
-                os.fsync(descriptor)
+                # Cleanup-side interrupts are recorded but cannot replace the
+                # original publication failure or skip later cleanup stages.
+                cleanup_errors = self._cleanup_failed_outcome_publication(
+                    outcome_directory=outcome_directory,
+                    descriptor=descriptor,
+                    outcome_file_identity=outcome_file_identity,
+                    outcome_name=outcome_name,
+                    temporary_name=temporary_name,
+                )
+                for cleanup_error in cleanup_errors:
+                    publication_error.add_note(
+                        "outcome cleanup error: "
+                        f"{type(cleanup_error).__name__}: {cleanup_error}"
+                    )
                 raise
             finally:
                 os.close(descriptor)

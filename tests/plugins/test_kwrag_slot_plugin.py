@@ -1441,6 +1441,64 @@ def test_provider_outcome_interrupt_after_rename_removes_public_inode(
     assert list(outcome_root.iterdir()) == []
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX atomic outcome contract")
+def test_provider_outcome_cleanup_interrupt_preserves_owner_and_finishes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from plugins.kwrag_slot.consumer import FileConsumptionReceiptSink
+
+    sink = FileConsumptionReceiptSink(tmp_path / "outcome-cleanup-interrupt.jsonl")
+    sink.write({"schema_version": "fixture-ledger-anchor-v1"})
+    identity = "sha256:" + "3" * 64
+    outcome_root = tmp_path / "outcome-cleanup-interrupt.jsonl.outcomes"
+    outcome_path = outcome_root / ("3" * 64 + ".json")
+    original_rename = sink._rename_noreplace
+    original_unlink = os.unlink
+    original_ftruncate = os.ftruncate
+    cleanup_interrupt_delivered = False
+    scrubbed = False
+
+    def interrupt_after_publication(parent: int, source: str, destination: str) -> None:
+        original_rename(parent, source, destination)
+        raise KeyboardInterrupt("original publication interruption")
+
+    def interrupt_after_cleanup_unlink(path, *args, **kwargs) -> None:
+        nonlocal cleanup_interrupt_delivered
+        original_unlink(path, *args, **kwargs)
+        if path == outcome_path.name and not cleanup_interrupt_delivered:
+            cleanup_interrupt_delivered = True
+            raise KeyboardInterrupt("secondary cleanup interruption")
+
+    def observe_scrub(descriptor: int, length: int) -> None:
+        nonlocal scrubbed
+        original_ftruncate(descriptor, length)
+        if length == 0:
+            scrubbed = True
+
+    monkeypatch.setattr(sink, "_rename_noreplace", interrupt_after_publication)
+    monkeypatch.setattr(os, "unlink", interrupt_after_cleanup_unlink)
+    monkeypatch.setattr(os, "ftruncate", observe_scrub)
+
+    with pytest.raises(
+        KeyboardInterrupt,
+        match="original publication interruption",
+    ) as caught:
+        sink.write_once(
+            identity,
+            {"schema_version": "fixture-outcome-v1", "status": "unknown"},
+        )
+
+    assert cleanup_interrupt_delivered is True
+    assert scrubbed is True
+    assert any(
+        "secondary cleanup interruption" in note
+        for note in getattr(caught.value, "__notes__", ())
+    )
+    assert not outcome_path.exists()
+    assert list(outcome_root.iterdir()) == []
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX outcome inode binding contract")
 def test_provider_outcome_file_swap_during_replay_fails_closed(
     tmp_path: Path,
