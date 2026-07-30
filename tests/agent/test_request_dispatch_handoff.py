@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 import uuid
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -42,6 +42,59 @@ def _route(
         "apiMode": api_mode,
         "endpointIdentity": endpoint_identity,
     }
+
+
+def _synthetic_bedrock_runtime_leaf():
+    class BaseClient:
+        def _make_api_call(self, operation_name, kwargs):
+            return operation_name, kwargs
+
+    class ClientCreator:
+        def _create_api_method(
+            self,
+            py_operation_name,
+            operation_name,
+            _service_model,
+        ):
+            def _api_call(self, *args, **kwargs):
+                if args:
+                    raise TypeError(
+                        f"{py_operation_name}() only accepts keyword arguments."
+                    )
+                return self._make_api_call(operation_name, kwargs)
+
+            _api_call.__name__ = str(py_operation_name)
+            return _api_call
+
+    creator = ClientCreator()
+    client_type = type(
+        "BedrockRuntime",
+        (BaseClient,),
+        {
+            "__module__": "botocore.client",
+            "_PY_TO_OP_NAME": {
+                "converse": "Converse",
+                "converse_stream": "ConverseStream",
+            },
+            "converse": creator._create_api_method("converse", "Converse", None),
+            "converse_stream": creator._create_api_method(
+                "converse_stream",
+                "ConverseStream",
+                None,
+            ),
+        },
+    )
+    client = client_type()
+    client.meta = SimpleNamespace(
+        endpoint_url="https://bedrock-runtime.eu-west-1.amazonaws.com",
+        service_model=SimpleNamespace(service_name="bedrock-runtime"),
+    )
+    botocore_module = ModuleType("botocore")
+    client_module = ModuleType("botocore.client")
+    client_module.BaseClient = BaseClient
+    client_module.ClientCreator = ClientCreator
+    botocore_module.client = client_module
+    return client, client_type, botocore_module, client_module
 
 
 def test_abandon_wins_before_commit() -> None:
@@ -841,26 +894,16 @@ def test_bedrock_snapshot_and_live_leaf_bind_the_same_regional_endpoint(
         _fallback_chain=[],
     )
     route = snapshot_allowed_provider_routes(agent)[0]
-    base_client = type("BaseClient", (), {})
-    client_type = type(
-        "BedrockRuntime",
-        (base_client,),
-        {"__module__": "botocore.client"},
+    client, client_type, botocore_module, client_module = (
+        _synthetic_bedrock_runtime_leaf()
     )
-    client = client_type()
-    client.meta = SimpleNamespace(
-        endpoint_url="https://bedrock-runtime.eu-west-1.amazonaws.com",
-        service_model=SimpleNamespace(service_name="bedrock-runtime"),
-    )
-    monkeypatch.setitem(
-        bedrock_adapter._bedrock_runtime_client_identity_cache,
-        id(client),
-        client,
-    )
+    monkeypatch.setitem(__import__("sys").modules, "botocore", botocore_module)
+    monkeypatch.setitem(__import__("sys").modules, "botocore.client", client_module)
+    bedrock_adapter._register_bedrock_runtime_client(client)
 
     def import_exact_bedrock_modules(module_name: str):
         if module_name == "botocore.client":
-            return SimpleNamespace(BaseClient=base_client)
+            return client_module
         if module_name == "agent.bedrock_adapter":
             return bedrock_adapter
         raise ImportError(f"unexpected provider SDK module: {module_name}")
@@ -879,7 +922,7 @@ def test_bedrock_snapshot_and_live_leaf_bind_the_same_regional_endpoint(
 
     spoof_type = type(
         "BedrockRuntime",
-        (base_client,),
+        (client_type,),
         {"__module__": "botocore.client"},
     )
     spoof = spoof_type()

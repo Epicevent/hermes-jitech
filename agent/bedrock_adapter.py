@@ -32,6 +32,7 @@ import logging
 import os
 import re
 import threading
+import types
 import weakref
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
@@ -58,9 +59,10 @@ except Exception:
 
 _bedrock_runtime_client_cache: Dict[str, Any] = {}
 _bedrock_control_client_cache: Dict[str, Any] = {}
-_bedrock_runtime_client_identity_cache: weakref.WeakValueDictionary[int, Any] = (
-    weakref.WeakValueDictionary()
-)
+_bedrock_runtime_client_identity_cache: Dict[
+    int,
+    Tuple[weakref.ReferenceType[Any], type[Any]],
+] = {}
 _bedrock_client_cache_lock = threading.RLock()
 
 
@@ -75,6 +77,99 @@ def _require_boto3():
             "Install it with: pip install boto3\n"
             "Or install Hermes with Bedrock support: pip install -e '.[bedrock]'"
         )
+
+
+def _validate_generated_bedrock_runtime_leaf(client: Any) -> type[Any]:
+    """Require the exact unmodified botocore-generated Bedrock leaf class."""
+
+    from botocore.client import BaseClient, ClientCreator
+
+    expected_method_code = next(
+        (
+            value
+            for value in ClientCreator._create_api_method.__code__.co_consts
+            if isinstance(value, types.CodeType) and value.co_name == "_api_call"
+        ),
+        None,
+    )
+    if expected_method_code is None:
+        raise TypeError("botocore generated API method contract is unavailable")
+
+    client_type = type(client)
+    service_model = getattr(getattr(client, "meta", None), "service_model", None)
+    if (
+        client_type.__module__ != "botocore.client"
+        or client_type.__name__ != "BedrockRuntime"
+        or client_type.__qualname__ != "BedrockRuntime"
+        or client_type.__bases__ != (BaseClient,)
+        or getattr(service_model, "service_name", None) != "bedrock-runtime"
+    ):
+        raise TypeError("bedrock runtime client is not the exact generated leaf")
+
+    operation_map = client_type.__dict__.get("_PY_TO_OP_NAME")
+    if not isinstance(operation_map, dict) or any(
+        not isinstance(name, str) or not isinstance(operation, str)
+        for name, operation in operation_map.items()
+    ):
+        raise TypeError("bedrock runtime operation map is not SDK generated")
+    if operation_map.get("converse") != "Converse" or operation_map.get(
+        "converse_stream"
+    ) != "ConverseStream":
+        raise TypeError("bedrock runtime converse operation map is invalid")
+
+    instance_state = getattr(client, "__dict__", {})
+    instance_dispatch_names = set(operation_map) | {
+        "_make_api_call",
+        "_make_request",
+        "_convert_to_request_dict",
+        "_emit_api_params",
+    }
+    if any(name in instance_state for name in instance_dispatch_names):
+        raise TypeError("bedrock runtime API method was shadowed on the instance")
+
+    allowed_metadata = {"__module__", "__doc__", "_PY_TO_OP_NAME"}
+    for method_name, method in client_type.__dict__.items():
+        if method_name in allowed_metadata:
+            continue
+        if method_name == "generate_presigned_url":
+            from botocore.signers import generate_presigned_url
+
+            if method is not generate_presigned_url:
+                raise TypeError("bedrock runtime SDK helper was overridden")
+            continue
+        operation_name = operation_map.get(method_name)
+        if operation_name is None:
+            raise TypeError("bedrock runtime dispatch behavior was overridden")
+        closure = getattr(method, "__closure__", None)
+        freevars = getattr(getattr(method, "__code__", None), "co_freevars", ())
+        closure_values = (
+            {name: cell.cell_contents for name, cell in zip(freevars, closure)}
+            if closure is not None
+            else {}
+        )
+        if (
+            getattr(method, "__code__", None) is not expected_method_code
+            or closure_values.get("py_operation_name") != method_name
+            or closure_values.get("operation_name") != operation_name
+        ):
+            raise TypeError(
+                f"bedrock runtime {method_name} is not the generated SDK method"
+            )
+    return client_type
+
+
+def _register_bedrock_runtime_client(client: Any) -> None:
+    expected_type = _validate_generated_bedrock_runtime_leaf(client)
+    client_id = id(client)
+
+    def remove_dead(reference: weakref.ReferenceType[Any]) -> None:
+        with _bedrock_client_cache_lock:
+            current = _bedrock_runtime_client_identity_cache.get(client_id)
+            if current is not None and current[0] is reference:
+                _bedrock_runtime_client_identity_cache.pop(client_id, None)
+
+    reference = weakref.ref(client, remove_dead)
+    _bedrock_runtime_client_identity_cache[client_id] = (reference, expected_type)
 
 
 def _get_bedrock_runtime_client(region: str):
@@ -92,8 +187,8 @@ def _get_bedrock_runtime_client(region: str):
                 region_name=region,
                 config=Config(retries={"total_max_attempts": 1, "mode": "standard"}),
             )
+            _register_bedrock_runtime_client(client)
             _bedrock_runtime_client_cache[region] = client
-            _bedrock_runtime_client_identity_cache[id(client)] = client
         return _bedrock_runtime_client_cache[region]
 
 
@@ -101,10 +196,16 @@ def is_authoritative_bedrock_runtime_client(client: Any) -> bool:
     """Return whether *client* is the exact leaf created by our boto3 factory."""
 
     with _bedrock_client_cache_lock:
-        return any(
-            registered is client
-            for registered in _bedrock_runtime_client_identity_cache.values()
-        )
+        registered = _bedrock_runtime_client_identity_cache.get(id(client))
+        if registered is None:
+            return False
+        reference, expected_type = registered
+        if reference() is not client or type(client) is not expected_type:
+            return False
+        try:
+            return _validate_generated_bedrock_runtime_leaf(client) is expected_type
+        except (ImportError, TypeError):
+            return False
 
 
 def _get_bedrock_control_client(region: str):
@@ -126,7 +227,7 @@ def reset_client_cache():
         _bedrock_control_client_cache.clear()
 
 
-def invalidate_runtime_client(region: str, expected_client: Any | None = None) -> bool:
+def invalidate_runtime_client(region: str, *, expected_client: Any) -> bool:
     """Evict the cached ``bedrock-runtime`` client for a single region.
 
     Per-region counterpart to :func:`reset_client_cache`. Used by the converse
@@ -141,7 +242,7 @@ def invalidate_runtime_client(region: str, expected_client: Any | None = None) -
         current = _bedrock_runtime_client_cache.get(region)
         if current is None:
             return False
-        if expected_client is not None and current is not expected_client:
+        if current is not expected_client:
             return False
         existed = True
         _bedrock_runtime_client_cache.pop(region, None)

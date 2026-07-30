@@ -33,6 +33,65 @@ def _mock_botocore_session(*, return_value=None, side_effect=None):
         yield session_mod.get_session
 
 
+def _synthetic_bedrock_runtime_leaf():
+    """Build the exact generated-client ABI without requiring boto3 extras."""
+
+    class BaseClient:
+        def _make_api_call(self, operation_name, kwargs):
+            return operation_name, kwargs
+
+    class ClientCreator:
+        def _create_api_method(
+            self,
+            py_operation_name,
+            operation_name,
+            _service_model,
+        ):
+            def _api_call(self, *args, **kwargs):
+                if args:
+                    raise TypeError(
+                        f"{py_operation_name}() only accepts keyword arguments."
+                    )
+                return self._make_api_call(operation_name, kwargs)
+
+            _api_call.__name__ = str(py_operation_name)
+            return _api_call
+
+    creator = ClientCreator()
+    client_type = type(
+        "BedrockRuntime",
+        (BaseClient,),
+        {
+            "__module__": "botocore.client",
+            "_PY_TO_OP_NAME": {
+                "converse": "Converse",
+                "converse_stream": "ConverseStream",
+            },
+            "converse": creator._create_api_method(
+                "converse",
+                "Converse",
+                None,
+            ),
+            "converse_stream": creator._create_api_method(
+                "converse_stream",
+                "ConverseStream",
+                None,
+            ),
+        },
+    )
+    client = client_type()
+    client.meta = SimpleNamespace(
+        endpoint_url="https://bedrock-runtime.eu-west-1.amazonaws.com",
+        service_model=SimpleNamespace(service_name="bedrock-runtime"),
+    )
+    botocore_module = ModuleType("botocore")
+    client_module = ModuleType("botocore.client")
+    client_module.BaseClient = BaseClient
+    client_module.ClientCreator = ClientCreator
+    botocore_module.client = client_module
+    return client, client_type, botocore_module, client_module
+
+
 # ---------------------------------------------------------------------------
 # AWS credential detection
 # ---------------------------------------------------------------------------
@@ -890,7 +949,10 @@ class TestClientCache:
         )
         _bedrock_runtime_client_cache["test"] = "dummy"
         dummy = type("BedrockRuntime", (), {})()
-        _bedrock_runtime_client_identity_cache[id(dummy)] = dummy
+        _bedrock_runtime_client_identity_cache[id(dummy)] = (
+            weakref.ref(dummy),
+            type(dummy),
+        )
         _bedrock_control_client_cache["test"] = "dummy"
         reset_client_cache()
         assert len(_bedrock_runtime_client_cache) == 0
@@ -901,14 +963,10 @@ class TestClientCache:
         from agent import bedrock_adapter
 
         bedrock_adapter.reset_client_cache()
-        exact_type = type(
-            "BedrockRuntime",
-            (),
-            {"__module__": "botocore.client"},
+        exact_client, _, botocore_module, client_module = (
+            _synthetic_bedrock_runtime_leaf()
         )
-        exact_client = exact_type()
         boto3 = SimpleNamespace(client=MagicMock(return_value=exact_client))
-        botocore_module = ModuleType("botocore")
         config_module = ModuleType("botocore.config")
         config_module.Config = MagicMock(return_value="fixture-config")
         botocore_module.config = config_module
@@ -916,22 +974,79 @@ class TestClientCache:
         monkeypatch.setattr(bedrock_adapter, "_require_boto3", lambda: boto3)
         with patch.dict(
             "sys.modules",
-            {"botocore": botocore_module, "botocore.config": config_module},
+            {
+                "botocore": botocore_module,
+                "botocore.client": client_module,
+                "botocore.config": config_module,
+            },
         ):
             observed = bedrock_adapter._get_bedrock_runtime_client("eu-west-1")
+            assert observed is exact_client
+            assert bedrock_adapter.is_authoritative_bedrock_runtime_client(
+                exact_client
+            )
 
-        assert observed is exact_client
-        assert bedrock_adapter.is_authoritative_bedrock_runtime_client(
-            exact_client
+            exact_client._make_api_call = lambda operation_name, kwargs: (
+                operation_name,
+                {**kwargs, "modelId": "substituted"},
+            )
+            assert not bedrock_adapter.is_authoritative_bedrock_runtime_client(
+                exact_client
+            )
+
+    @pytest.mark.parametrize("spoof_kind", ["subclass", "reshaped"])
+    def test_runtime_factory_rejects_non_generated_leaf_before_cache(
+        self,
+        monkeypatch,
+        spoof_kind,
+    ):
+        from agent import bedrock_adapter
+
+        bedrock_adapter.reset_client_cache()
+        exact_client, exact_type, botocore_module, client_module = (
+            _synthetic_bedrock_runtime_leaf()
         )
-        spoof_type = type(
-            "BedrockRuntime",
-            (),
-            {"__module__": "botocore.client"},
-        )
-        assert not bedrock_adapter.is_authoritative_bedrock_runtime_client(
-            spoof_type()
-        )
+        if spoof_kind == "subclass":
+            spoof_type = type(
+                "BedrockRuntime",
+                (exact_type,),
+                {"__module__": "botocore.client"},
+            )
+        else:
+            spoof_type = type(
+                "BedrockRuntime",
+                exact_type.__bases__,
+                {
+                    "__module__": "botocore.client",
+                    "_PY_TO_OP_NAME": exact_type.__dict__["_PY_TO_OP_NAME"],
+                    "converse": lambda self, **kwargs: self._make_api_call(
+                        "ReshapedConverse",
+                        kwargs,
+                    ),
+                    "converse_stream": exact_type.__dict__["converse_stream"],
+                },
+            )
+        spoof = spoof_type()
+        spoof.meta = exact_client.meta
+        boto3 = SimpleNamespace(client=MagicMock(return_value=spoof))
+        config_module = ModuleType("botocore.config")
+        config_module.Config = MagicMock(return_value="fixture-config")
+        botocore_module.config = config_module
+        monkeypatch.setattr(bedrock_adapter, "_require_boto3", lambda: boto3)
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "botocore": botocore_module,
+                "botocore.client": client_module,
+                "botocore.config": config_module,
+            },
+        ):
+            with pytest.raises(TypeError, match="exact generated leaf|generated SDK"):
+                bedrock_adapter._get_bedrock_runtime_client("eu-west-1")
+
+        assert "eu-west-1" not in bedrock_adapter._bedrock_runtime_client_cache
+        assert id(spoof) not in bedrock_adapter._bedrock_runtime_client_identity_cache
 
     def test_runtime_factory_serializes_concurrent_creation_and_registration(
         self,
@@ -940,12 +1055,9 @@ class TestClientCache:
         from agent import bedrock_adapter
 
         bedrock_adapter.reset_client_cache()
-        exact_type = type(
-            "BedrockRuntime",
-            (),
-            {"__module__": "botocore.client"},
+        exact_client, _, botocore_module, client_module = (
+            _synthetic_bedrock_runtime_leaf()
         )
-        exact_client = exact_type()
         factory_started = threading.Event()
         release_factory = threading.Event()
         factory_calls = []
@@ -959,7 +1071,6 @@ class TestClientCache:
             return exact_client
 
         boto3 = SimpleNamespace(client=create_client)
-        botocore_module = ModuleType("botocore")
         config_module = ModuleType("botocore.config")
         config_module.Config = MagicMock(return_value="fixture-config")
         botocore_module.config = config_module
@@ -975,7 +1086,11 @@ class TestClientCache:
 
         with patch.dict(
             "sys.modules",
-            {"botocore": botocore_module, "botocore.config": config_module},
+            {
+                "botocore": botocore_module,
+                "botocore.client": client_module,
+                "botocore.config": config_module,
+            },
         ):
             first = threading.Thread(target=get_client, daemon=True)
             second = threading.Thread(target=get_client, daemon=True)
@@ -991,23 +1106,30 @@ class TestClientCache:
         assert not errors
         assert results == [exact_client, exact_client]
         assert factory_calls == ["bedrock-runtime"]
-        assert bedrock_adapter.is_authoritative_bedrock_runtime_client(exact_client)
+        with patch.dict(
+            "sys.modules",
+            {"botocore": botocore_module, "botocore.client": client_module},
+        ):
+            assert bedrock_adapter.is_authoritative_bedrock_runtime_client(exact_client)
 
     def test_evicted_factory_identity_expires_after_last_live_reference(self):
         from agent import bedrock_adapter
 
         bedrock_adapter.reset_client_cache()
-        client = type("BedrockRuntime", (), {})()
+        client, _, botocore_module, client_module = _synthetic_bedrock_runtime_leaf()
         client_id = id(client)
         client_ref = weakref.ref(client)
-        bedrock_adapter._bedrock_runtime_client_cache["eu-west-1"] = client
-        bedrock_adapter._bedrock_runtime_client_identity_cache[client_id] = client
-
-        assert bedrock_adapter.invalidate_runtime_client(
-            "eu-west-1",
-            expected_client=client,
-        )
-        assert bedrock_adapter.is_authoritative_bedrock_runtime_client(client)
+        with patch.dict(
+            "sys.modules",
+            {"botocore": botocore_module, "botocore.client": client_module},
+        ):
+            bedrock_adapter._register_bedrock_runtime_client(client)
+            bedrock_adapter._bedrock_runtime_client_cache["eu-west-1"] = client
+            assert bedrock_adapter.invalidate_runtime_client(
+                "eu-west-1",
+                expected_client=client,
+            )
+            assert bedrock_adapter.is_authoritative_bedrock_runtime_client(client)
         del client
         gc.collect()
 
@@ -1404,7 +1526,10 @@ class TestInvalidateRuntimeClient:
         _bedrock_runtime_client_cache["us-east-1"] = "dead-client"
         _bedrock_runtime_client_cache["us-west-2"] = "live-client"
 
-        evicted = invalidate_runtime_client("us-east-1")
+        evicted = invalidate_runtime_client(
+            "us-east-1",
+            expected_client="dead-client",
+        )
 
         assert evicted is True
         assert "us-east-1" not in _bedrock_runtime_client_cache
@@ -1413,7 +1538,16 @@ class TestInvalidateRuntimeClient:
     def test_returns_false_when_region_not_cached(self):
         from agent.bedrock_adapter import invalidate_runtime_client, reset_client_cache
         reset_client_cache()
-        assert invalidate_runtime_client("eu-west-1") is False
+        assert invalidate_runtime_client(
+            "eu-west-1",
+            expected_client=object(),
+        ) is False
+
+    def test_requires_the_exact_expected_client_argument(self):
+        from agent.bedrock_adapter import invalidate_runtime_client
+
+        with pytest.raises(TypeError, match="expected_client"):
+            invalidate_runtime_client("eu-west-1")  # type: ignore[call-arg]
 
     def test_stale_old_client_cannot_evict_healthy_replacement(self):
         from agent import bedrock_adapter
@@ -1423,18 +1557,12 @@ class TestInvalidateRuntimeClient:
         replacement = type("BedrockRuntime", (), {})()
         region = "eu-west-1"
         bedrock_adapter._bedrock_runtime_client_cache[region] = old_client
-        bedrock_adapter._bedrock_runtime_client_identity_cache[id(old_client)] = (
-            old_client
-        )
 
         assert bedrock_adapter.invalidate_runtime_client(
             region,
             expected_client=old_client,
         )
         bedrock_adapter._bedrock_runtime_client_cache[region] = replacement
-        bedrock_adapter._bedrock_runtime_client_identity_cache[id(replacement)] = (
-            replacement
-        )
 
         assert not bedrock_adapter.invalidate_runtime_client(
             region,
