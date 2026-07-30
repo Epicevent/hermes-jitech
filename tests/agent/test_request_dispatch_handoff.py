@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 import uuid
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -42,59 +42,6 @@ def _route(
         "apiMode": api_mode,
         "endpointIdentity": endpoint_identity,
     }
-
-
-def _synthetic_bedrock_runtime_leaf():
-    class BaseClient:
-        def _make_api_call(self, operation_name, kwargs):
-            return operation_name, kwargs
-
-    class ClientCreator:
-        def _create_api_method(
-            self,
-            py_operation_name,
-            operation_name,
-            _service_model,
-        ):
-            def _api_call(self, *args, **kwargs):
-                if args:
-                    raise TypeError(
-                        f"{py_operation_name}() only accepts keyword arguments."
-                    )
-                return self._make_api_call(operation_name, kwargs)
-
-            _api_call.__name__ = str(py_operation_name)
-            return _api_call
-
-    creator = ClientCreator()
-    client_type = type(
-        "BedrockRuntime",
-        (BaseClient,),
-        {
-            "__module__": "botocore.client",
-            "_PY_TO_OP_NAME": {
-                "converse": "Converse",
-                "converse_stream": "ConverseStream",
-            },
-            "converse": creator._create_api_method("converse", "Converse", None),
-            "converse_stream": creator._create_api_method(
-                "converse_stream",
-                "ConverseStream",
-                None,
-            ),
-        },
-    )
-    client = client_type()
-    client.meta = SimpleNamespace(
-        endpoint_url="https://bedrock-runtime.eu-west-1.amazonaws.com",
-        service_model=SimpleNamespace(service_name="bedrock-runtime"),
-    )
-    botocore_module = ModuleType("botocore")
-    client_module = ModuleType("botocore.client")
-    client_module.BaseClient = BaseClient
-    client_module.ClientCreator = ClientCreator
-    botocore_module.client = client_module
-    return client, client_type, botocore_module, client_module
 
 
 def test_abandon_wins_before_commit() -> None:
@@ -504,50 +451,13 @@ def test_provider_call_identity_cannot_be_reused_or_swapped_after_commit() -> No
         )
 
 
-def test_exact_anthropic_bedrock_leaf_is_supported_without_broadening(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_anthropic_bedrock_leaf_without_atomic_boundary_is_rejected() -> None:
     expected_type = type(
         "AnthropicBedrock",
         (),
         {"__module__": "anthropic.lib.bedrock._client"},
     )
-    module = SimpleNamespace(AnthropicBedrock=expected_type)
-
-    def import_exact_bedrock_module(module_name: str):
-        if module_name != "anthropic.lib.bedrock._client":
-            raise ImportError(f"unexpected provider SDK module: {module_name}")
-        return module
-
-    monkeypatch.setattr(
-        "agent.request_dispatch.importlib.import_module",
-        import_exact_bedrock_module,
-    )
-    assert require_authoritative_leaf_adapter(expected_type()) == (
-        "anthropic.lib.bedrock._client.AnthropicBedrock"
-    )
-
-    spoof_type = type(
-        "AnthropicBedrock",
-        (),
-        {"__module__": "anthropic.lib.bedrock._client"},
-    )
-    with pytest.raises(FinalProviderBindingUnsupported):
-        require_authoritative_leaf_adapter(spoof_type())
-
-    subclass = type("AnthropicBedrock", (expected_type,), {})
-    subclass.__module__ = "anthropic.lib.bedrock._client"
-    with pytest.raises(FinalProviderBindingUnsupported):
-        require_authoritative_leaf_adapter(subclass())
-
-    from agent import request_dispatch
-
-    monkeypatch.setitem(
-        request_dispatch._STATIC_LEAF_CLIENTS,
-        "anthropic.lib.bedrock._client.AnthropicBedrock",
-        ("anthropic.lib.bedrock.wrong", "AnthropicBedrock"),
-    )
-    with pytest.raises(FinalProviderBindingUnsupported, match="unavailable"):
+    with pytest.raises(FinalProviderBindingUnsupported, match="atomic final serialized"):
         require_authoritative_leaf_adapter(expected_type())
 
 
@@ -647,11 +557,31 @@ def test_unknown_or_subclass_leaf_is_not_positive_capability(client) -> None:
         require_authoritative_leaf_adapter(client)
 
 
-def test_exact_supported_leaf_family_is_positive_capability() -> None:
+def test_exact_openai_leaf_without_atomic_boundary_is_rejected() -> None:
     from openai import OpenAI
 
     client = OpenAI(api_key="fixture-key")
-    assert require_authoritative_leaf_adapter(client) == "openai.OpenAI"
+    with pytest.raises(FinalProviderBindingUnsupported, match="atomic final serialized"):
+        require_authoritative_leaf_adapter(client)
+
+
+@pytest.mark.parametrize(
+    ("module_name", "class_name"),
+    [
+        ("openai", "OpenAI"),
+        ("openai.lib.azure", "AzureOpenAI"),
+        ("anthropic", "Anthropic"),
+        ("anthropic.lib.bedrock._client", "AnthropicBedrock"),
+        ("botocore.client", "BedrockRuntime"),
+    ],
+)
+def test_known_dynamic_sdk_leaves_are_not_atomic_retrieval_adapters(
+    module_name: str,
+    class_name: str,
+) -> None:
+    client_type = type(class_name, (), {"__module__": module_name})
+    with pytest.raises(FinalProviderBindingUnsupported, match="atomic final serialized"):
+        require_authoritative_leaf_adapter(client_type())
 
 
 def test_codex_final_callsite_rejects_unbound_facade_before_receipt_or_sdk() -> None:
@@ -880,10 +810,27 @@ def test_malformed_live_endpoint_cannot_fall_back_to_configured_identity() -> No
         )
 
 
-def test_bedrock_snapshot_and_live_leaf_bind_the_same_regional_endpoint(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from agent import bedrock_adapter
+def test_ipv6_endpoint_identity_preserves_bracketed_authority() -> None:
+    from agent.request_dispatch import canonical_endpoint_identity
+
+    assert canonical_endpoint_identity(
+        "http://[::1]:8080/v1/",
+        provider="fixture",
+    ) == "http://[::1]:8080/v1"
+    assert canonical_endpoint_identity(
+        "https://[2001:db8::1]/v1",
+        provider="fixture",
+    ) == "https://[2001:db8::1]/v1"
+    assert canonical_endpoint_identity(
+        "http://[::1]:8080/v1",
+        provider="fixture",
+    ) != canonical_endpoint_identity(
+        "http://[::1]:8081/v1",
+        provider="fixture",
+    )
+
+
+def test_bedrock_leaf_without_atomic_boundary_is_rejected_before_sdk() -> None:
 
     agent = SimpleNamespace(
         provider="bedrock",
@@ -893,54 +840,55 @@ def test_bedrock_snapshot_and_live_leaf_bind_the_same_regional_endpoint(
         _bedrock_region="eu-west-1",
         _fallback_chain=[],
     )
-    route = snapshot_allowed_provider_routes(agent)[0]
-    client, client_type, botocore_module, client_module = (
-        _synthetic_bedrock_runtime_leaf()
-    )
-    monkeypatch.setitem(__import__("sys").modules, "botocore", botocore_module)
-    monkeypatch.setitem(__import__("sys").modules, "botocore.client", client_module)
-    bedrock_adapter._register_bedrock_runtime_client(client)
-
-    def import_exact_bedrock_modules(module_name: str):
-        if module_name == "botocore.client":
-            return client_module
-        if module_name == "agent.bedrock_adapter":
-            return bedrock_adapter
-        raise ImportError(f"unexpected provider SDK module: {module_name}")
-
-    monkeypatch.setattr(
-        "agent.request_dispatch.importlib.import_module",
-        import_exact_bedrock_modules,
-    )
-
-    assert require_authoritative_leaf_adapter(client) == (
-        "botocore.client.BedrockRuntime"
-    )
-    assert provider_endpoint_identity(client, provider="bedrock") == (
-        route["endpointIdentity"]
-    )
-
-    base_client = client_type.__bases__[0]
-    original_make_api_call = base_client._make_api_call
-    sdk_call = MagicMock()
-    base_client._make_api_call = lambda self, operation_name, kwargs: (
-        operation_name,
-        {**kwargs, "modelId": "substituted"},
-    )
-    with pytest.raises(FinalProviderBindingUnsupported):
-        require_authoritative_leaf_adapter(client)
-    sdk_call.assert_not_called()
-    base_client._make_api_call = original_make_api_call
-    assert require_authoritative_leaf_adapter(client) == (
-        "botocore.client.BedrockRuntime"
-    )
-
-    spoof_type = type(
+    client_type = type(
         "BedrockRuntime",
-        (client_type,),
+        (),
         {"__module__": "botocore.client"},
     )
-    spoof = spoof_type()
-    spoof.meta = client.meta
-    with pytest.raises(FinalProviderBindingUnsupported):
-        require_authoritative_leaf_adapter(spoof)
+    client = client_type()
+    client.meta = SimpleNamespace(
+        endpoint_url="https://bedrock-runtime.eu-west-1.amazonaws.com",
+    )
+    sdk_call = MagicMock()
+    with pytest.raises(FinalProviderBindingUnsupported, match="atomic final serialized"):
+        require_authoritative_leaf_adapter(client)
+    sdk_call.assert_not_called()
+    assert provider_endpoint_identity(client, provider="bedrock") == (
+        "https://bedrock-runtime.eu-west-1.amazonaws.com"
+    )
+    with pytest.raises(
+        FinalProviderBindingUnsupported,
+        match="does not identify the final SDK endpoint",
+    ):
+        snapshot_allowed_provider_routes(agent)
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "https://bedrock-runtime.cn-north-1.amazonaws.com.cn",
+        "https://bedrock-runtime-fips.us-gov-west-1.amazonaws.com",
+        "https://private-bedrock.example.internal",
+    ],
+)
+def test_bedrock_live_endpoint_is_measured_but_never_inferred_from_region(
+    endpoint: str,
+) -> None:
+    client = SimpleNamespace(
+        meta=SimpleNamespace(endpoint_url=endpoint),
+    )
+    assert provider_endpoint_identity(client, provider="bedrock") == endpoint
+
+    agent = SimpleNamespace(
+        provider="bedrock",
+        model="anthropic.claude-test-v1:0",
+        api_mode="bedrock_converse",
+        base_url="",
+        _bedrock_region="cn-north-1",
+        _fallback_chain=[],
+    )
+    with pytest.raises(
+        FinalProviderBindingUnsupported,
+        match="does not identify the final SDK endpoint",
+    ):
+        snapshot_allowed_provider_routes(agent)

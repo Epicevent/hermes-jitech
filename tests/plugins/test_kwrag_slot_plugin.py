@@ -45,21 +45,31 @@ def _embedded_component_on_path(monkeypatch):
     for name in list(sys.modules):
         if name == "kwrag" or name.startswith("kwrag."):
             sys.modules.pop(name, None)
-    from agent import request_dispatch
+    # Full-loop state-machine tests use an explicitly injected synthetic
+    # atomic boundary.  No production SDK leaf is approved by this fixture.
+    from agent import chat_completion_helpers, codex_runtime, request_dispatch
 
-    original_resolver = request_dispatch._resolve_static_leaf_type
+    production_requirement = request_dispatch.require_authoritative_leaf_adapter
 
-    def resolve_test_leaf(identity: str):
-        if identity == "anthropic.Anthropic":
-            return _SupportedAnthropicLeaf
-        if identity == "anthropic.lib.bedrock._client.AnthropicBedrock":
-            return _SupportedAnthropicBedrockLeaf
-        return original_resolver(identity)
+    def require_synthetic_atomic_test_boundary(client):
+        if getattr(client, "_kwrag_test_atomic_boundary", False) is True:
+            return "tests.fixture.AtomicSerializedRequestAdapter"
+        return production_requirement(client)
 
     monkeypatch.setattr(
         request_dispatch,
-        "_resolve_static_leaf_type",
-        resolve_test_leaf,
+        "require_authoritative_leaf_adapter",
+        require_synthetic_atomic_test_boundary,
+    )
+    monkeypatch.setattr(
+        chat_completion_helpers,
+        "require_authoritative_leaf_adapter",
+        require_synthetic_atomic_test_boundary,
+    )
+    monkeypatch.setattr(
+        codex_runtime,
+        "require_authoritative_leaf_adapter",
+        require_synthetic_atomic_test_boundary,
     )
 
 
@@ -77,6 +87,7 @@ def _supported_openai_client(
         create=MagicMock(),
         stream=MagicMock(),
     )
+    client._kwrag_test_atomic_boundary = True
     return client
 
 
@@ -90,6 +101,7 @@ def _supported_anthropic_client(
         create=MagicMock(),
         stream=MagicMock(),
     )
+    client._kwrag_test_atomic_boundary = True
     client.close = MagicMock()
     return client
 
@@ -101,6 +113,7 @@ def _supported_anthropic_bedrock_client():
         create=MagicMock(),
         stream=MagicMock(),
     )
+    client._kwrag_test_atomic_boundary = True
     client.close = MagicMock()
     return client
 
@@ -701,6 +714,124 @@ def test_provider_outcome_sink_is_insert_once_and_conflicts_fail_closed(
         / ("d" * 64 + ".json")
     )
     assert outcome_path.read_bytes() == canonical_json_bytes(receipt) + b"\n"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX outcome content contract")
+def test_provider_outcome_publication_rejects_same_inode_content_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from plugins.kwrag_slot.consumer import (
+        FileConsumptionReceiptSink,
+        HermesSlotRetrievalError,
+    )
+
+    sink = FileConsumptionReceiptSink(tmp_path / "outcome-in-place-publication.jsonl")
+    sink.write({"schema_version": "fixture-ledger-anchor-v1"})
+    identity = "sha256:" + "1" * 64
+    receipt = {"schema_version": "fixture-outcome-v1", "status": "unknown"}
+    original_read_all = sink._read_all
+    mutated = False
+
+    def mutate_held_inode_before_content_check(descriptor: int) -> bytes:
+        nonlocal mutated
+        if not mutated:
+            mutated = True
+            os.pwrite(descriptor, b"X", 0)
+            os.fsync(descriptor)
+        return original_read_all(descriptor)
+
+    monkeypatch.setattr(sink, "_read_all", mutate_held_inode_before_content_check)
+    with pytest.raises(HermesSlotRetrievalError, match="persisted safely"):
+        sink.write_once(identity, receipt)
+
+    outcome_path = (
+        tmp_path
+        / "outcome-in-place-publication.jsonl.outcomes"
+        / ("1" * 64 + ".json")
+    )
+    assert mutated is True
+    assert not outcome_path.exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX outcome content contract")
+def test_provider_outcome_replay_rejects_same_inode_content_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from plugins.kwrag_slot.consumer import (
+        FileConsumptionReceiptSink,
+        HermesSlotRetrievalError,
+    )
+
+    sink = FileConsumptionReceiptSink(tmp_path / "outcome-in-place-replay.jsonl")
+    sink.write({"schema_version": "fixture-ledger-anchor-v1"})
+    identity = "sha256:" + "2" * 64
+    receipt = {"schema_version": "fixture-outcome-v1", "status": "unknown"}
+    sink.write_once(identity, receipt)
+    outcome_path = (
+        tmp_path / "outcome-in-place-replay.jsonl.outcomes" / ("2" * 64 + ".json")
+    )
+    original_read_all = sink._read_all
+    read_count = 0
+
+    def mutate_after_initial_replay_read(descriptor: int) -> bytes:
+        nonlocal read_count
+        raw = original_read_all(descriptor)
+        read_count += 1
+        if read_count == 1:
+            replacement = os.open(outcome_path, os.O_WRONLY | os.O_CLOEXEC)
+            try:
+                os.pwrite(replacement, b"X", 0)
+                os.fsync(replacement)
+            finally:
+                os.close(replacement)
+        return raw
+
+    monkeypatch.setattr(sink, "_read_all", mutate_after_initial_replay_read)
+    with pytest.raises(HermesSlotRetrievalError, match="changed during replay"):
+        sink.write_once(identity, receipt)
+
+    assert read_count == 2
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX outcome linearization contract")
+@pytest.mark.parametrize("replay", [False, True], ids=["publication", "replay"])
+def test_provider_outcome_content_check_precedes_final_public_path_linearization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replay: bool,
+) -> None:
+    from plugins.kwrag_slot.consumer import FileConsumptionReceiptSink
+
+    sink = FileConsumptionReceiptSink(tmp_path / "outcome-linearization.jsonl")
+    sink.write({"schema_version": "fixture-ledger-anchor-v1"})
+    identity = "sha256:" + "3" * 64
+    receipt = {"schema_version": "fixture-outcome-v1", "status": "unknown"}
+    if replay:
+        sink.write_once(identity, receipt)
+
+    events: list[str] = []
+    original_read_all = sink._read_all
+    original_public_identity = sink._assert_public_file_path_identity
+
+    def observe_content(descriptor: int) -> bytes:
+        events.append("content")
+        return original_read_all(descriptor)
+
+    def observe_public_identity(*args, **kwargs) -> None:
+        events.append("public_path")
+        original_public_identity(*args, **kwargs)
+
+    monkeypatch.setattr(sink, "_read_all", observe_content)
+    monkeypatch.setattr(
+        sink,
+        "_assert_public_file_path_identity",
+        observe_public_identity,
+    )
+    sink.write_once(identity, receipt)
+
+    assert events[-2:] == ["content", "public_path"]
 
 
 @pytest.mark.skipif(os.name == "posix", reason="non-POSIX fail-closed contract")
@@ -1614,6 +1745,68 @@ def test_prompt_consumption_is_single_use_and_requires_session_identity(tmp_path
         run_conversation_with_approved_retrieval(Agent(), "question", prepared)
 
 
+def test_prompt_consumption_is_single_winner_under_concurrency(tmp_path: Path) -> None:
+    from plugins.kwrag_slot.consumer import HermesSlotRetrievalError
+    from plugins.kwrag_slot.prompt_context import run_conversation_with_approved_retrieval
+
+    prepared, _receipt_path = _prepared_hits(tmp_path, "concurrent-consumption.jsonl")
+    ready = threading.Barrier(2)
+    sdk_calls: list[str] = []
+    sdk_calls_lock = threading.Lock()
+    outcomes: list[dict] = []
+    failures: list[BaseException] = []
+
+    class Agent:
+        session_id = "concurrent-consumption-session"
+
+        def __init__(self, provider_call_id: str):
+            self.provider_call_id = provider_call_id
+
+        def run_conversation(self, *_args, **kwargs):
+            ready.wait(timeout=5)
+            binding = _provider_attempt_binding(providerCallId=self.provider_call_id)
+            kwargs["ephemeral_user_context_on_request"](binding)
+            with sdk_calls_lock:
+                sdk_calls.append(self.provider_call_id)
+            kwargs["ephemeral_user_context_on_outcome"](
+                "response_observed",
+                binding["providerAttemptBindingDigest"],
+                None,
+            )
+            return {"completed": True}
+
+    def run(agent: Agent) -> None:
+        try:
+            outcomes.append(
+                run_conversation_with_approved_retrieval(
+                    agent,
+                    "question",
+                    prepared,
+                )
+            )
+        except BaseException as exc:
+            failures.append(exc)
+
+    agents = [
+        Agent("11111111-1111-4111-8111-111111111111"),
+        Agent("22222222-2222-4222-8222-222222222222"),
+    ]
+    threads = [threading.Thread(target=run, args=(agent,)) for agent in agents]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert outcomes == [{"completed": True}]
+    assert len(failures) == 1
+    assert isinstance(failures[0], HermesSlotRetrievalError)
+    assert "already consumed" in str(failures[0])
+    assert len(sdk_calls) == 1
+    assert prepared.consumption_receipt["provider_call_id"] == sdk_calls[0]
+    assert prepared.provider_attempt_outcome_status == "written"
+
+
 def test_codex_app_server_is_rejected_before_consumption_receipt(tmp_path: Path) -> None:
     from plugins.kwrag_slot.consumer import (
         FileConsumptionReceiptSink,
@@ -1767,7 +1960,73 @@ def test_provider_facades_without_leaf_binding_are_rejected_before_dispatch(
     assert receipt_path.read_bytes() == canonical_json_bytes(prepared.result_receipt) + b"\n"
 
 
-def test_supported_configured_fallback_binds_only_the_final_evidence_attempt(
+def test_real_openai_leaf_retrieval_fails_closed_without_sdk_or_evidence_exposure(
+    tmp_path: Path,
+) -> None:
+    from openai import OpenAI
+
+    from plugins.kwrag_slot.consumer import HermesSlotRetrievalError
+    from plugins.kwrag_slot.prompt_context import run_conversation_with_approved_retrieval
+
+    prepared, receipt_path = _prepared_hits(tmp_path, "real-openai-fail-closed.jsonl")
+    real_leaf = OpenAI(api_key="fixture-key", base_url="https://openrouter.ai/api/v1")
+    real_leaf.chat = SimpleNamespace(
+        completions=SimpleNamespace(create=MagicMock())
+    )
+    agent = _actual_chat_completions_agent("real-openai-fail-closed-session")
+    provider_ledger = MagicMock()
+    agent._session_db = provider_ledger
+    agent._session_db_created = True
+
+    with (
+        patch.object(agent, "_create_request_openai_client", return_value=real_leaf),
+        patch.object(agent, "_close_request_openai_client"),
+        patch.object(agent, "_try_recover_primary_transport", return_value=False),
+        patch.object(agent, "_try_activate_fallback", return_value=False),
+        patch.object(agent, "_persist_session"),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+        pytest.raises(
+            HermesSlotRetrievalError,
+            match="completed before retrieval evidence dispatch",
+        ),
+    ):
+        run_conversation_with_approved_retrieval(
+            agent,
+            "authorized retrieval turn",
+            prepared,
+        )
+
+    real_leaf.chat.completions.create.assert_not_called()
+    provider_ledger.record_provider_call.assert_not_called()
+    assert prepared.consumption_receipt_status == "pending"
+    assert prepared.provider_attempt_outcome_status == "pending"
+    assert receipt_path.read_bytes() == canonical_json_bytes(prepared.result_receipt) + b"\n"
+
+
+def test_real_openai_leaf_ordinary_non_retrieval_call_is_unchanged() -> None:
+    from openai import OpenAI
+
+    real_leaf = OpenAI(api_key="fixture-key", base_url="https://openrouter.ai/api/v1")
+    response = SimpleNamespace(id="ordinary-response")
+    real_leaf.chat = SimpleNamespace(
+        completions=SimpleNamespace(create=MagicMock(return_value=response))
+    )
+    agent = _actual_chat_completions_agent("ordinary-non-retrieval-session")
+
+    with (
+        patch.object(agent, "_create_request_openai_client", return_value=real_leaf),
+        patch.object(agent, "_close_request_openai_client"),
+    ):
+        observed = agent._interruptible_api_call(
+            {"model": agent.model, "messages": []},
+        )
+
+    assert observed is response
+    real_leaf.chat.completions.create.assert_called_once()
+
+
+def test_synthetic_atomic_configured_fallback_binds_only_final_evidence_attempt(
     tmp_path: Path,
 ) -> None:
     from plugins.kwrag_slot.prompt_context import (
@@ -1866,7 +2125,7 @@ def test_supported_configured_fallback_binds_only_the_final_evidence_attempt(
     assert receipt["provider"] == "fallback-provider"
     assert receipt["model"] == "fallback-model"
     assert receipt["fallback_index"] == 1
-    assert receipt["leaf_adapter"] == "openai.OpenAI"
+    assert receipt["leaf_adapter"] == "tests.fixture.AtomicSerializedRequestAdapter"
     assert receipt["endpoint_identity"] == "https://fallback.example/v1"
     assert receipt["configured_route_chain_digest"].startswith("sha256:")
     assert prepared.provider_attempt_outcome_status == "written"
@@ -2675,7 +2934,7 @@ def test_receipt_file_replacement_between_writes_fails_before_sdk(
     assert receipt_path.read_bytes() == b""
 
 
-def test_actual_aiagent_commits_exactly_once_at_sdk_dispatch_handoff(
+def test_synthetic_atomic_aiagent_commits_once_at_sdk_dispatch_handoff(
     tmp_path: Path,
 ) -> None:
     from plugins.kwrag_slot.prompt_context import run_conversation_with_approved_retrieval
@@ -3134,7 +3393,7 @@ def _anthropic_bound_handoff(agent, receipt_bindings: list[dict]):
     return handoff
 
 
-def test_anthropic_nonstream_uses_the_exact_leaf_validated_before_commit() -> None:
+def test_synthetic_atomic_anthropic_nonstream_uses_one_validated_client() -> None:
     agent, original_client = _actual_anthropic_agent(
         "anthropic-nonstream-leaf-snapshot",
         streaming=False,
@@ -3165,10 +3424,10 @@ def test_anthropic_nonstream_uses_the_exact_leaf_validated_before_commit() -> No
     assert observed is response
     original_client.messages.create.assert_called_once()
     replacement_client.messages.create.assert_not_called()
-    assert receipts[0]["leafAdapter"] == "anthropic.Anthropic"
+    assert receipts[0]["leafAdapter"] == "tests.fixture.AtomicSerializedRequestAdapter"
 
 
-def test_anthropic_stream_uses_the_exact_leaf_validated_before_commit() -> None:
+def test_synthetic_atomic_anthropic_stream_uses_one_validated_client() -> None:
     agent, original_client = _actual_anthropic_agent(
         "anthropic-stream-leaf-snapshot",
         streaming=True,
@@ -3222,10 +3481,10 @@ def test_anthropic_stream_uses_the_exact_leaf_validated_before_commit() -> None:
     assert observed is final_message
     original_client.messages.stream.assert_called_once()
     replacement_client.messages.stream.assert_not_called()
-    assert receipts[0]["leafAdapter"] == "anthropic.Anthropic"
+    assert receipts[0]["leafAdapter"] == "tests.fixture.AtomicSerializedRequestAdapter"
 
 
-def test_anthropic_bedrock_exact_leaf_binds_one_final_attempt() -> None:
+def test_synthetic_atomic_anthropic_bedrock_binds_one_final_attempt() -> None:
     agent, _original_client = _actual_anthropic_agent(
         "anthropic-bedrock-exact-leaf",
         streaming=False,
@@ -3255,9 +3514,7 @@ def test_anthropic_bedrock_exact_leaf_binds_one_final_attempt() -> None:
     assert binding["provider"] == "bedrock"
     assert binding["apiMode"] == "anthropic_messages"
     assert binding["model"] == agent.model
-    assert binding["leafAdapter"] == (
-        "anthropic.lib.bedrock._client.AnthropicBedrock"
-    )
+    assert binding["leafAdapter"] == "tests.fixture.AtomicSerializedRequestAdapter"
     assert binding["endpointIdentity"] == agent.base_url
     assert binding["providerAttemptId"] == 1
     assert binding["providerCallId"] == (
@@ -3431,7 +3688,7 @@ def test_consecutive_user_repair_fails_before_consumption_or_dispatch(tmp_path: 
     assert receipt_path.read_bytes() == canonical_json_bytes(prepared.result_receipt) + b"\n"
 
 
-def test_approved_evidence_reaches_actual_aiagent_request_but_not_returned_history(
+def test_approved_evidence_reaches_synthetic_atomic_request_not_returned_history(
     tmp_path: Path,
 ) -> None:
     from plugins.kwrag_slot.consumer import (

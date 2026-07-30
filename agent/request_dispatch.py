@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import importlib
 import json
 import math
 import os
@@ -30,15 +29,13 @@ class FinalProviderBindingUnsupported(RuntimeError):
     """The selected provider reshapes requests below the bound SDK seam."""
 
 
-_STATIC_LEAF_CLIENTS = {
-    "anthropic.Anthropic": ("anthropic", "Anthropic"),
-    "anthropic.lib.bedrock._client.AnthropicBedrock": (
-        "anthropic.lib.bedrock._client",
-        "AnthropicBedrock",
-    ),
-    "openai.OpenAI": ("openai", "OpenAI"),
-    "openai.lib.azure.AzureOpenAI": ("openai.lib.azure", "AzureOpenAI"),
-}
+_SDK_LEAVES_WITHOUT_ATOMIC_REQUEST_BINDING = frozenset({
+    "anthropic.Anthropic",
+    "anthropic.lib.bedrock._client.AnthropicBedrock",
+    "botocore.client.BedrockRuntime",
+    "openai.OpenAI",
+    "openai.lib.azure.AzureOpenAI",
+})
 
 
 _FORBIDDEN_SECRET_KEYS = frozenset({
@@ -160,61 +157,18 @@ def provider_leaf_adapter_identity(client: Any) -> str:
     return identity
 
 
-def _resolve_static_leaf_type(identity: str) -> type[Any]:
-    module_name, class_name = _STATIC_LEAF_CLIENTS[identity]
-    try:
-        expected_type = getattr(importlib.import_module(module_name), class_name)
-    except (AttributeError, ImportError) as exc:
-        raise FinalProviderBindingUnsupported(
-            f"provider SDK leaf type is unavailable for {identity}"
-        ) from exc
-    if not isinstance(expected_type, type):
-        raise FinalProviderBindingUnsupported(
-            f"provider SDK leaf type is invalid for {identity}"
-        )
-    return expected_type
-
-
 def require_authoritative_leaf_adapter(client: Any) -> str:
-    """Accept only concrete SDK leaves whose kwargs are the final request shape."""
+    """Require an atomic final-request adapter for retrieval evidence."""
 
     identity = provider_leaf_adapter_identity(client)
-    static_leaf = _STATIC_LEAF_CLIENTS.get(identity)
-    if static_leaf is not None:
-        expected_type = _resolve_static_leaf_type(identity)
-        if type(client) is not expected_type:
-            raise FinalProviderBindingUnsupported(
-                f"provider leaf request binding is unavailable for {identity}"
-            )
-        return identity
-
-    if identity == "botocore.client.BedrockRuntime":
-        try:
-            base_client = getattr(importlib.import_module("botocore.client"), "BaseClient")
-            authoritative = getattr(
-                importlib.import_module("agent.bedrock_adapter"),
-                "is_authoritative_bedrock_runtime_client",
-            )
-        except (AttributeError, ImportError) as exc:
-            raise FinalProviderBindingUnsupported(
-                "botocore Bedrock leaf type is unavailable"
-            ) from exc
-        service_model = getattr(getattr(client, "meta", None), "service_model", None)
-        if (
-            not isinstance(client, base_client)
-            or not authoritative(client)
-            or getattr(service_model, "service_name", None) != "bedrock-runtime"
-        ):
-            raise FinalProviderBindingUnsupported(
-                f"provider leaf request binding is unavailable for {identity}"
-            )
-        return identity
-
-    if identity not in _STATIC_LEAF_CLIENTS:
+    if identity in _SDK_LEAVES_WITHOUT_ATOMIC_REQUEST_BINDING:
         raise FinalProviderBindingUnsupported(
-            f"provider leaf request binding is unavailable for {identity}"
+            "retrieval evidence dispatch requires an atomic final serialized "
+            f"request boundary; {identity} does not expose one"
         )
-    raise AssertionError("unreachable provider leaf identity")
+    raise FinalProviderBindingUnsupported(
+        f"provider leaf request binding is unavailable for {identity}"
+    )
 
 
 def canonical_endpoint_identity(value: Any, *, provider: str) -> str:
@@ -251,7 +205,12 @@ def canonical_endpoint_identity(value: Any, *, provider: str) -> str:
         raise FinalProviderBindingUnsupported("provider endpoint hostname is missing")
     port = parsed.port
     default_port = 443 if scheme == "https" else 80
-    netloc = hostname if port in {None, default_port} else f"{hostname}:{port}"
+    authority_host = f"[{hostname}]" if ":" in hostname else hostname
+    netloc = (
+        authority_host
+        if port in {None, default_port}
+        else f"{authority_host}:{port}"
+    )
     path = (parsed.path or "").rstrip("/")
     return urlunsplit((scheme, netloc, path, "", ""))
 
@@ -310,9 +269,9 @@ def _bedrock_endpoint_identity(region: Any) -> str:
         for character in region_id
     ):
         raise FinalProviderBindingUnsupported("configured Bedrock region is invalid")
-    return canonical_endpoint_identity(
-        f"https://bedrock-runtime.{region_id}.amazonaws.com",
-        provider="bedrock",
+    raise FinalProviderBindingUnsupported(
+        "configured Bedrock region does not identify the final SDK endpoint; "
+        "retrieval evidence requires an explicit atomic provider boundary"
     )
 
 

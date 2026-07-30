@@ -557,7 +557,7 @@ class FileConsumptionReceiptSink:
             )
 
             flags = (
-                os.O_WRONLY
+                os.O_RDWR
                 | os.O_CREAT
                 | os.O_EXCL
                 | os.O_CLOEXEC
@@ -596,7 +596,14 @@ class FileConsumptionReceiptSink:
                         outcome_root.name,
                         outcome_root_identity,
                     )
-                    # Final observable replay identity operation.
+                    os.lseek(descriptor, 0, os.SEEK_SET)
+                    if self._read_all(descriptor) != raw:
+                        raise HermesSlotRetrievalError(
+                            "provider attempt outcome changed during replay"
+                        )
+                    # The held inode's bytes are checked immediately before the
+                    # canonical public pathname.  The latter is the replay
+                    # linearization point; no file I/O follows it.
                     self._assert_named_outcome_file_identity(
                         outcome_directory,
                         outcome_name,
@@ -634,7 +641,16 @@ class FileConsumptionReceiptSink:
                         outcome_root_identity,
                     )
                     os.fsync(outcome_directory)
-                    # Final observable publication identity operation.
+                    os.lseek(descriptor, 0, os.SEEK_SET)
+                    if self._read_all(descriptor) != raw:
+                        raise OSError(
+                            "provider attempt outcome changed during publication"
+                        )
+                    # The held inode's bytes are checked immediately before the
+                    # canonical public pathname.  The latter is the publication
+                    # linearization point; no file I/O follows it.  This does
+                    # not claim immunity from later mutation by the directory
+                    # owner after the operation has returned.
                     self._assert_named_outcome_file_identity(
                         outcome_directory,
                         outcome_name,
@@ -737,6 +753,11 @@ class HermesSlotRetrievalResult:
     provider_attempt_outcome_receipt_digest: str | None = None
     provider_attempt_outcome_status: str = "pending"
     _receipt_sink: ConsumptionReceiptSink | None = field(repr=False, compare=False, default=None)
+    _state_lock: threading.RLock = field(
+        repr=False,
+        compare=False,
+        default_factory=threading.RLock,
+    )
 
     def _verified_evidence(self) -> tuple[tuple[dict[str, Any], ...], dict[str, Any]]:
         """Reject caller mutation and return private canonical evidence copies."""
@@ -776,6 +797,20 @@ class HermesSlotRetrievalResult:
         return tuple(canonical_results), canonical_receipt
 
     def record_prompt_consumption(
+        self,
+        *,
+        session_binding_digest: str,
+        prompt_context_digest: str,
+        provider_attempt_binding: Mapping[str, Any],
+    ) -> str:
+        with self._state_lock:
+            return self._record_prompt_consumption_locked(
+                session_binding_digest=session_binding_digest,
+                prompt_context_digest=prompt_context_digest,
+                provider_attempt_binding=provider_attempt_binding,
+            )
+
+    def _record_prompt_consumption_locked(
         self,
         *,
         session_binding_digest: str,
@@ -916,6 +951,20 @@ class HermesSlotRetrievalResult:
         transport_outcome_status: str,
         error_category: str | None = None,
     ) -> str:
+        with self._state_lock:
+            return self._record_provider_attempt_outcome_locked(
+                provider_attempt_binding_digest=provider_attempt_binding_digest,
+                transport_outcome_status=transport_outcome_status,
+                error_category=error_category,
+            )
+
+    def _record_provider_attempt_outcome_locked(
+        self,
+        *,
+        provider_attempt_binding_digest: str,
+        transport_outcome_status: str,
+        error_category: str | None = None,
+    ) -> str:
         if self.consumption_receipt_status != "written" or self.consumption_receipt is None:
             raise HermesSlotRetrievalError("provider attempt outcome has no dispatch receipt")
         if self.provider_attempt_outcome_status != "pending":
@@ -977,6 +1026,12 @@ class HermesSlotRetrievalResult:
 
     def content_free_attestation(self) -> dict[str, Any]:
         """Project exact result/consumption lineage for an enabled canary."""
+
+        with self._state_lock:
+            return self._content_free_attestation_locked()
+
+    def _content_free_attestation_locked(self) -> dict[str, Any]:
+        """Project one lock-consistent attestation snapshot."""
 
         _verified_results, verified_receipt = self._verified_evidence()
         result_status = verified_receipt.get("result_status")
