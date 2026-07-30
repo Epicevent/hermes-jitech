@@ -150,6 +150,9 @@ class TestKillEscalation:
             configured_model=agent.model,
             allowed_provider_routes=snapshot_allowed_provider_routes(agent),
         )
+        handoff.bind_provider_call_identity(
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        )
         abandon_calls = []
         original_abandon = handoff.abandon
 

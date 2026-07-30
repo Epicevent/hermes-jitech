@@ -7,6 +7,7 @@ import json
 import math
 import os
 import threading
+import uuid
 from collections.abc import Callable
 from typing import Any, Mapping
 from urllib.parse import urlsplit, urlunsplit
@@ -30,6 +31,7 @@ class FinalProviderBindingUnsupported(RuntimeError):
 
 _SUPPORTED_LEAF_CLIENTS = {
     "anthropic.Anthropic",
+    "anthropic.lib.bedrock._client.AnthropicBedrock",
     "botocore.client.BedrockRuntime",
     "openai.OpenAI",
     "openai.lib.azure.AzureOpenAI",
@@ -426,6 +428,8 @@ class RequestDispatchHandoff:
         self._future_attempts_closed = False
         self._closure_cause: str | None = None
         self._attempt_claim_count = 0
+        self._provider_call_id: str | None = None
+        self._seen_provider_call_ids: set[str] = set()
         self._active_attempt_binding_digest: str | None = None
         self._terminal_outcome_status: str | None = None
         self._outcome_persistence_error: BaseException | None = None
@@ -449,6 +453,34 @@ class RequestDispatchHandoff:
     def attempt_claim_count(self) -> int:
         with self._lock:
             return self._attempt_claim_count
+
+    @property
+    def provider_call_id(self) -> str | None:
+        with self._lock:
+            return self._provider_call_id
+
+    def bind_provider_call_identity(self, call_id: str) -> None:
+        """Bind the fresh provider-ledger call UUID before leaf dispatch.
+
+        Pre-commit route construction may fail and select an approved fallback,
+        so a pending handoff may replace its candidate call id.  An id already
+        presented to this handoff is never reusable, and dispatch ownership
+        freezes the final id under the same lock as receipt commitment.
+        """
+
+        try:
+            canonical = str(uuid.UUID(str(call_id)))
+        except (AttributeError, ValueError) as exc:
+            raise ValueError("provider call identity must be a canonical UUID") from exc
+        if canonical != str(call_id):
+            raise ValueError("provider call identity must be a canonical UUID")
+        with self._lock:
+            if self._state != "pending" or self._attempt_claim_count:
+                raise RuntimeError("provider call identity is already dispatch-owned")
+            if canonical in self._seen_provider_call_ids:
+                raise RuntimeError("provider call identity cannot be reused")
+            self._seen_provider_call_ids.add(canonical)
+            self._provider_call_id = canonical
 
     @property
     def terminal_outcome_status(self) -> str | None:
@@ -633,6 +665,10 @@ class RequestDispatchHandoff:
                         "final provider request mutated before attempt commitment"
                     )
                 if self._callback_accepts_attempt_binding:
+                    if self._provider_call_id is None:
+                        raise ProviderAttemptLedgerRequired(
+                            "bound receipt requires a fresh provider ledger call identity"
+                        )
                     if fallback_index >= len(self._allowed_provider_routes):
                         raise FinalProviderBindingUnsupported(
                             "final provider route is outside the configured fallback chain"
@@ -655,6 +691,7 @@ class RequestDispatchHandoff:
                 attempt_binding = {
                     "schema": "jitech-provider-sdk-request-attempt-binding/v1",
                     "providerAttemptId": attempt_id,
+                    "providerCallId": self._provider_call_id,
                     "configuredProvider": self._configured_provider or provider,
                     "configuredModel": self._configured_model or model,
                     "provider": provider,

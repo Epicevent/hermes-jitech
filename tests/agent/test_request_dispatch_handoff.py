@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import uuid
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -280,6 +281,11 @@ def test_normal_retry_claims_a_distinct_provider_attempt() -> None:
 
 
 def _bound_dispatch(handoff, request_kwargs, invoke):
+    if (
+        handoff.requires_exact_provider_attempt_binding
+        and handoff.provider_call_id is None
+    ):
+        handoff.bind_provider_call_identity(str(uuid.uuid4()))
     return handoff.commit_and_claim_dispatch(
         invoke,
         provider="fixture-provider",
@@ -354,6 +360,9 @@ def test_bound_attempt_records_actual_fallback_route_and_leaf() -> None:
             ),
         ),
     )
+    handoff.bind_provider_call_identity(
+        "77777777-7777-4777-8777-777777777777"
+    )
     handoff.commit_and_claim_dispatch(
         lambda _kwargs: "ok",
         provider="fallback-provider",
@@ -376,6 +385,86 @@ def test_bound_attempt_records_actual_fallback_route_and_leaf() -> None:
     assert binding["leafAdapter"] == "openai.OpenAI"
     assert binding["endpointIdentity"] == "https://fallback.example/v1"
     assert binding["configuredRouteChainDigest"].startswith("sha256:")
+
+
+def test_same_request_bytes_use_distinct_fresh_provider_call_bindings() -> None:
+    bindings: list[dict] = []
+    request = {"model": "fixture-model", "messages": [{"role": "user", "content": "x"}]}
+
+    def new_handoff(call_id: str) -> RequestDispatchHandoff:
+        handoff = RequestDispatchHandoff(
+            lambda binding, _kwargs: bindings.append(dict(binding)),
+            interrupted=lambda: False,
+            interrupted_message="request abandoned before dispatch",
+            max_attempts=1,
+            callback_accepts_attempt_binding=True,
+            configured_provider="fixture-provider",
+            configured_model="fixture-model",
+            allowed_provider_routes=(_route(),),
+        )
+        handoff.bind_provider_call_identity(call_id)
+        return handoff
+
+    first_id = "11111111-1111-4111-8111-111111111111"
+    second_id = "22222222-2222-4222-8222-222222222222"
+    _bound_dispatch(new_handoff(first_id), request, lambda _kwargs: "first")
+    _bound_dispatch(new_handoff(second_id), request, lambda _kwargs: "second")
+
+    assert [binding["providerCallId"] for binding in bindings] == [
+        first_id,
+        second_id,
+    ]
+    assert bindings[0]["finalRequestKwargsDigest"] == bindings[1][
+        "finalRequestKwargsDigest"
+    ]
+    assert bindings[0]["providerAttemptBindingDigest"] != bindings[1][
+        "providerAttemptBindingDigest"
+    ]
+
+
+def test_provider_call_identity_cannot_be_reused_or_swapped_after_commit() -> None:
+    handoff = RequestDispatchHandoff(
+        lambda _binding, _kwargs: None,
+        interrupted=lambda: False,
+        interrupted_message="request abandoned before dispatch",
+        max_attempts=1,
+        callback_accepts_attempt_binding=True,
+        configured_provider="fixture-provider",
+        configured_model="fixture-model",
+        allowed_provider_routes=(_route(),),
+    )
+    first_id = "33333333-3333-4333-8333-333333333333"
+    handoff.bind_provider_call_identity(first_id)
+    with pytest.raises(RuntimeError, match="cannot be reused"):
+        handoff.bind_provider_call_identity(first_id)
+
+    final_id = "44444444-4444-4444-8444-444444444444"
+    handoff.bind_provider_call_identity(final_id)
+    _bound_dispatch(
+        handoff,
+        {"model": "fixture-model", "messages": []},
+        lambda _kwargs: "ok",
+    )
+    with pytest.raises(RuntimeError, match="already dispatch-owned"):
+        handoff.bind_provider_call_identity(
+            "55555555-5555-4555-8555-555555555555"
+        )
+
+
+def test_exact_anthropic_bedrock_leaf_is_supported_without_broadening() -> None:
+    bedrock_type = type(
+        "AnthropicBedrock",
+        (),
+        {"__module__": "anthropic.lib.bedrock._client"},
+    )
+    leaf = bedrock_type()
+    assert require_authoritative_leaf_adapter(leaf) == (
+        "anthropic.lib.bedrock._client.AnthropicBedrock"
+    )
+
+    subclass = type("AnthropicBedrockProxy", (bedrock_type,), {})
+    with pytest.raises(FinalProviderBindingUnsupported):
+        require_authoritative_leaf_adapter(subclass())
 
 
 @pytest.mark.parametrize(
@@ -417,6 +506,9 @@ def test_nonconfigured_final_route_fails_before_receipt_or_sdk(override) -> None
                 endpoint_identity="https://fallback.example/v1",
             ),
         ),
+    )
+    handoff.bind_provider_call_identity(
+        "88888888-8888-4888-8888-888888888888"
     )
     call = {
         "provider": "fallback-provider",

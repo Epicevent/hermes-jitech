@@ -559,8 +559,10 @@ def interruptible_api_call(agent, api_kwargs: dict, *, on_request_dispatch=None)
                 )
             )
             _publish_outer_error("watchdog_timeout", timeout_error)
-            cancelled_before_dispatch = dispatch_handoff.abandon(
-                cause="watchdog_timeout"
+            cancelled_before_dispatch = (
+                dispatch_handoff.abandon(cause="watchdog_timeout")
+                if on_request_dispatch is not None
+                else False
             )
             logger.warning(
                 "Codex stream produced no bytes within TTFB cutoff "
@@ -582,11 +584,13 @@ def interruptible_api_call(agent, api_kwargs: dict, *, on_request_dispatch=None)
                     f"Reconnecting."
                 )
             try:
-                _close_request_client_once(
-                    "codex_ttfb_before_dispatch"
-                    if cancelled_before_dispatch
-                    else "codex_ttfb_in_flight"
-                )
+                if on_request_dispatch is None:
+                    close_reason = "codex_ttfb_kill"
+                elif cancelled_before_dispatch:
+                    close_reason = "codex_ttfb_before_dispatch"
+                else:
+                    close_reason = "codex_ttfb_in_flight"
+                _close_request_client_once(close_reason)
             except Exception:
                 pass
             agent._touch_activity(
@@ -611,8 +615,10 @@ def interruptible_api_call(agent, api_kwargs: dict, *, on_request_dispatch=None)
                 f"after first byte (threshold: {int(_codex_idle_timeout)}s)"
             )
             _publish_outer_error("watchdog_timeout", timeout_error)
-            cancelled_before_dispatch = dispatch_handoff.abandon(
-                cause="watchdog_timeout"
+            cancelled_before_dispatch = (
+                dispatch_handoff.abandon(cause="watchdog_timeout")
+                if on_request_dispatch is not None
+                else False
             )
             logger.warning(
                 "Codex stream produced no SSE events for %.0fs after first byte "
@@ -629,11 +635,13 @@ def interruptible_api_call(agent, api_kwargs: dict, *, on_request_dispatch=None)
                 f"Reconnecting."
             )
             try:
-                _close_request_client_once(
-                    "codex_stream_idle_before_dispatch"
-                    if cancelled_before_dispatch
-                    else "codex_stream_idle_in_flight"
-                )
+                if on_request_dispatch is None:
+                    close_reason = "codex_stream_idle_kill"
+                elif cancelled_before_dispatch:
+                    close_reason = "codex_stream_idle_before_dispatch"
+                else:
+                    close_reason = "codex_stream_idle_in_flight"
+                _close_request_client_once(close_reason)
             except Exception:
                 pass
             agent._touch_activity(

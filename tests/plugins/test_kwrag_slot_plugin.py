@@ -42,6 +42,11 @@ def _embedded_component_on_path(monkeypatch):
 
 _SupportedOpenAILeaf = type("OpenAI", (), {"__module__": "openai"})
 _SupportedAnthropicLeaf = type("Anthropic", (), {"__module__": "anthropic"})
+_SupportedAnthropicBedrockLeaf = type(
+    "AnthropicBedrock",
+    (),
+    {"__module__": "anthropic.lib.bedrock._client"},
+)
 
 
 def _supported_openai_client(
@@ -66,6 +71,16 @@ def _supported_anthropic_client(
 ):
     client = _SupportedAnthropicLeaf()
     client.base_url = base_url
+    client.messages = SimpleNamespace(
+        create=MagicMock(),
+        stream=MagicMock(),
+    )
+    client.close = MagicMock()
+    return client
+
+
+def _supported_anthropic_bedrock_client():
+    client = _SupportedAnthropicBedrockLeaf()
     client.messages = SimpleNamespace(
         create=MagicMock(),
         stream=MagicMock(),
@@ -212,6 +227,7 @@ def _provider_attempt_binding(**overrides) -> dict:
     binding = {
         "schema": "jitech-provider-sdk-request-attempt-binding/v1",
         "providerAttemptId": 1,
+        "providerCallId": "11111111-1111-4111-8111-111111111111",
         "configuredProvider": "openrouter",
         "configuredModel": "test/model",
         "provider": "openrouter",
@@ -619,17 +635,18 @@ def test_explicit_consumer_binds_operation_result_and_consumption_receipts(tmp_p
         "resultStatus": "hits",
         "operationReceiptDigest": receipt["operation_receipt_digest"],
         "resultReceiptDigest": prepared.result_receipt_digest,
-            "consumptionReceiptDigest": prepared.consumption_receipt_digest,
-            "providerAttemptId": 1,
-            "providerAttemptBindingDigest": consumption[
-                "provider_attempt_binding_digest"
-            ],
-            "providerAttemptOutcomeReceiptDigest": (
-                prepared.provider_attempt_outcome_receipt_digest
-            ),
-            "evidenceProjectionStatus": "verified_hits",
-            "dispatchHandoffStatus": "evidence_dispatch_handoff_committed",
-            "transportOutcomeStatus": "response_observed",
+        "consumptionReceiptDigest": prepared.consumption_receipt_digest,
+        "providerAttemptId": 1,
+        "providerCallId": consumption["provider_call_id"],
+        "providerAttemptBindingDigest": consumption[
+            "provider_attempt_binding_digest"
+        ],
+        "providerAttemptOutcomeReceiptDigest": (
+            prepared.provider_attempt_outcome_receipt_digest
+        ),
+        "evidenceProjectionStatus": "verified_hits",
+        "dispatchHandoffStatus": "evidence_dispatch_handoff_committed",
+        "transportOutcomeStatus": "response_observed",
         "providerAttestationStatus": "unavailable",
         "billingStatus": "unavailable",
     }
@@ -810,6 +827,45 @@ def test_provider_outcome_sink_requires_preexisting_safe_receipt_parent(
     with pytest.raises(HermesSlotRetrievalError, match="approved POSIX ledger"):
         unsafe_sink.write({"schema_version": "fixture-ledger-anchor-v1"})
     assert not (unsafe_parent / "receipts.jsonl").exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX parent inode binding contract")
+def test_consumption_receipt_parent_swap_before_append_writes_zero_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from plugins.kwrag_slot.consumer import (
+        FileConsumptionReceiptSink,
+        HermesSlotRetrievalError,
+    )
+
+    receipt_parent = tmp_path / "trusted-ledger"
+    receipt_parent.mkdir(mode=0o700)
+    receipt_parent.chmod(0o700)
+    detached_parent = tmp_path / "detached-ledger"
+    sink = FileConsumptionReceiptSink(receipt_parent / "consumption.jsonl")
+    original_assert = sink._assert_receipt_parent_path_identity
+    swapped = False
+
+    def swap_before_identity_assert(expected: tuple[int, int]) -> None:
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            receipt_parent.rename(detached_parent)
+            receipt_parent.mkdir(mode=0o700)
+            receipt_parent.chmod(0o700)
+        original_assert(expected)
+
+    monkeypatch.setattr(
+        sink,
+        "_assert_receipt_parent_path_identity",
+        swap_before_identity_assert,
+    )
+    with pytest.raises(HermesSlotRetrievalError, match="approved POSIX ledger"):
+        sink.write({"schema_version": "fixture-consumption-v1"})
+
+    assert list(receipt_parent.iterdir()) == []
+    assert list(detached_parent.iterdir()) == []
 
 
 def test_consumer_budgets_complete_canonical_results_with_catch_and_valid_controls(
@@ -1253,6 +1309,7 @@ def test_supported_configured_fallback_binds_only_the_final_evidence_attempt(
     assert prepared.provider_attempt_outcome_status == "written"
     provider_ledger.record_provider_call.assert_called_once()
     recorded_call = provider_ledger.record_provider_call.call_args.kwargs
+    assert receipt["provider_call_id"] == recorded_call["call_id"]
     assert recorded_call["requested_provider"] == "fallback-provider"
     assert recorded_call["requested_model"] == "fallback-model"
     assert recorded_call["attempt"] == 1
@@ -2002,6 +2059,9 @@ def test_dispatch_commitment_wins_interrupt_during_receipt_write(
         configured_model="test/model",
         allowed_provider_routes=snapshot_allowed_provider_routes(agent),
     )
+    handoff.bind_provider_call_identity(
+        "99999999-9999-4999-8999-999999999999"
+    )
     original_abandon = handoff.abandon
 
     def observed_abandon(**kwargs) -> bool:
@@ -2165,7 +2225,7 @@ def _anthropic_bound_handoff(agent, receipt_bindings: list[dict]):
         snapshot_allowed_provider_routes,
     )
 
-    return RequestDispatchHandoff(
+    handoff = RequestDispatchHandoff(
         lambda binding, _kwargs: receipt_bindings.append(dict(binding)),
         interrupted=lambda: bool(agent._interrupt_requested),
         interrupted_message="Anthropic request abandoned before dispatch",
@@ -2175,6 +2235,10 @@ def _anthropic_bound_handoff(agent, receipt_bindings: list[dict]):
         configured_model=agent.model,
         allowed_provider_routes=snapshot_allowed_provider_routes(agent),
     )
+    handoff.bind_provider_call_identity(
+        "66666666-6666-4666-8666-666666666666"
+    )
+    return handoff
 
 
 def test_anthropic_nonstream_uses_the_exact_leaf_validated_before_commit() -> None:
@@ -2266,6 +2330,46 @@ def test_anthropic_stream_uses_the_exact_leaf_validated_before_commit() -> None:
     original_client.messages.stream.assert_called_once()
     replacement_client.messages.stream.assert_not_called()
     assert receipts[0]["leafAdapter"] == "anthropic.Anthropic"
+
+
+def test_anthropic_bedrock_exact_leaf_binds_one_final_attempt() -> None:
+    agent, _original_client = _actual_anthropic_agent(
+        "anthropic-bedrock-exact-leaf",
+        streaming=False,
+    )
+    agent.provider = "bedrock"
+    agent.api_mode = "anthropic_messages"
+    agent.model = "us.anthropic.claude-sonnet-4-6"
+    agent.base_url = "https://bedrock-runtime.us-east-1.amazonaws.com"
+    agent._anthropic_base_url = agent.base_url
+    bedrock_client = _supported_anthropic_bedrock_client()
+    agent._anthropic_client = bedrock_client
+    response = SimpleNamespace(id="msg-bedrock", model=agent.model, usage=None)
+    bedrock_client.messages.create.return_value = response
+    receipts: list[dict] = []
+    handoff = _anthropic_bound_handoff(agent, receipts)
+
+    with patch.object(agent, "_try_refresh_anthropic_client_credentials"):
+        observed = agent._anthropic_messages_create(
+            {"model": agent.model, "messages": [], "max_tokens": 16},
+            on_request_dispatch=handoff,
+        )
+
+    assert observed is response
+    bedrock_client.messages.create.assert_called_once()
+    assert len(receipts) == 1
+    binding = receipts[0]
+    assert binding["provider"] == "bedrock"
+    assert binding["apiMode"] == "anthropic_messages"
+    assert binding["model"] == agent.model
+    assert binding["leafAdapter"] == (
+        "anthropic.lib.bedrock._client.AnthropicBedrock"
+    )
+    assert binding["endpointIdentity"] == agent.base_url
+    assert binding["providerAttemptId"] == 1
+    assert binding["providerCallId"] == (
+        "66666666-6666-4666-8666-666666666666"
+    )
 
 
 @pytest.mark.parametrize("force_ascii", [True, False], ids=["catch", "valid"])

@@ -1916,6 +1916,9 @@ def run_conversation(
                         ephemeral_dispatch_for_attempt = (
                             ephemeral_user_context_dispatch_handoff
                         )
+                        ephemeral_dispatch_for_attempt.bind_provider_call_identity(
+                            provider_call_id
+                        )
                         response = agent._interruptible_streaming_api_call(
                             api_kwargs,
                             on_first_delta=_stop_spinner,
@@ -1948,6 +1951,9 @@ def run_conversation(
                     else:
                         ephemeral_dispatch_for_attempt = (
                             ephemeral_user_context_dispatch_handoff
+                        )
+                        ephemeral_dispatch_for_attempt.bind_provider_call_identity(
+                            provider_call_id
                         )
                         response = agent._interruptible_api_call(
                             api_kwargs,

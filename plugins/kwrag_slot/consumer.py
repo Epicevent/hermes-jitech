@@ -69,24 +69,21 @@ class FileConsumptionReceiptSink:
         self._trusted_parent_identity: tuple[int, int] | None = None
 
     def write(self, receipt: Mapping[str, Any]) -> str:
+        raw = canonical_json_bytes(dict(receipt)) + b"\n"
+        receipt_digest = "sha256:" + hashlib.sha256(raw[:-1]).hexdigest()
         if os.name == "posix":
             try:
-                opened, parent = self._open_existing_posix_receipt_parent()
-                try:
-                    info = os.fstat(parent)
-                    parent_identity = (info.st_dev, info.st_ino)
-                finally:
-                    for descriptor in reversed(opened):
-                        os.close(descriptor)
+                with self._write_once_lock:
+                    parent_identity = self._append_receipt_posix(raw)
             except OSError as exc:
                 raise HermesSlotRetrievalError(
                     "consumption receipt parent is not an approved POSIX ledger boundary"
                 ) from exc
         else:
             parent_identity = None
-        result = self._writer.write(dict(receipt))
-        if result.status != "written":
-            raise HermesSlotRetrievalError("consumption receipt was not written")
+            result = self._writer.write(dict(receipt))
+            if result.status != "written" or result.digest != receipt_digest:
+                raise HermesSlotRetrievalError("consumption receipt was not written")
         if parent_identity is not None:
             if (
                 self._trusted_parent_identity is not None
@@ -96,7 +93,7 @@ class FileConsumptionReceiptSink:
                     "consumption receipt parent identity changed"
                 )
             self._trusted_parent_identity = parent_identity
-        return result.digest
+        return receipt_digest
 
     def write_once(self, identity: str, receipt: Mapping[str, Any]) -> str:
         identity_digest = _digest(identity, "receipt identity")
@@ -179,6 +176,84 @@ class FileConsumptionReceiptSink:
             for descriptor in reversed(opened):
                 os.close(descriptor)
             raise
+
+    def _assert_receipt_parent_path_identity(
+        self,
+        expected: tuple[int, int],
+    ) -> None:
+        opened, current = self._open_existing_posix_receipt_parent()
+        try:
+            info = os.fstat(current)
+            if (info.st_dev, info.st_ino) != expected:
+                raise OSError("consumption receipt parent was substituted")
+        finally:
+            for descriptor in reversed(opened):
+                os.close(descriptor)
+
+    def _append_receipt_posix(self, raw: bytes) -> tuple[int, int]:
+        opened, parent = self._open_existing_posix_receipt_parent()
+        try:
+            parent_info = os.fstat(parent)
+            parent_identity = (parent_info.st_dev, parent_info.st_ino)
+            if (
+                self._trusted_parent_identity is not None
+                and self._trusted_parent_identity != parent_identity
+            ):
+                raise OSError("consumption receipt parent identity changed")
+            self._assert_receipt_parent_path_identity(parent_identity)
+
+            existed = True
+            try:
+                existing_info = os.stat(
+                    self._path.name,
+                    dir_fd=parent,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                existed = False
+            else:
+                if (
+                    not stat.S_ISREG(existing_info.st_mode)
+                    or existing_info.st_nlink != 1
+                    or existing_info.st_uid != _effective_user_id()
+                    or stat.S_IMODE(existing_info.st_mode) != 0o600
+                ):
+                    raise OSError("consumption receipt file identity is invalid")
+
+            descriptor = os.open(
+                self._path.name,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_APPEND
+                | os.O_CLOEXEC
+                | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=parent,
+            )
+            try:
+                if not existed:
+                    os.fchmod(descriptor, 0o600)
+                self._verify_outcome_file(descriptor, require_owner_mode=True)
+                import fcntl
+
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+                try:
+                    # Keep the approved directory fd open, and prove the
+                    # pathname still resolves to that inode immediately
+                    # before publishing any receipt bytes.
+                    self._assert_receipt_parent_path_identity(parent_identity)
+                    self._write_all(descriptor, raw)
+                    os.fsync(descriptor)
+                finally:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(descriptor)
+            if not existed:
+                os.fsync(parent)
+            return parent_identity
+        finally:
+            for descriptor in reversed(opened):
+                os.close(descriptor)
 
     def _write_once_posix(
         self,
@@ -397,6 +472,7 @@ class HermesSlotRetrievalResult:
         required_attempt_fields = {
             "schema",
             "providerAttemptId",
+            "providerCallId",
             "configuredProvider",
             "configuredModel",
             "provider",
@@ -426,6 +502,15 @@ class HermesSlotRetrievalResult:
             raise HermesSlotRetrievalError("provider attempt binding schema is invalid")
         if binding.get("providerAttemptId") != 1:
             raise HermesSlotRetrievalError("retrieval evidence requires provider attempt 1")
+        provider_call_id = binding.get("providerCallId")
+        if (
+            not isinstance(provider_call_id, str)
+            or not re.fullmatch(
+                r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+                provider_call_id,
+            )
+        ):
+            raise HermesSlotRetrievalError("provider call identity is invalid")
         for field_name in (
             "configuredProvider",
             "configuredModel",
@@ -472,6 +557,7 @@ class HermesSlotRetrievalResult:
             "session_binding_digest": _digest(session_binding_digest, "session binding digest"),
             "prompt_context_digest": _digest(prompt_context_digest, "prompt context digest"),
             "provider_attempt_id": 1,
+            "provider_call_id": provider_call_id,
             "provider_attempt_binding_digest": binding_digest,
             "provider_request_kwargs_digest": request_kwargs_digest,
             "configured_route_chain_digest": route_chain_digest,
@@ -544,6 +630,7 @@ class HermesSlotRetrievalResult:
             "schema_version": "hermes-kwrag-provider-attempt-outcome-receipt-v1",
             "consumer_family": "hermes",
             "provider_attempt_id": 1,
+            "provider_call_id": self.consumption_receipt["provider_call_id"],
             "provider_attempt_binding_digest": binding_digest,
             "transport_outcome_status": transport_outcome_status,
             "error_category": error_category,
@@ -600,6 +687,11 @@ class HermesSlotRetrievalResult:
             "consumptionReceiptDigest": self.consumption_receipt_digest,
             "providerAttemptId": (
                 self.consumption_receipt.get("provider_attempt_id")
+                if self.consumption_receipt is not None
+                else None
+            ),
+            "providerCallId": (
+                self.consumption_receipt.get("provider_call_id")
                 if self.consumption_receipt is not None
                 else None
             ),
