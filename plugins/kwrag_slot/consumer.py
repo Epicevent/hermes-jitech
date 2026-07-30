@@ -240,6 +240,9 @@ class FileConsumptionReceiptSink:
                 errno.ENOTSUP,
                 f"openat2 syscall number is not bound for {machine}",
             )
+        o_path = getattr(os, "O_PATH", None)
+        if o_path is None:
+            raise OSError(errno.ENOTSUP, "Linux O_PATH is unavailable")
 
         class _OpenHow(ctypes.Structure):
             _fields_ = [
@@ -252,7 +255,7 @@ class FileConsumptionReceiptSink:
         syscall_openat2 = 437
         at_fdcwd = -100
         resolve_no_symlinks = 0x04
-        flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+        flags = o_path | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
         how = _OpenHow(flags=flags, mode=0, resolve=resolve_no_symlinks)
         raw_path = os.fsencode(os.path.abspath(os.fspath(path)))
         libc = ctypes.CDLL(None, use_errno=True)

@@ -768,6 +768,52 @@ def test_provider_outcome_sink_rejects_parent_and_final_symlinks(
         sink.write_once(identity, receipt)
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux openat2 O_PATH contract")
+def test_public_path_identity_rejects_fifo_without_blocking_and_final_symlink(
+    tmp_path: Path,
+) -> None:
+    from plugins.kwrag_slot.consumer import FileConsumptionReceiptSink
+
+    sink = FileConsumptionReceiptSink(tmp_path / "identity-only.jsonl")
+    fifo = tmp_path / "hostile-fifo"
+    os.mkfifo(fifo, mode=0o600)
+    fifo.chmod(0o600)
+    fifo_info = os.lstat(fifo)
+    observed: list[BaseException] = []
+    completed = threading.Event()
+
+    def verify_fifo() -> None:
+        try:
+            sink._assert_public_file_path_identity(
+                fifo,
+                (fifo_info.st_dev, fifo_info.st_ino),
+                label="fixture FIFO",
+            )
+        except BaseException as exc:
+            observed.append(exc)
+        finally:
+            completed.set()
+
+    worker = threading.Thread(target=verify_fifo, daemon=True)
+    worker.start()
+    assert completed.wait(timeout=1.0), "identity-only lookup blocked opening a FIFO"
+    assert len(observed) == 1
+    assert isinstance(observed[0], OSError)
+
+    target = tmp_path / "regular-target.json"
+    target.write_bytes(b"{}\n")
+    target.chmod(0o600)
+    target_info = os.lstat(target)
+    final_symlink = tmp_path / "final-symlink.json"
+    os.symlink(target, final_symlink)
+    with pytest.raises(OSError):
+        sink._assert_public_file_path_identity(
+            final_symlink,
+            (target_info.st_dev, target_info.st_ino),
+            label="fixture final symlink",
+        )
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX single-link contract")
 def test_provider_outcome_sink_rejects_hardlinked_existing_receipt(
     tmp_path: Path,
