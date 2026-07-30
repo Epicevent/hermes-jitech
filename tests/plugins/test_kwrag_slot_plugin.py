@@ -30,6 +30,13 @@ ROOT = Path(__file__).resolve().parents[2]
 WHEEL = ROOT / "vendor" / "kwrag" / "kwrag_product_service-0.1.0-py3-none-any.whl"
 STATUS_FIXTURES = ROOT / "tests" / "fixtures" / "kwrag_slot"
 
+_SupportedAnthropicLeaf = type("Anthropic", (), {"__module__": "anthropic"})
+_SupportedAnthropicBedrockLeaf = type(
+    "AnthropicBedrock",
+    (),
+    {"__module__": "anthropic.lib.bedrock._client"},
+)
+
 
 @pytest.fixture(autouse=True)
 def _embedded_component_on_path(monkeypatch):
@@ -38,6 +45,22 @@ def _embedded_component_on_path(monkeypatch):
     for name in list(sys.modules):
         if name == "kwrag" or name.startswith("kwrag."):
             sys.modules.pop(name, None)
+    from agent import request_dispatch
+
+    original_resolver = request_dispatch._resolve_static_leaf_type
+
+    def resolve_test_leaf(identity: str):
+        if identity == "anthropic.Anthropic":
+            return _SupportedAnthropicLeaf
+        if identity == "anthropic.lib.bedrock._client.AnthropicBedrock":
+            return _SupportedAnthropicBedrockLeaf
+        return original_resolver(identity)
+
+    monkeypatch.setattr(
+        request_dispatch,
+        "_resolve_static_leaf_type",
+        resolve_test_leaf,
+    )
 
 
 def _supported_openai_client(
@@ -61,9 +84,8 @@ def _supported_anthropic_client(
     *,
     base_url: str = "https://api.anthropic.com",
 ):
-    from anthropic import Anthropic
-
-    client = Anthropic(api_key="fixture-key", base_url=base_url)
+    client = _SupportedAnthropicLeaf()
+    client.base_url = base_url
     client.messages = SimpleNamespace(
         create=MagicMock(),
         stream=MagicMock(),
@@ -73,13 +95,8 @@ def _supported_anthropic_client(
 
 
 def _supported_anthropic_bedrock_client():
-    from anthropic.lib.bedrock._client import AnthropicBedrock
-
-    client = AnthropicBedrock(
-        aws_access_key="fixture-access-key",
-        aws_secret_key="fixture-secret-key",
-        aws_region="us-east-1",
-    )
+    client = _SupportedAnthropicBedrockLeaf()
+    client.base_url = "https://bedrock-runtime.us-east-1.amazonaws.com"
     client.messages = SimpleNamespace(
         create=MagicMock(),
         stream=MagicMock(),

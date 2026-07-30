@@ -160,19 +160,28 @@ def provider_leaf_adapter_identity(client: Any) -> str:
     return identity
 
 
+def _resolve_static_leaf_type(identity: str) -> type[Any]:
+    module_name, class_name = _STATIC_LEAF_CLIENTS[identity]
+    try:
+        expected_type = getattr(importlib.import_module(module_name), class_name)
+    except (AttributeError, ImportError) as exc:
+        raise FinalProviderBindingUnsupported(
+            f"provider SDK leaf type is unavailable for {identity}"
+        ) from exc
+    if not isinstance(expected_type, type):
+        raise FinalProviderBindingUnsupported(
+            f"provider SDK leaf type is invalid for {identity}"
+        )
+    return expected_type
+
+
 def require_authoritative_leaf_adapter(client: Any) -> str:
     """Accept only concrete SDK leaves whose kwargs are the final request shape."""
 
     identity = provider_leaf_adapter_identity(client)
     static_leaf = _STATIC_LEAF_CLIENTS.get(identity)
     if static_leaf is not None:
-        module_name, class_name = static_leaf
-        try:
-            expected_type = getattr(importlib.import_module(module_name), class_name)
-        except (AttributeError, ImportError) as exc:
-            raise FinalProviderBindingUnsupported(
-                f"provider SDK leaf type is unavailable for {identity}"
-            ) from exc
+        expected_type = _resolve_static_leaf_type(identity)
         if type(client) is not expected_type:
             raise FinalProviderBindingUnsupported(
                 f"provider leaf request binding is unavailable for {identity}"
