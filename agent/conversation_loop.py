@@ -1967,6 +1967,7 @@ def run_conversation(
                     and ephemeral_dispatch_for_attempt.outcome_persistence_error
                     is not None
                 ):
+                    agent._cleanup_task_resources(effective_task_id)
                     agent._persist_session(messages, conversation_history)
                     return {
                         "final_response": None,
@@ -2112,6 +2113,7 @@ def run_conversation(
                         # invalid response must not be remapped to a clean turn
                         # or a fallback model while this evidence transaction
                         # remains the source request.
+                        agent._cleanup_task_resources(effective_task_id)
                         agent._persist_session(messages, conversation_history)
                         return {
                             "final_response": None,
@@ -2832,6 +2834,7 @@ def run_conversation(
                     ephemeral_dispatch_for_attempt is not None
                     and ephemeral_user_context_request_committed
                 ):
+                    agent._cleanup_task_resources(effective_task_id)
                     agent._persist_session(messages, conversation_history)
                     return {
                         "final_response": None,
@@ -2903,6 +2906,7 @@ def run_conversation(
                     # The handoff owns the exact first-attempt outcome receipt.
                     # Do not enter credential recovery, retry, fallback,
                     # compression, or a later clean request from this error.
+                    agent._cleanup_task_resources(effective_task_id)
                     agent._persist_session(messages, conversation_history)
                     return {
                         "final_response": None,

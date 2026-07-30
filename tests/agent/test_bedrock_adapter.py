@@ -11,6 +11,7 @@ Covers:
 
 import json
 import os
+import threading
 import time
 from contextlib import contextmanager
 from types import ModuleType, SimpleNamespace
@@ -928,6 +929,66 @@ class TestClientCache:
         assert not bedrock_adapter.is_authoritative_bedrock_runtime_client(
             spoof_type()
         )
+
+    def test_runtime_factory_serializes_concurrent_creation_and_registration(
+        self,
+        monkeypatch,
+    ):
+        from agent import bedrock_adapter
+
+        bedrock_adapter.reset_client_cache()
+        exact_type = type(
+            "BedrockRuntime",
+            (),
+            {"__module__": "botocore.client"},
+        )
+        exact_client = exact_type()
+        factory_started = threading.Event()
+        release_factory = threading.Event()
+        factory_calls = []
+        results = []
+        errors = []
+
+        def create_client(service_name, **_kwargs):
+            factory_calls.append(service_name)
+            factory_started.set()
+            assert release_factory.wait(timeout=5)
+            return exact_client
+
+        boto3 = SimpleNamespace(client=create_client)
+        botocore_module = ModuleType("botocore")
+        config_module = ModuleType("botocore.config")
+        config_module.Config = MagicMock(return_value="fixture-config")
+        botocore_module.config = config_module
+        monkeypatch.setattr(bedrock_adapter, "_require_boto3", lambda: boto3)
+
+        def get_client():
+            try:
+                results.append(
+                    bedrock_adapter._get_bedrock_runtime_client("eu-west-1")
+                )
+            except BaseException as exc:
+                errors.append(exc)
+
+        with patch.dict(
+            "sys.modules",
+            {"botocore": botocore_module, "botocore.config": config_module},
+        ):
+            first = threading.Thread(target=get_client, daemon=True)
+            second = threading.Thread(target=get_client, daemon=True)
+            first.start()
+            assert factory_started.wait(timeout=5)
+            second.start()
+            time.sleep(0.05)
+            assert factory_calls == ["bedrock-runtime"]
+            release_factory.set()
+            first.join(timeout=5)
+            second.join(timeout=5)
+
+        assert not errors
+        assert results == [exact_client, exact_client]
+        assert factory_calls == ["bedrock-runtime"]
+        assert bedrock_adapter.is_authoritative_bedrock_runtime_client(exact_client)
 
 
 # ---------------------------------------------------------------------------

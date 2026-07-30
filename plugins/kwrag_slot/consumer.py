@@ -350,6 +350,9 @@ class FileConsumptionReceiptSink:
                         # pathname moved during the write, remove exactly this
                         # append before returning fail-closed.
                         self._assert_receipt_parent_path_identity(parent_identity)
+                        if not existed:
+                            os.fsync(parent)
+                        # Final observable publication identity operation.
                         self._assert_receipt_file_path_identity(
                             parent,
                             receipt_identity,
@@ -373,8 +376,6 @@ class FileConsumptionReceiptSink:
                     fcntl.flock(descriptor, fcntl.LOCK_UN)
             finally:
                 os.close(descriptor)
-            if not existed:
-                os.fsync(parent)
             return parent_identity, receipt_identity
         finally:
             for descriptor in reversed(opened):
@@ -485,6 +486,19 @@ class FileConsumptionReceiptSink:
                         outcome_file_identity,
                     )
                     existing = self._read_all(descriptor)
+                    if existing != raw:
+                        raise HermesSlotRetrievalError(
+                            "provider attempt outcome identity collision"
+                        )
+                    self._assert_receipt_parent_path_identity(
+                        self._trusted_parent_identity
+                    )
+                    self._assert_named_directory_identity(
+                        current,
+                        outcome_root.name,
+                        outcome_root_identity,
+                    )
+                    # Final observable replay identity operation.
                     self._assert_named_outcome_file_identity(
                         outcome_directory,
                         outcome_name,
@@ -492,18 +506,6 @@ class FileConsumptionReceiptSink:
                     )
                 finally:
                     os.close(descriptor)
-                if existing != raw:
-                    raise HermesSlotRetrievalError(
-                        "provider attempt outcome identity collision"
-                    )
-                self._assert_receipt_parent_path_identity(
-                    self._trusted_parent_identity
-                )
-                self._assert_named_directory_identity(
-                    current,
-                    outcome_root.name,
-                    outcome_root_identity,
-                )
                 return outcome_root_identity
             try:
                 self._verify_outcome_file(descriptor, require_owner_mode=True)
@@ -528,6 +530,8 @@ class FileConsumptionReceiptSink:
                         outcome_root.name,
                         outcome_root_identity,
                     )
+                    os.fsync(outcome_directory)
+                    # Final observable publication identity operation.
                     self._assert_named_outcome_file_identity(
                         outcome_directory,
                         outcome_name,
@@ -553,7 +557,6 @@ class FileConsumptionReceiptSink:
                     raise
             finally:
                 os.close(descriptor)
-            os.fsync(outcome_directory)
             return outcome_root_identity
         finally:
             for descriptor in reversed(opened):

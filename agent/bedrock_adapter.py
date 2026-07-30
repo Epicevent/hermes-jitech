@@ -31,6 +31,7 @@ import json
 import logging
 import os
 import re
+import threading
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -56,7 +57,8 @@ except Exception:
 
 _bedrock_runtime_client_cache: Dict[str, Any] = {}
 _bedrock_control_client_cache: Dict[str, Any] = {}
-_bedrock_runtime_client_identity_cache: Dict[str, Tuple[Any, type]] = {}
+_bedrock_runtime_client_identity_cache: Dict[int, Tuple[Any, type]] = {}
+_bedrock_client_cache_lock = threading.RLock()
 
 
 def _require_boto3():
@@ -77,44 +79,48 @@ def _get_bedrock_runtime_client(region: str):
 
     Uses the default AWS credential chain (env vars → profile → instance role).
     """
-    if region not in _bedrock_runtime_client_cache:
-        boto3 = _require_boto3()
-        from botocore.config import Config
+    with _bedrock_client_cache_lock:
+        if region not in _bedrock_runtime_client_cache:
+            boto3 = _require_boto3()
+            from botocore.config import Config
 
-        client = boto3.client(
-            "bedrock-runtime",
-            region_name=region,
-            config=Config(retries={"total_max_attempts": 1, "mode": "standard"}),
-        )
-        _bedrock_runtime_client_cache[region] = client
-        _bedrock_runtime_client_identity_cache[region] = (client, type(client))
-    return _bedrock_runtime_client_cache[region]
+            client = boto3.client(
+                "bedrock-runtime",
+                region_name=region,
+                config=Config(retries={"total_max_attempts": 1, "mode": "standard"}),
+            )
+            _bedrock_runtime_client_cache[region] = client
+            _bedrock_runtime_client_identity_cache[id(client)] = (client, type(client))
+        return _bedrock_runtime_client_cache[region]
 
 
 def is_authoritative_bedrock_runtime_client(client: Any) -> bool:
     """Return whether *client* is the exact leaf created by our boto3 factory."""
 
-    return any(
-        registered is client and type(client) is registered_type
-        for registered, registered_type in _bedrock_runtime_client_identity_cache.values()
-    )
+    with _bedrock_client_cache_lock:
+        return any(
+            registered is client and type(client) is registered_type
+            for registered, registered_type in _bedrock_runtime_client_identity_cache.values()
+        )
 
 
 def _get_bedrock_control_client(region: str):
     """Get or create a cached ``bedrock`` control-plane client for model discovery."""
-    if region not in _bedrock_control_client_cache:
-        boto3 = _require_boto3()
-        _bedrock_control_client_cache[region] = boto3.client(
-            "bedrock", region_name=region,
-        )
-    return _bedrock_control_client_cache[region]
+    with _bedrock_client_cache_lock:
+        if region not in _bedrock_control_client_cache:
+            boto3 = _require_boto3()
+            _bedrock_control_client_cache[region] = boto3.client(
+                "bedrock", region_name=region,
+            )
+        return _bedrock_control_client_cache[region]
 
 
 def reset_client_cache():
     """Clear cached boto3 clients. Used in tests and profile switches."""
-    _bedrock_runtime_client_cache.clear()
-    _bedrock_runtime_client_identity_cache.clear()
-    _bedrock_control_client_cache.clear()
+    with _bedrock_client_cache_lock:
+        _bedrock_runtime_client_cache.clear()
+        _bedrock_runtime_client_identity_cache.clear()
+        _bedrock_control_client_cache.clear()
 
 
 def invalidate_runtime_client(region: str) -> bool:
@@ -128,10 +134,12 @@ def invalidate_runtime_client(region: str) -> bool:
     Returns True if a cached entry was evicted, False if the region was not
     cached.
     """
-    existed = region in _bedrock_runtime_client_cache
-    _bedrock_runtime_client_cache.pop(region, None)
-    _bedrock_runtime_client_identity_cache.pop(region, None)
-    return existed
+    with _bedrock_client_cache_lock:
+        existed = region in _bedrock_runtime_client_cache
+        _bedrock_runtime_client_cache.pop(region, None)
+        # Keep the exact factory identity for a client another turn may already
+        # hold. Reset clears this registry at an explicit lifecycle boundary.
+        return existed
 
 
 # ---------------------------------------------------------------------------

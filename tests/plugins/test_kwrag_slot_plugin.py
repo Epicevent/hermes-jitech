@@ -897,6 +897,58 @@ def test_provider_outcome_file_swap_during_write_rolls_back_publication(
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX outcome inode binding contract")
+def test_provider_outcome_file_swap_during_final_directory_check_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from plugins.kwrag_slot.consumer import (
+        FileConsumptionReceiptSink,
+        HermesSlotRetrievalError,
+    )
+
+    sink = FileConsumptionReceiptSink(tmp_path / "outcome-file-late-swap.jsonl")
+    sink.write({"schema_version": "fixture-ledger-anchor-v1"})
+    identity = "sha256:" + "8" * 64
+    outcome_root = tmp_path / "outcome-file-late-swap.jsonl.outcomes"
+    outcome_path = outcome_root / ("8" * 64 + ".json")
+    detached_path = outcome_root / "detached-late-outcome.json"
+    original_write_all = sink._write_all
+    original_assert_directory = sink._assert_named_directory_identity
+    write_finished = False
+    swapped = False
+
+    def observe_outcome_write(descriptor: int, raw: bytes) -> None:
+        nonlocal write_finished
+        original_write_all(descriptor, raw)
+        write_finished = True
+
+    def swap_during_final_directory_check(*args, **kwargs) -> None:
+        nonlocal swapped
+        if write_finished and not swapped:
+            swapped = True
+            outcome_path.rename(detached_path)
+            outcome_path.write_bytes(b"")
+            outcome_path.chmod(0o600)
+        original_assert_directory(*args, **kwargs)
+
+    monkeypatch.setattr(sink, "_write_all", observe_outcome_write)
+    monkeypatch.setattr(
+        sink,
+        "_assert_named_directory_identity",
+        swap_during_final_directory_check,
+    )
+    with pytest.raises(HermesSlotRetrievalError, match="persisted safely"):
+        sink.write_once(
+            identity,
+            {"schema_version": "fixture-outcome-v1", "status": "unknown"},
+        )
+
+    assert swapped is True
+    assert outcome_path.read_bytes() == b""
+    assert detached_path.read_bytes() == b""
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX outcome inode binding contract")
 def test_provider_outcome_file_swap_during_replay_fails_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -930,6 +982,58 @@ def test_provider_outcome_file_swap_during_replay_fails_closed(
     with pytest.raises(HermesSlotRetrievalError, match="persisted safely"):
         sink.write_once(identity, receipt)
 
+    assert outcome_path.read_bytes() == b""
+    assert detached_path.read_bytes() == canonical_json_bytes(receipt) + b"\n"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX outcome inode binding contract")
+def test_provider_outcome_file_swap_after_replay_read_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from plugins.kwrag_slot.consumer import (
+        FileConsumptionReceiptSink,
+        HermesSlotRetrievalError,
+    )
+
+    sink = FileConsumptionReceiptSink(tmp_path / "outcome-replay-late-swap.jsonl")
+    sink.write({"schema_version": "fixture-ledger-anchor-v1"})
+    identity = "sha256:" + "7" * 64
+    receipt = {"schema_version": "fixture-outcome-v1", "status": "unknown"}
+    sink.write_once(identity, receipt)
+    outcome_root = tmp_path / "outcome-replay-late-swap.jsonl.outcomes"
+    outcome_path = outcome_root / ("7" * 64 + ".json")
+    detached_path = outcome_root / "detached-late-replay.json"
+    original_read_all = sink._read_all
+    original_assert_directory = sink._assert_named_directory_identity
+    replay_read_finished = False
+    swapped = False
+
+    def observe_replay_read(descriptor: int) -> bytes:
+        nonlocal replay_read_finished
+        raw = original_read_all(descriptor)
+        replay_read_finished = True
+        return raw
+
+    def swap_during_final_directory_check(*args, **kwargs) -> None:
+        nonlocal swapped
+        if replay_read_finished and not swapped:
+            swapped = True
+            outcome_path.rename(detached_path)
+            outcome_path.write_bytes(b"")
+            outcome_path.chmod(0o600)
+        original_assert_directory(*args, **kwargs)
+
+    monkeypatch.setattr(sink, "_read_all", observe_replay_read)
+    monkeypatch.setattr(
+        sink,
+        "_assert_named_directory_identity",
+        swap_during_final_directory_check,
+    )
+    with pytest.raises(HermesSlotRetrievalError, match="persisted safely"):
+        sink.write_once(identity, receipt)
+
+    assert swapped is True
     assert outcome_path.read_bytes() == b""
     assert detached_path.read_bytes() == canonical_json_bytes(receipt) + b"\n"
 
@@ -1031,6 +1135,55 @@ def test_consumption_receipt_parent_swap_at_first_write_rolls_back_to_zero_bytes
 
     assert list(receipt_parent.iterdir()) == []
     assert list(detached_parent.iterdir()) == []
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX receipt inode binding contract")
+def test_consumption_receipt_file_swap_during_final_parent_check_rolls_back(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from plugins.kwrag_slot.consumer import (
+        FileConsumptionReceiptSink,
+        HermesSlotRetrievalError,
+    )
+
+    receipt_parent = tmp_path / "trusted-late-swap-ledger"
+    receipt_parent.mkdir(mode=0o700)
+    receipt_parent.chmod(0o700)
+    sink = FileConsumptionReceiptSink(receipt_parent / "consumption.jsonl")
+    receipt_path = receipt_parent / "consumption.jsonl"
+    detached_path = receipt_parent / "detached-consumption.jsonl"
+    original_write_all = sink._write_all
+    original_assert_parent = sink._assert_receipt_parent_path_identity
+    write_finished = False
+    swapped = False
+
+    def observe_receipt_write(descriptor: int, raw: bytes) -> None:
+        nonlocal write_finished
+        original_write_all(descriptor, raw)
+        write_finished = True
+
+    def swap_during_final_parent_check(expected: tuple[int, int]) -> None:
+        nonlocal swapped
+        if write_finished and not swapped:
+            swapped = True
+            receipt_path.rename(detached_path)
+            receipt_path.write_bytes(b"")
+            receipt_path.chmod(0o600)
+        original_assert_parent(expected)
+
+    monkeypatch.setattr(sink, "_write_all", observe_receipt_write)
+    monkeypatch.setattr(
+        sink,
+        "_assert_receipt_parent_path_identity",
+        swap_during_final_parent_check,
+    )
+    with pytest.raises(HermesSlotRetrievalError, match="approved POSIX ledger"):
+        sink.write({"schema_version": "fixture-consumption-v1"})
+
+    assert swapped is True
+    assert receipt_path.read_bytes() == b""
+    assert detached_path.read_bytes() == b""
 
 
 def test_consumer_budgets_complete_canonical_results_with_catch_and_valid_controls(
@@ -1508,7 +1661,7 @@ def test_committed_evidence_sdk_exception_cannot_fallback_or_dispatch_again(
         patch.object(agent, "_try_activate_fallback") as fallback,
         patch.object(agent, "_persist_session"),
         patch.object(agent, "_save_trajectory"),
-        patch.object(agent, "_cleanup_task_resources"),
+        patch.object(agent, "_cleanup_task_resources") as cleanup,
     ):
         outcome = run_conversation_with_approved_retrieval(
             agent,
@@ -1528,6 +1681,88 @@ def test_committed_evidence_sdk_exception_cannot_fallback_or_dispatch_again(
     assert prepared.content_free_attestation()["transportOutcomeStatus"] == (
         "sdk_exception"
     )
+    cleanup.assert_called_once()
+
+
+def test_invalid_provider_response_after_dispatch_cleans_task_resources(
+    tmp_path: Path,
+) -> None:
+    from plugins.kwrag_slot.prompt_context import (
+        run_conversation_with_approved_retrieval,
+    )
+
+    prepared, _receipt_path = _prepared_hits(
+        tmp_path,
+        "invalid-provider-response-cleanup.jsonl",
+    )
+    agent = _actual_chat_completions_agent("invalid-provider-response-session")
+    request_client = _supported_openai_client()
+    request_client.chat.completions.create.return_value = SimpleNamespace(choices=[])
+
+    with (
+        patch.object(agent, "_create_request_openai_client", return_value=request_client),
+        patch.object(agent, "_close_request_openai_client"),
+        patch.object(agent, "_persist_session"),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources") as cleanup,
+    ):
+        outcome = run_conversation_with_approved_retrieval(
+            agent,
+            "authorized retrieval turn",
+            prepared,
+        )
+
+    request_client.chat.completions.create.assert_called_once()
+    cleanup.assert_called_once()
+    assert outcome["completed"] is False
+    assert outcome["failed"] is True
+    assert outcome["api_calls"] == 1
+    assert outcome["error"] == "retrieval evidence provider response was invalid"
+
+
+def test_post_dispatch_interruption_cleans_task_resources(tmp_path: Path) -> None:
+    from plugins.kwrag_slot.prompt_context import (
+        run_conversation_with_approved_retrieval,
+    )
+
+    prepared, _receipt_path = _prepared_hits(
+        tmp_path,
+        "post-dispatch-interruption-cleanup.jsonl",
+    )
+    agent = _actual_chat_completions_agent("post-dispatch-interruption-session")
+    request_client = _supported_openai_client()
+
+    def interrupt_after_commit(**_kwargs):
+        agent._interrupt_requested = True
+        raise InterruptedError("interrupted after dispatch commitment")
+
+    request_client.chat.completions.create.side_effect = interrupt_after_commit
+    try:
+        with (
+            patch.object(
+                agent,
+                "_create_request_openai_client",
+                return_value=request_client,
+            ),
+            patch.object(agent, "_close_request_openai_client"),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources") as cleanup,
+        ):
+            outcome = run_conversation_with_approved_retrieval(
+                agent,
+                "authorized retrieval turn",
+                prepared,
+            )
+    finally:
+        agent._interrupt_requested = False
+
+    request_client.chat.completions.create.assert_called_once()
+    cleanup.assert_called_once()
+    assert outcome["completed"] is False
+    assert outcome["failed"] is True
+    assert outcome["interrupted"] is True
+    assert outcome["api_calls"] == 1
 
 
 @pytest.mark.parametrize(
@@ -1746,7 +1981,7 @@ def test_tool_response_local_failure_does_not_authorize_clean_follow_up(
         patch.object(agent, "_save_session_log"),
         patch.object(agent, "_flush_messages_to_session_db"),
         patch.object(agent, "_save_trajectory"),
-        patch.object(agent, "_cleanup_task_resources"),
+        patch.object(agent, "_cleanup_task_resources") as cleanup,
     ):
         outcome = run_conversation_with_approved_retrieval(
             agent,
@@ -1759,6 +1994,7 @@ def test_tool_response_local_failure_does_not_authorize_clean_follow_up(
     assert outcome["failed"] is True
     assert outcome["api_calls"] == 1
     assert "clean follow-up request is forbidden" in outcome["error"]
+    cleanup.assert_called_once()
 
 
 def test_final_text_local_failure_does_not_authorize_clean_follow_up(
@@ -2231,7 +2467,7 @@ def test_successful_response_with_outcome_sink_failure_is_not_completed(
         patch.object(agent, "_save_session_log"),
         patch.object(agent, "_flush_messages_to_session_db"),
         patch.object(agent, "_save_trajectory"),
-        patch.object(agent, "_cleanup_task_resources"),
+        patch.object(agent, "_cleanup_task_resources") as cleanup,
     ):
         outcome = run_conversation_with_approved_retrieval(
             agent,
@@ -2249,6 +2485,7 @@ def test_successful_response_with_outcome_sink_failure_is_not_completed(
     assert prepared.consumption_receipt_status == "written"
     assert prepared.provider_attempt_outcome_status == "pending"
     assert prepared.content_free_attestation()["transportOutcomeStatus"] == "unknown"
+    cleanup.assert_called_once()
 
 
 def test_sdk_exception_identity_survives_product_outcome_sink_failure(
@@ -2278,7 +2515,7 @@ def test_sdk_exception_identity_survives_product_outcome_sink_failure(
         patch.object(agent, "_try_activate_fallback") as fallback,
         patch.object(agent, "_persist_session"),
         patch.object(agent, "_save_trajectory"),
-        patch.object(agent, "_cleanup_task_resources"),
+        patch.object(agent, "_cleanup_task_resources") as cleanup,
     ):
         outcome = run_conversation_with_approved_retrieval(
             agent,
@@ -2296,6 +2533,7 @@ def test_sdk_exception_identity_survives_product_outcome_sink_failure(
     assert prepared.consumption_receipt_status == "written"
     assert prepared.provider_attempt_outcome_status == "pending"
     assert prepared.content_free_attestation()["transportOutcomeStatus"] == "unknown"
+    cleanup.assert_called_once()
 
 
 def test_delayed_stream_client_cannot_dispatch_after_interrupt(
