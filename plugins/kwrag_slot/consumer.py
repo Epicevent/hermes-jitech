@@ -8,6 +8,7 @@ stopping, prompt assembly, and whether returned evidence is shown to a model.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -116,10 +117,49 @@ class HermesSlotRetrievalResult:
     result_receipt: dict[str, Any]
     result_receipt_digest: str
     result_receipt_status: str
+    _canonical_results_bytes: bytes = field(repr=False, compare=False)
+    _canonical_result_receipt_bytes: bytes = field(repr=False, compare=False)
     consumption_receipt: dict[str, Any] | None = None
     consumption_receipt_digest: str | None = None
     consumption_receipt_status: str = "pending"
     _receipt_sink: ConsumptionReceiptSink | None = field(repr=False, compare=False, default=None)
+
+    def _verified_evidence(self) -> tuple[tuple[dict[str, Any], ...], dict[str, Any]]:
+        """Reject caller mutation and return private canonical evidence copies."""
+
+        try:
+            current_results_bytes = canonical_json_bytes(list(self.results))
+            current_receipt_bytes = canonical_json_bytes(self.result_receipt)
+        except (TypeError, ValueError) as exc:
+            raise HermesSlotRetrievalError("verified retrieval evidence is not canonical") from exc
+        if current_results_bytes != self._canonical_results_bytes:
+            raise HermesSlotRetrievalError("verified retrieval results were mutated")
+        if current_receipt_bytes != self._canonical_result_receipt_bytes:
+            raise HermesSlotRetrievalError("verified result receipt was mutated")
+        receipt_digest = "sha256:" + hashlib.sha256(
+            self._canonical_result_receipt_bytes
+        ).hexdigest()
+        if receipt_digest != self.result_receipt_digest:
+            raise HermesSlotRetrievalError("verified result receipt digest is not bound")
+
+        canonical_results = json.loads(self._canonical_results_bytes.decode("utf-8"))
+        canonical_receipt = json.loads(
+            self._canonical_result_receipt_bytes.decode("utf-8")
+        )
+        results_digest = "sha256:" + hashlib.sha256(
+            self._canonical_results_bytes
+        ).hexdigest()
+        if canonical_receipt.get("result_digest") != results_digest:
+            raise HermesSlotRetrievalError("verified result payload digest is not bound")
+        if canonical_receipt.get("result_count") != len(canonical_results):
+            raise HermesSlotRetrievalError("verified result count is not bound")
+        try:
+            result_characters = len(self._canonical_results_bytes.decode("utf-8"))
+        except UnicodeDecodeError as exc:
+            raise HermesSlotRetrievalError("verified result payload is not UTF-8") from exc
+        if canonical_receipt.get("result_characters") != result_characters:
+            raise HermesSlotRetrievalError("verified result character budget is not bound")
+        return tuple(canonical_results), canonical_receipt
 
     def record_prompt_consumption(
         self,
@@ -127,25 +167,26 @@ class HermesSlotRetrievalResult:
         session_binding_digest: str,
         prompt_context_digest: str,
     ) -> str:
+        verified_results, verified_receipt = self._verified_evidence()
         if self.consumption_receipt_status != "pending" or self.consumption_receipt is not None:
             raise HermesSlotRetrievalError("retrieval evidence was already consumed")
-        if self.result_receipt.get("result_status") != "hits" or not self.results:
+        if verified_receipt.get("result_status") != "hits" or not verified_results:
             raise HermesSlotRetrievalError("retrieval evidence has no verified hits to consume")
         receipt = {
             "schema_version": "hermes-kwrag-consumption-receipt-v1",
             "consumer_family": "hermes",
             "consumption_status": "assembled_into_ephemeral_user_context",
-            "component_digest": self.result_receipt["component_digest"],
-            "runtime_binding_digest": self.result_receipt["runtime_binding_digest"],
-            "index_manifest": self.result_receipt["index_manifest"],
+            "component_digest": verified_receipt["component_digest"],
+            "runtime_binding_digest": verified_receipt["runtime_binding_digest"],
+            "index_manifest": verified_receipt["index_manifest"],
             "session_binding_digest": _digest(session_binding_digest, "session binding digest"),
             "prompt_context_digest": _digest(prompt_context_digest, "prompt context digest"),
-            "request_id": self.result_receipt["request_id"],
-            "operation_id": self.result_receipt["operation_id"],
-            "run_id": self.result_receipt["run_id"],
-            "attempt": self.result_receipt["attempt"],
-            "result_digest": self.result_receipt["result_digest"],
-            "operation_receipt_digest": self.result_receipt["operation_receipt_digest"],
+            "request_id": verified_receipt["request_id"],
+            "operation_id": verified_receipt["operation_id"],
+            "run_id": verified_receipt["run_id"],
+            "attempt": verified_receipt["attempt"],
+            "result_digest": verified_receipt["result_digest"],
+            "operation_receipt_digest": verified_receipt["operation_receipt_digest"],
             "result_receipt_digest": self.result_receipt_digest,
         }
         receipt_digest = "sha256:" + hashlib.sha256(canonical_json_bytes(receipt)).hexdigest()
@@ -162,7 +203,8 @@ class HermesSlotRetrievalResult:
     def content_free_attestation(self) -> dict[str, Any]:
         """Project exact result/consumption lineage for an enabled canary."""
 
-        result_status = self.result_receipt.get("result_status")
+        _verified_results, verified_receipt = self._verified_evidence()
+        result_status = verified_receipt.get("result_status")
         if result_status == "zero_hits":
             linkage_status = "not_consumed_zero_hits"
         elif self.consumption_receipt_status == "written":
@@ -171,11 +213,11 @@ class HermesSlotRetrievalResult:
             linkage_status = "not_consumed"
         return {
             "schema": "jitech-hermes-kwrag-consumption-attestation/v1",
-            "componentDigest": self.result_receipt["component_digest"],
-            "runtimeBindingDigest": self.result_receipt["runtime_binding_digest"],
-            "indexManifestDigest": self.result_receipt["index_manifest"],
+            "componentDigest": verified_receipt["component_digest"],
+            "runtimeBindingDigest": verified_receipt["runtime_binding_digest"],
+            "indexManifestDigest": verified_receipt["index_manifest"],
             "resultStatus": result_status,
-            "operationReceiptDigest": self.result_receipt["operation_receipt_digest"],
+            "operationReceiptDigest": verified_receipt["operation_receipt_digest"],
             "resultReceiptDigest": self.result_receipt_digest,
             "consumptionReceiptDigest": self.consumption_receipt_digest,
             "linkageStatus": linkage_status,
@@ -236,10 +278,20 @@ class HermesSlotRetrievalConsumer:
         written_digest = self._receipt_sink.write(receipt)
         if written_digest != receipt_digest:
             raise HermesSlotRetrievalError("written result receipt digest is not bound")
+        verified_results = verified.results()
+        canonical_results_bytes = canonical_json_bytes(verified_results)
+        canonical_result_receipt_bytes = canonical_json_bytes(receipt)
+        if (
+            "sha256:" + hashlib.sha256(canonical_results_bytes).hexdigest()
+            != receipt["result_digest"]
+        ):
+            raise HermesSlotRetrievalError("verified result payload digest is not bound")
         return HermesSlotRetrievalResult(
-            results=tuple(verified.results()),
-            result_receipt=receipt,
+            results=tuple(json.loads(canonical_results_bytes.decode("utf-8"))),
+            result_receipt=json.loads(canonical_result_receipt_bytes.decode("utf-8")),
             result_receipt_digest=receipt_digest,
             result_receipt_status="written",
+            _canonical_results_bytes=canonical_results_bytes,
+            _canonical_result_receipt_bytes=canonical_result_receipt_bytes,
             _receipt_sink=self._receipt_sink,
         )

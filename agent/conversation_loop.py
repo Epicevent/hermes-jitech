@@ -25,7 +25,7 @@ import ssl
 import threading
 import time
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from agent.anthropic_adapter import _is_oauth_token
 from agent.auxiliary_client import set_runtime_main
@@ -650,6 +650,7 @@ def run_conversation(
     stream_callback: Optional[callable] = None,
     persist_user_message: Optional[str] = None,
     ephemeral_user_context: Optional[str] = None,
+    ephemeral_user_context_on_request: Optional[Callable[[], None]] = None,
 ) -> Dict[str, Any]:
     """
     Run a complete conversation with tool calling until completion.
@@ -671,6 +672,10 @@ def run_conversation(
             message history. Persistent Codex app-server sessions reject this
             option because their reused provider thread cannot provide that
             request-only guarantee.
+        ephemeral_user_context_on_request: Optional one-shot commit callback
+            invoked immediately before the first provider dispatch, after the
+            request copy contains ephemeral_user_context. It is never invoked
+            for a pre-dispatch failure.
 
     Returns:
         Dict: Complete conversation result with final response and message history
@@ -684,6 +689,13 @@ def run_conversation(
             "ephemeral_user_context is not supported by persistent "
             "codex_app_server sessions"
         )
+    if ephemeral_user_context_on_request is not None:
+        if not callable(ephemeral_user_context_on_request):
+            raise TypeError("ephemeral_user_context_on_request must be callable")
+        if not ephemeral_user_context:
+            raise ValueError(
+                "ephemeral_user_context_on_request requires ephemeral_user_context"
+            )
 
     # Guard stdio against OSError from broken pipes (systemd/headless/daemon).
     # Installed once, transparent when streams are healthy, prevents crash on write.
@@ -892,6 +904,119 @@ def run_conversation(
     messages.append(user_msg)
     current_turn_user_idx = len(messages) - 1
     agent._persist_user_message_idx = current_turn_user_idx
+
+    def _compress_context_for_current_turn(
+        messages_to_compress: list[dict[str, Any]],
+        compression_system_message: str | None,
+        **compression_kwargs: Any,
+    ) -> tuple[list[dict[str, Any]], str]:
+        """Compress while rebinding the current user turn in the new list.
+
+        Context compressors replace message dictionaries and may move the
+        protected tail. A stale numeric index can therefore omit request-only
+        context while a consumption receipt already says it was assembled.
+        Mark the current turn only for the duration of compression and remove
+        the private marker before return. Request-only evidence requires an
+        exact anchor; ordinary turns retain the legacy last-user fallback for
+        third-party compressors that discard unknown message metadata.
+        """
+
+        nonlocal current_turn_user_idx
+        if not 0 <= current_turn_user_idx < len(messages_to_compress):
+            raise RuntimeError("current user turn is unavailable before compression")
+        current_message = messages_to_compress[current_turn_user_idx]
+        if not isinstance(current_message, dict) or current_message.get("role") != "user":
+            raise RuntimeError("current user turn is invalid before compression")
+
+        marker_key = "_hermes_current_turn_anchor"
+        if marker_key in current_message:
+            raise RuntimeError("current user turn already has a compression anchor")
+        marker_value = str(uuid.uuid4())
+        current_message[marker_key] = marker_value
+        compressed_messages: list[dict[str, Any]] | None = None
+        try:
+            compressed_messages, compressed_system_prompt = agent._compress_context(
+                messages_to_compress,
+                compression_system_message,
+                **compression_kwargs,
+            )
+            matches = [
+                idx
+                for idx, message in enumerate(compressed_messages)
+                if isinstance(message, dict) and message.get(marker_key) == marker_value
+            ]
+            if len(matches) == 1:
+                current_turn_user_idx = matches[0]
+            elif ephemeral_user_context:
+                raise RuntimeError(
+                    "context compression did not preserve exactly one current user turn"
+                )
+            else:
+                fallback_matches = [
+                    idx
+                    for idx, message in enumerate(compressed_messages)
+                    if isinstance(message, dict) and message.get("role") == "user"
+                ]
+                if not fallback_matches:
+                    raise RuntimeError(
+                        "context compression did not preserve a current user turn"
+                    )
+                current_turn_user_idx = fallback_matches[-1]
+            agent._persist_user_message_idx = current_turn_user_idx
+            return compressed_messages, compressed_system_prompt
+        finally:
+            current_message.pop(marker_key, None)
+            if compressed_messages is not None:
+                for message in compressed_messages:
+                    if isinstance(message, dict):
+                        message.pop(marker_key, None)
+
+    def _repair_message_sequence_for_current_turn(
+        messages_to_repair: list[dict[str, Any]],
+    ) -> int:
+        """Repair structure and rebind the exact current user turn."""
+
+        nonlocal current_turn_user_idx
+        if not 0 <= current_turn_user_idx < len(messages_to_repair):
+            raise RuntimeError("current user turn is unavailable before message repair")
+        current_message = messages_to_repair[current_turn_user_idx]
+        if not isinstance(current_message, dict) or current_message.get("role") != "user":
+            raise RuntimeError("current user turn is invalid before message repair")
+
+        marker_key = "_hermes_current_turn_anchor"
+        if marker_key in current_message:
+            raise RuntimeError("current user turn already has a repair anchor")
+        marker_value = str(uuid.uuid4())
+        current_message[marker_key] = marker_value
+        try:
+            repairs = agent._repair_message_sequence(messages_to_repair)
+            matches = [
+                idx
+                for idx, message in enumerate(messages_to_repair)
+                if isinstance(message, dict) and message.get(marker_key) == marker_value
+            ]
+            if len(matches) == 1:
+                current_turn_user_idx = matches[0]
+            elif ephemeral_user_context:
+                raise RuntimeError(
+                    "message repair did not preserve exactly one current user turn"
+                )
+            else:
+                fallback_matches = [
+                    idx
+                    for idx, message in enumerate(messages_to_repair)
+                    if isinstance(message, dict) and message.get("role") == "user"
+                ]
+                if not fallback_matches:
+                    raise RuntimeError("message repair did not preserve a current user turn")
+                current_turn_user_idx = fallback_matches[-1]
+            agent._persist_user_message_idx = current_turn_user_idx
+            return repairs
+        finally:
+            current_message.pop(marker_key, None)
+            for message in messages_to_repair:
+                if isinstance(message, dict):
+                    message.pop(marker_key, None)
     
     if not agent.quiet_mode:
         _print_preview = _summarize_user_message_for_log(user_message)
@@ -950,7 +1075,7 @@ def run_conversation(
             # context windows (each pass summarises the middle N turns).
             for _pass in range(3):
                 _orig_len = len(messages)
-                messages, active_system_prompt = agent._compress_context(
+                messages, active_system_prompt = _compress_context_for_current_turn(
                     messages, system_message, approx_tokens=_preflight_tokens,
                     task_id=effective_task_id,
                 )
@@ -1027,7 +1152,22 @@ def run_conversation(
     truncated_tool_call_retries = 0
     truncated_response_parts: List[str] = []
     compression_attempts = 0
+    ephemeral_user_context_request_committed = False
     _turn_exit_reason = "unknown"  # Diagnostic: why the loop ended
+
+    def _commit_ephemeral_context_for_first_request(*, assembled: bool) -> None:
+        nonlocal ephemeral_user_context_request_committed
+        if (
+            ephemeral_user_context_on_request is None
+            or ephemeral_user_context_request_committed
+        ):
+            return
+        if not assembled:
+            raise RuntimeError(
+                "ephemeral user context was not assembled into the provider request"
+            )
+        ephemeral_user_context_on_request()
+        ephemeral_user_context_request_committed = True
 
     # Per-turn file-mutation verifier state.  Keyed by resolved path;
     # each failed ``write_file`` / ``patch`` call records the error
@@ -1227,7 +1367,7 @@ def run_conversation(
         # landed after an orphan tool result). Most providers return
         # empty content on malformed sequences, which would otherwise
         # retrigger the empty-retry loop indefinitely.
-        repaired_seq = agent._repair_message_sequence(messages)
+        repaired_seq = _repair_message_sequence_for_current_turn(messages)
         if repaired_seq > 0:
             request_logger.info(
                 "Repaired %s message-alternation violations before request (session=%s)",
@@ -1236,6 +1376,7 @@ def run_conversation(
             )
 
         api_messages = []
+        ephemeral_user_context_assembled = False
         for idx, msg in enumerate(messages):
             api_msg = msg.copy()
 
@@ -1258,6 +1399,8 @@ def run_conversation(
                     _base = api_msg.get("content", "")
                     if isinstance(_base, str):
                         api_msg["content"] = _base + "\n\n" + "\n\n".join(_injections)
+                        if ephemeral_user_context:
+                            ephemeral_user_context_assembled = True
 
             # For ALL assistant messages, pass reasoning back to the API
             # This ensures multi-turn reasoning context is preserved
@@ -1633,6 +1776,9 @@ def run_conversation(
                     provider_fallback_parent = provider_active_fallback_parent
                     provider_call_started_at = time.time()
                     provider_attempt_recorded = False
+                    _commit_ephemeral_context_for_first_request(
+                        assembled=ephemeral_user_context_assembled
+                    )
                     response = agent._interruptible_streaming_api_call(
                         api_kwargs, on_first_delta=_stop_spinner
                     )
@@ -1655,6 +1801,9 @@ def run_conversation(
                     provider_fallback_parent = provider_active_fallback_parent
                     provider_call_started_at = time.time()
                     provider_attempt_recorded = False
+                    _commit_ephemeral_context_for_first_request(
+                        assembled=ephemeral_user_context_assembled
+                    )
                     response = agent._interruptible_api_call(api_kwargs)
                 provider_call_completed_at = time.time()
                 
@@ -3198,7 +3347,7 @@ def run_conversation(
                     compression_attempts += 1
                     if compression_attempts <= max_compression_attempts:
                         original_len = len(messages)
-                        messages, active_system_prompt = agent._compress_context(
+                        messages, active_system_prompt = _compress_context_for_current_turn(
                             messages, system_message,
                             approx_tokens=approx_tokens,
                             task_id=effective_task_id,
@@ -3372,7 +3521,7 @@ def run_conversation(
                     agent._buffer_status(f"⚠️  Request payload too large (413) — compression attempt {compression_attempts}/{max_compression_attempts}...")
 
                     original_len = len(messages)
-                    messages, active_system_prompt = agent._compress_context(
+                    messages, active_system_prompt = _compress_context_for_current_turn(
                         messages, system_message, approx_tokens=approx_tokens,
                         task_id=effective_task_id,
                     )
@@ -3528,7 +3677,7 @@ def run_conversation(
                     agent._buffer_status(f"🗜️ Context too large (~{approx_tokens:,} tokens) — compressing ({compression_attempts}/{max_compression_attempts})...")
 
                     original_len = len(messages)
-                    messages, active_system_prompt = agent._compress_context(
+                    messages, active_system_prompt = _compress_context_for_current_turn(
                         messages, system_message, approx_tokens=approx_tokens,
                         task_id=effective_task_id,
                     )
@@ -4446,7 +4595,7 @@ def run_conversation(
 
                 if agent.compression_enabled and _compressor.should_compress(_real_tokens):
                     agent._safe_print("  ⟳ compacting context…")
-                    messages, active_system_prompt = agent._compress_context(
+                    messages, active_system_prompt = _compress_context_for_current_turn(
                         messages, system_message,
                         approx_tokens=agent.context_compressor.last_prompt_tokens,
                         task_id=effective_task_id,

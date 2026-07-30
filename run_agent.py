@@ -51,7 +51,7 @@ import threading
 from types import SimpleNamespace
 import urllib.request
 import uuid
-from typing import List, Dict, Any, Optional
+from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import urlparse, parse_qs, urlunparse
 # NOTE: `from openai import OpenAI` is deliberately NOT at module top — the
 # SDK pulls ~240 ms of imports. We expose `OpenAI` as a thin proxy object
@@ -4366,6 +4366,7 @@ class AIAgent:
         stream_callback: Optional[callable] = None,
         persist_user_message: Optional[str] = None,
         ephemeral_user_context: Optional[str] = None,
+        ephemeral_user_context_on_request: Optional[Callable[[], None]] = None,
     ) -> Dict[str, Any]:
         """Forwarder — see ``agent.conversation_loop.run_conversation``."""
         from agent.conversation_loop import run_conversation
@@ -4399,6 +4400,7 @@ class AIAgent:
                 stream_callback,
                 persist_user_message,
                 ephemeral_user_context,
+                ephemeral_user_context_on_request,
             )
 
     def chat(self, message: str, stream_callback: Optional[callable] = None) -> str:
