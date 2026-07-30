@@ -13,6 +13,10 @@ from __future__ import annotations
 import hashlib
 from typing import Any
 
+from agent.request_dispatch import (
+    FinalProviderBindingUnsupported,
+    require_retrieval_evidence_dispatch_capability,
+)
 from plugins.kwrag_slot.consumer import (
     HermesSlotRetrievalError,
     HermesSlotRetrievalResult,
@@ -60,6 +64,12 @@ def run_conversation_with_approved_retrieval(
     initial_session_id = str(getattr(agent, "session_id", "") or "")
     if not initial_session_id:
         raise HermesSlotRetrievalError("Hermes session identity is unavailable")
+    try:
+        require_retrieval_evidence_dispatch_capability(agent)
+    except FinalProviderBindingUnsupported as exc:
+        raise HermesSlotRetrievalError(
+            "Hermes retrieval evidence dispatch is unavailable before projection"
+        ) from exc
     context = _prompt_context(result)
     context_digest = "sha256:" + hashlib.sha256(context.encode("utf-8")).hexdigest()
 

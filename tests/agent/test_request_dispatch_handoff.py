@@ -15,6 +15,7 @@ from agent.request_dispatch import (
     coerce_request_dispatch_handoff,
     provider_endpoint_identity,
     require_authoritative_leaf_adapter,
+    require_retrieval_evidence_dispatch_capability,
     snapshot_allowed_provider_routes,
 )
 
@@ -42,6 +43,14 @@ def _route(
         "apiMode": api_mode,
         "endpointIdentity": endpoint_identity,
     }
+
+
+def test_product_revision_has_no_retrieval_evidence_dispatch_adapter() -> None:
+    with pytest.raises(
+        FinalProviderBindingUnsupported,
+        match="no production atomic serialized-request adapter",
+    ):
+        require_retrieval_evidence_dispatch_capability(SimpleNamespace())
 
 
 def test_abandon_wins_before_commit() -> None:

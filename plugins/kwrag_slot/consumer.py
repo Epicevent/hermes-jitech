@@ -277,8 +277,11 @@ class FileConsumptionReceiptSink:
         expected_file: tuple[int, int],
         *,
         label: str,
+        expected_bytes: bytes | None = None,
+        expected_offset: int = 0,
+        expected_size: int | None = None,
     ) -> None:
-        """Linearize a full public path and file inode in one openat2 lookup."""
+        """Linearize one public path with its exact published byte version."""
 
         descriptor = self._open_public_file_no_symlinks(path)
         try:
@@ -291,6 +294,70 @@ class FileConsumptionReceiptSink:
                 or (info.st_dev, info.st_ino) != expected_file
             ):
                 raise OSError(f"{label} public pathname was substituted")
+            if expected_bytes is None:
+                return
+            if expected_size is None or info.st_size != expected_size:
+                raise OSError(f"{label} public byte length changed")
+
+            version_fields = (
+                "st_dev",
+                "st_ino",
+                "st_mode",
+                "st_nlink",
+                "st_uid",
+                "st_size",
+                "st_mtime_ns",
+                "st_ctime_ns",
+            )
+            pre_read_version = tuple(getattr(info, field) for field in version_fields)
+            readable = os.open(
+                f"/proc/self/fd/{descriptor}",
+                os.O_RDONLY | getattr(os, "O_CLOEXEC", 0),
+            )
+            try:
+                readable_info = os.fstat(readable)
+                if (readable_info.st_dev, readable_info.st_ino) != expected_file:
+                    raise OSError(f"{label} readable inode changed")
+                os.lseek(readable, expected_offset, os.SEEK_SET)
+                if self._read_all(readable) != expected_bytes:
+                    raise OSError(f"{label} public bytes changed")
+            finally:
+                os.close(readable)
+
+            # The second full-path lookup is the explicit publication
+            # linearization point.  Compare it and the held inode with the
+            # version captured before reading.  This detects an in-place write
+            # during or immediately after the content check; mutation after
+            # this point remains a later action by the directory owner.
+            linearized = self._open_public_file_no_symlinks(path)
+            try:
+                linearized_info = os.fstat(linearized)
+                if (
+                    not stat.S_ISREG(linearized_info.st_mode)
+                    or linearized_info.st_nlink != 1
+                    or linearized_info.st_uid != _effective_user_id()
+                    or stat.S_IMODE(linearized_info.st_mode) != 0o600
+                    or (linearized_info.st_dev, linearized_info.st_ino)
+                    != expected_file
+                    or linearized_info.st_size != expected_size
+                ):
+                    raise OSError(f"{label} changed at publication linearization")
+                after_linearization = os.fstat(descriptor)
+                if (
+                    tuple(
+                        getattr(linearized_info, field)
+                        for field in version_fields
+                    )
+                    != pre_read_version
+                    or tuple(
+                        getattr(after_linearization, field)
+                        for field in version_fields
+                    )
+                    != pre_read_version
+                ):
+                    raise OSError(f"{label} bytes changed during linearization")
+            finally:
+                os.close(linearized)
         finally:
             os.close(descriptor)
 
@@ -478,6 +545,9 @@ class FileConsumptionReceiptSink:
                             self._path,
                             receipt_identity,
                             label="consumption receipt file",
+                            expected_bytes=raw,
+                            expected_offset=original_size,
+                            expected_size=original_size + len(raw),
                         )
                     except BaseException:
                         os.ftruncate(descriptor, original_size)
@@ -596,14 +666,6 @@ class FileConsumptionReceiptSink:
                         outcome_root.name,
                         outcome_root_identity,
                     )
-                    os.lseek(descriptor, 0, os.SEEK_SET)
-                    if self._read_all(descriptor) != raw:
-                        raise HermesSlotRetrievalError(
-                            "provider attempt outcome changed during replay"
-                        )
-                    # The held inode's bytes are checked immediately before the
-                    # canonical public pathname.  The latter is the replay
-                    # linearization point; no file I/O follows it.
                     self._assert_named_outcome_file_identity(
                         outcome_directory,
                         outcome_name,
@@ -613,6 +675,8 @@ class FileConsumptionReceiptSink:
                         outcome_root / outcome_name,
                         outcome_file_identity,
                         label="provider attempt outcome file",
+                        expected_bytes=raw,
+                        expected_size=len(raw),
                     )
                 finally:
                     os.close(descriptor)
@@ -641,16 +705,6 @@ class FileConsumptionReceiptSink:
                         outcome_root_identity,
                     )
                     os.fsync(outcome_directory)
-                    os.lseek(descriptor, 0, os.SEEK_SET)
-                    if self._read_all(descriptor) != raw:
-                        raise OSError(
-                            "provider attempt outcome changed during publication"
-                        )
-                    # The held inode's bytes are checked immediately before the
-                    # canonical public pathname.  The latter is the publication
-                    # linearization point; no file I/O follows it.  This does
-                    # not claim immunity from later mutation by the directory
-                    # owner after the operation has returned.
                     self._assert_named_outcome_file_identity(
                         outcome_directory,
                         outcome_name,
@@ -660,6 +714,8 @@ class FileConsumptionReceiptSink:
                         outcome_root / outcome_name,
                         outcome_file_identity,
                         label="provider attempt outcome file",
+                        expected_bytes=raw,
+                        expected_size=len(raw),
                     )
                 except BaseException:
                     os.ftruncate(descriptor, 0)

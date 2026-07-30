@@ -48,6 +48,7 @@ def _embedded_component_on_path(monkeypatch):
     # Full-loop state-machine tests use an explicitly injected synthetic
     # atomic boundary.  No production SDK leaf is approved by this fixture.
     from agent import chat_completion_helpers, codex_runtime, request_dispatch
+    from plugins.kwrag_slot import prompt_context
 
     production_requirement = request_dispatch.require_authoritative_leaf_adapter
 
@@ -70,6 +71,11 @@ def _embedded_component_on_path(monkeypatch):
         codex_runtime,
         "require_authoritative_leaf_adapter",
         require_synthetic_atomic_test_boundary,
+    )
+    monkeypatch.setattr(
+        prompt_context,
+        "require_retrieval_evidence_dispatch_capability",
+        lambda _agent: "tests.fixture.AtomicSerializedRequestAdapter",
     )
 
 
@@ -730,6 +736,11 @@ def test_provider_outcome_publication_rejects_same_inode_content_mutation(
     sink.write({"schema_version": "fixture-ledger-anchor-v1"})
     identity = "sha256:" + "1" * 64
     receipt = {"schema_version": "fixture-outcome-v1", "status": "unknown"}
+    outcome_path = (
+        tmp_path
+        / "outcome-in-place-publication.jsonl.outcomes"
+        / ("1" * 64 + ".json")
+    )
     original_read_all = sink._read_all
     mutated = False
 
@@ -737,19 +748,18 @@ def test_provider_outcome_publication_rejects_same_inode_content_mutation(
         nonlocal mutated
         if not mutated:
             mutated = True
-            os.pwrite(descriptor, b"X", 0)
-            os.fsync(descriptor)
+            writable = os.open(outcome_path, os.O_WRONLY | os.O_CLOEXEC)
+            try:
+                os.pwrite(writable, b"X", 0)
+                os.fsync(writable)
+            finally:
+                os.close(writable)
         return original_read_all(descriptor)
 
     monkeypatch.setattr(sink, "_read_all", mutate_held_inode_before_content_check)
     with pytest.raises(HermesSlotRetrievalError, match="persisted safely"):
         sink.write_once(identity, receipt)
 
-    outcome_path = (
-        tmp_path
-        / "outcome-in-place-publication.jsonl.outcomes"
-        / ("1" * 64 + ".json")
-    )
     assert mutated is True
     assert not outcome_path.exists()
 
@@ -797,12 +807,15 @@ def test_provider_outcome_replay_rejects_same_inode_content_mutation(
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX outcome linearization contract")
 @pytest.mark.parametrize("replay", [False, True], ids=["publication", "replay"])
-def test_provider_outcome_content_check_precedes_final_public_path_linearization(
+def test_provider_outcome_rejects_same_inode_pwrite_after_content_read(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     replay: bool,
 ) -> None:
-    from plugins.kwrag_slot.consumer import FileConsumptionReceiptSink
+    from plugins.kwrag_slot.consumer import (
+        FileConsumptionReceiptSink,
+        HermesSlotRetrievalError,
+    )
 
     sink = FileConsumptionReceiptSink(tmp_path / "outcome-linearization.jsonl")
     sink.write({"schema_version": "fixture-ledger-anchor-v1"})
@@ -811,27 +824,74 @@ def test_provider_outcome_content_check_precedes_final_public_path_linearization
     if replay:
         sink.write_once(identity, receipt)
 
-    events: list[str] = []
-    original_read_all = sink._read_all
-    original_public_identity = sink._assert_public_file_path_identity
+    outcome_path = (
+        tmp_path / "outcome-linearization.jsonl.outcomes" / ("3" * 64 + ".json")
+    )
+    original_open = sink._open_public_file_no_symlinks
+    open_count = 0
 
-    def observe_content(descriptor: int) -> bytes:
-        events.append("content")
-        return original_read_all(descriptor)
+    def mutate_before_second_public_lookup(path: Path) -> int:
+        nonlocal open_count
+        open_count += 1
+        if open_count == 2:
+            writable = os.open(outcome_path, os.O_WRONLY | os.O_CLOEXEC)
+            try:
+                os.pwrite(writable, b"X", 0)
+                os.fsync(writable)
+            finally:
+                os.close(writable)
+        return original_open(path)
 
-    def observe_public_identity(*args, **kwargs) -> None:
-        events.append("public_path")
-        original_public_identity(*args, **kwargs)
-
-    monkeypatch.setattr(sink, "_read_all", observe_content)
     monkeypatch.setattr(
         sink,
-        "_assert_public_file_path_identity",
-        observe_public_identity,
+        "_open_public_file_no_symlinks",
+        mutate_before_second_public_lookup,
     )
-    sink.write_once(identity, receipt)
+    with pytest.raises(HermesSlotRetrievalError, match="persisted safely"):
+        sink.write_once(identity, receipt)
 
-    assert events[-2:] == ["content", "public_path"]
+    assert open_count == 2
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX receipt linearization contract")
+def test_consumption_receipt_rejects_same_inode_pwrite_after_append_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from plugins.kwrag_slot.consumer import (
+        FileConsumptionReceiptSink,
+        HermesSlotRetrievalError,
+    )
+
+    receipt_path = tmp_path / "receipt-linearization.jsonl"
+    sink = FileConsumptionReceiptSink(receipt_path)
+    sink.write({"schema_version": "fixture-ledger-anchor-v1"})
+    original = receipt_path.read_bytes()
+    original_open = sink._open_public_file_no_symlinks
+    open_count = 0
+
+    def mutate_before_second_public_lookup(path: Path) -> int:
+        nonlocal open_count
+        open_count += 1
+        if open_count == 2:
+            writable = os.open(receipt_path, os.O_WRONLY | os.O_CLOEXEC)
+            try:
+                os.pwrite(writable, b"X", len(original))
+                os.fsync(writable)
+            finally:
+                os.close(writable)
+        return original_open(path)
+
+    monkeypatch.setattr(
+        sink,
+        "_open_public_file_no_symlinks",
+        mutate_before_second_public_lookup,
+    )
+    with pytest.raises(HermesSlotRetrievalError, match="approved POSIX ledger"):
+        sink.write({"schema_version": "fixture-second-receipt-v1"})
+
+    assert open_count == 2
+    assert receipt_path.read_bytes() == original
 
 
 @pytest.mark.skipif(os.name == "posix", reason="non-POSIX fail-closed contract")
@@ -1962,11 +2022,20 @@ def test_provider_facades_without_leaf_binding_are_rejected_before_dispatch(
 
 def test_real_openai_leaf_retrieval_fails_closed_without_sdk_or_evidence_exposure(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from openai import OpenAI
 
+    from agent.request_dispatch import require_retrieval_evidence_dispatch_capability
     from plugins.kwrag_slot.consumer import HermesSlotRetrievalError
-    from plugins.kwrag_slot.prompt_context import run_conversation_with_approved_retrieval
+    from plugins.kwrag_slot import prompt_context
+
+    monkeypatch.setattr(
+        prompt_context,
+        "require_retrieval_evidence_dispatch_capability",
+        require_retrieval_evidence_dispatch_capability,
+    )
+    monkeypatch.setenv("HERMES_DUMP_REQUESTS", "1")
 
     prepared, receipt_path = _prepared_hits(tmp_path, "real-openai-fail-closed.jsonl")
     real_leaf = OpenAI(api_key="fixture-key", base_url="https://openrouter.ai/api/v1")
@@ -1979,26 +2048,69 @@ def test_real_openai_leaf_retrieval_fails_closed_without_sdk_or_evidence_exposur
     agent._session_db_created = True
 
     with (
-        patch.object(agent, "_create_request_openai_client", return_value=real_leaf),
-        patch.object(agent, "_close_request_openai_client"),
-        patch.object(agent, "_try_recover_primary_transport", return_value=False),
-        patch.object(agent, "_try_activate_fallback", return_value=False),
-        patch.object(agent, "_persist_session"),
-        patch.object(agent, "_save_trajectory"),
-        patch.object(agent, "_cleanup_task_resources"),
+        patch.object(prompt_context, "_prompt_context") as project_evidence,
+        patch.object(agent, "run_conversation") as conversation,
+        patch.object(agent, "_dump_api_request_debug") as request_dump,
+        patch.object(agent, "_cleanup_task_resources") as cleanup,
+        patch("hermes_cli.plugins.invoke_hook") as hook,
         pytest.raises(
             HermesSlotRetrievalError,
-            match="completed before retrieval evidence dispatch",
+            match="unavailable before projection",
         ),
     ):
-        run_conversation_with_approved_retrieval(
+        prompt_context.run_conversation_with_approved_retrieval(
             agent,
             "authorized retrieval turn",
             prepared,
         )
 
     real_leaf.chat.completions.create.assert_not_called()
+    project_evidence.assert_not_called()
+    conversation.assert_not_called()
+    hook.assert_not_called()
+    request_dump.assert_not_called()
+    cleanup.assert_not_called()
     provider_ledger.record_provider_call.assert_not_called()
+    assert prepared.consumption_receipt_status == "pending"
+    assert prepared.provider_attempt_outcome_status == "pending"
+    assert receipt_path.read_bytes() == canonical_json_bytes(prepared.result_receipt) + b"\n"
+
+
+def test_bedrock_retrieval_fails_before_route_snapshot_without_task_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent.request_dispatch import require_retrieval_evidence_dispatch_capability
+    from plugins.kwrag_slot import prompt_context
+    from plugins.kwrag_slot.consumer import HermesSlotRetrievalError
+
+    monkeypatch.setattr(
+        prompt_context,
+        "require_retrieval_evidence_dispatch_capability",
+        require_retrieval_evidence_dispatch_capability,
+    )
+    prepared, receipt_path = _prepared_hits(tmp_path, "bedrock-pre-route.jsonl")
+    agent = _actual_chat_completions_agent("bedrock-pre-route-session")
+    agent.provider = "bedrock"
+    agent._bedrock_region = "us-east-1"
+
+    with (
+        patch.object(prompt_context, "_prompt_context") as project_evidence,
+        patch.object(agent, "run_conversation") as conversation,
+        patch.object(agent, "_cleanup_task_resources") as cleanup,
+        patch("agent.conversation_loop.snapshot_allowed_provider_routes") as snapshot_routes,
+        pytest.raises(HermesSlotRetrievalError, match="unavailable before projection"),
+    ):
+        prompt_context.run_conversation_with_approved_retrieval(
+            agent,
+            "authorized retrieval turn",
+            prepared,
+        )
+
+    project_evidence.assert_not_called()
+    conversation.assert_not_called()
+    cleanup.assert_not_called()
+    snapshot_routes.assert_not_called()
     assert prepared.consumption_receipt_status == "pending"
     assert prepared.provider_attempt_outcome_status == "pending"
     assert receipt_path.read_bytes() == canonical_json_bytes(prepared.result_receipt) + b"\n"

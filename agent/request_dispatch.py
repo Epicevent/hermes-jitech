@@ -171,6 +171,15 @@ def require_authoritative_leaf_adapter(client: Any) -> str:
     )
 
 
+def require_retrieval_evidence_dispatch_capability(_agent: Any) -> str:
+    """Fail before evidence projection until a production atomic adapter lands."""
+
+    raise FinalProviderBindingUnsupported(
+        "this source revision has no production atomic serialized-request adapter "
+        "for retrieval evidence"
+    )
+
+
 def canonical_endpoint_identity(value: Any, *, provider: str) -> str:
     """Return a non-secret endpoint/data-boundary identity."""
 
