@@ -223,6 +223,25 @@ class FileConsumptionReceiptSink:
             raise OSError("consumption receipt file was substituted")
 
     @staticmethod
+    def _assert_public_file_path_identity(
+        path: Path,
+        expected: tuple[int, int],
+        *,
+        label: str,
+    ) -> None:
+        """Linearize success against the artifact's current public pathname."""
+
+        info = os.stat(path, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_nlink != 1
+            or info.st_uid != _effective_user_id()
+            or stat.S_IMODE(info.st_mode) != 0o600
+            or (info.st_dev, info.st_ino) != expected
+        ):
+            raise OSError(f"{label} public pathname was substituted")
+
+    @staticmethod
     def _assert_named_directory_identity(
         parent: int,
         name: str,
@@ -356,6 +375,11 @@ class FileConsumptionReceiptSink:
                         self._assert_receipt_file_path_identity(
                             parent,
                             receipt_identity,
+                        )
+                        self._assert_public_file_path_identity(
+                            self._path,
+                            receipt_identity,
+                            label="consumption receipt file",
                         )
                     except BaseException:
                         os.ftruncate(descriptor, original_size)
@@ -504,6 +528,11 @@ class FileConsumptionReceiptSink:
                         outcome_name,
                         outcome_file_identity,
                     )
+                    self._assert_public_file_path_identity(
+                        outcome_root / outcome_name,
+                        outcome_file_identity,
+                        label="provider attempt outcome file",
+                    )
                 finally:
                     os.close(descriptor)
                 return outcome_root_identity
@@ -536,6 +565,11 @@ class FileConsumptionReceiptSink:
                         outcome_directory,
                         outcome_name,
                         outcome_file_identity,
+                    )
+                    self._assert_public_file_path_identity(
+                        outcome_root / outcome_name,
+                        outcome_file_identity,
+                        label="provider attempt outcome file",
                     )
                 except BaseException:
                     os.ftruncate(descriptor, 0)

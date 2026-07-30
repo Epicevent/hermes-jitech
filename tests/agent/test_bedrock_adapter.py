@@ -9,10 +9,12 @@ Covers:
   - Edge cases: empty messages, consecutive roles, image content
 """
 
+import gc
 import json
 import os
 import threading
 import time
+import weakref
 from contextlib import contextmanager
 from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch, PropertyMock
@@ -887,7 +889,8 @@ class TestClientCache:
             reset_client_cache,
         )
         _bedrock_runtime_client_cache["test"] = "dummy"
-        _bedrock_runtime_client_identity_cache["test"] = ("dummy", str)
+        dummy = type("BedrockRuntime", (), {})()
+        _bedrock_runtime_client_identity_cache[id(dummy)] = dummy
         _bedrock_control_client_cache["test"] = "dummy"
         reset_client_cache()
         assert len(_bedrock_runtime_client_cache) == 0
@@ -989,6 +992,27 @@ class TestClientCache:
         assert results == [exact_client, exact_client]
         assert factory_calls == ["bedrock-runtime"]
         assert bedrock_adapter.is_authoritative_bedrock_runtime_client(exact_client)
+
+    def test_evicted_factory_identity_expires_after_last_live_reference(self):
+        from agent import bedrock_adapter
+
+        bedrock_adapter.reset_client_cache()
+        client = type("BedrockRuntime", (), {})()
+        client_id = id(client)
+        client_ref = weakref.ref(client)
+        bedrock_adapter._bedrock_runtime_client_cache["eu-west-1"] = client
+        bedrock_adapter._bedrock_runtime_client_identity_cache[client_id] = client
+
+        assert bedrock_adapter.invalidate_runtime_client(
+            "eu-west-1",
+            expected_client=client,
+        )
+        assert bedrock_adapter.is_authoritative_bedrock_runtime_client(client)
+        del client
+        gc.collect()
+
+        assert client_ref() is None
+        assert client_id not in bedrock_adapter._bedrock_runtime_client_identity_cache
 
 
 # ---------------------------------------------------------------------------
@@ -1390,6 +1414,33 @@ class TestInvalidateRuntimeClient:
         from agent.bedrock_adapter import invalidate_runtime_client, reset_client_cache
         reset_client_cache()
         assert invalidate_runtime_client("eu-west-1") is False
+
+    def test_stale_old_client_cannot_evict_healthy_replacement(self):
+        from agent import bedrock_adapter
+
+        bedrock_adapter.reset_client_cache()
+        old_client = type("BedrockRuntime", (), {})()
+        replacement = type("BedrockRuntime", (), {})()
+        region = "eu-west-1"
+        bedrock_adapter._bedrock_runtime_client_cache[region] = old_client
+        bedrock_adapter._bedrock_runtime_client_identity_cache[id(old_client)] = (
+            old_client
+        )
+
+        assert bedrock_adapter.invalidate_runtime_client(
+            region,
+            expected_client=old_client,
+        )
+        bedrock_adapter._bedrock_runtime_client_cache[region] = replacement
+        bedrock_adapter._bedrock_runtime_client_identity_cache[id(replacement)] = (
+            replacement
+        )
+
+        assert not bedrock_adapter.invalidate_runtime_client(
+            region,
+            expected_client=old_client,
+        )
+        assert bedrock_adapter._bedrock_runtime_client_cache[region] is replacement
 
 
 class TestIsStaleConnectionError:

@@ -854,8 +854,8 @@ def test_bedrock_snapshot_and_live_leaf_bind_the_same_regional_endpoint(
     )
     monkeypatch.setitem(
         bedrock_adapter._bedrock_runtime_client_identity_cache,
-        "eu-west-1",
-        (client, type(client)),
+        id(client),
+        client,
     )
 
     def import_exact_bedrock_modules(module_name: str):

@@ -1038,6 +1038,118 @@ def test_provider_outcome_file_swap_after_replay_read_fails_closed(
     assert detached_path.read_bytes() == canonical_json_bytes(receipt) + b"\n"
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX public path binding contract")
+def test_provider_outcome_publication_parent_swap_before_final_file_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from plugins.kwrag_slot.consumer import (
+        FileConsumptionReceiptSink,
+        HermesSlotRetrievalError,
+    )
+
+    sink = FileConsumptionReceiptSink(tmp_path / "outcome-public-parent-swap.jsonl")
+    sink.write({"schema_version": "fixture-ledger-anchor-v1"})
+    identity = "sha256:" + "9" * 64
+    outcome_root = tmp_path / "outcome-public-parent-swap.jsonl.outcomes"
+    detached_root = tmp_path / "detached-publication-outcomes"
+    outcome_name = "9" * 64 + ".json"
+    original_write_all = sink._write_all
+    original_assert_file = sink._assert_named_outcome_file_identity
+    write_finished = False
+    swapped = False
+
+    def observe_write(descriptor: int, raw: bytes) -> None:
+        nonlocal write_finished
+        original_write_all(descriptor, raw)
+        write_finished = True
+
+    def swap_before_relative_file_check(*args, **kwargs) -> None:
+        nonlocal swapped
+        if write_finished and not swapped:
+            swapped = True
+            outcome_root.rename(detached_root)
+            outcome_root.mkdir(mode=0o700)
+            outcome_root.chmod(0o700)
+            replacement = outcome_root / outcome_name
+            replacement.write_bytes(b"")
+            replacement.chmod(0o600)
+        original_assert_file(*args, **kwargs)
+
+    monkeypatch.setattr(sink, "_write_all", observe_write)
+    monkeypatch.setattr(
+        sink,
+        "_assert_named_outcome_file_identity",
+        swap_before_relative_file_check,
+    )
+    with pytest.raises(HermesSlotRetrievalError, match="persisted safely"):
+        sink.write_once(
+            identity,
+            {"schema_version": "fixture-outcome-v1", "status": "unknown"},
+        )
+
+    assert swapped is True
+    assert (outcome_root / outcome_name).read_bytes() == b""
+    assert list(detached_root.iterdir()) == []
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX public path binding contract")
+def test_provider_outcome_replay_parent_swap_before_final_file_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from plugins.kwrag_slot.consumer import (
+        FileConsumptionReceiptSink,
+        HermesSlotRetrievalError,
+    )
+
+    sink = FileConsumptionReceiptSink(tmp_path / "outcome-replay-parent-swap.jsonl")
+    sink.write({"schema_version": "fixture-ledger-anchor-v1"})
+    identity = "sha256:" + "a" * 64
+    receipt = {"schema_version": "fixture-outcome-v1", "status": "unknown"}
+    sink.write_once(identity, receipt)
+    outcome_root = tmp_path / "outcome-replay-parent-swap.jsonl.outcomes"
+    detached_root = tmp_path / "detached-replay-outcomes"
+    outcome_name = "a" * 64 + ".json"
+    original_read_all = sink._read_all
+    original_assert_file = sink._assert_named_outcome_file_identity
+    read_finished = False
+    swapped = False
+
+    def observe_read(descriptor: int) -> bytes:
+        nonlocal read_finished
+        raw = original_read_all(descriptor)
+        read_finished = True
+        return raw
+
+    def swap_before_relative_file_check(*args, **kwargs) -> None:
+        nonlocal swapped
+        if read_finished and not swapped:
+            swapped = True
+            outcome_root.rename(detached_root)
+            outcome_root.mkdir(mode=0o700)
+            outcome_root.chmod(0o700)
+            replacement = outcome_root / outcome_name
+            replacement.write_bytes(b"")
+            replacement.chmod(0o600)
+        original_assert_file(*args, **kwargs)
+
+    monkeypatch.setattr(sink, "_read_all", observe_read)
+    monkeypatch.setattr(
+        sink,
+        "_assert_named_outcome_file_identity",
+        swap_before_relative_file_check,
+    )
+    with pytest.raises(HermesSlotRetrievalError, match="persisted safely"):
+        sink.write_once(identity, receipt)
+
+    assert swapped is True
+    assert (outcome_root / outcome_name).read_bytes() == b""
+    assert (detached_root / outcome_name).read_bytes() == (
+        canonical_json_bytes(receipt) + b"\n"
+    )
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX parent boundary contract")
 def test_provider_outcome_sink_requires_preexisting_safe_receipt_parent(
     tmp_path: Path,
@@ -1184,6 +1296,57 @@ def test_consumption_receipt_file_swap_during_final_parent_check_rolls_back(
     assert swapped is True
     assert receipt_path.read_bytes() == b""
     assert detached_path.read_bytes() == b""
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX public path binding contract")
+def test_consumption_receipt_parent_swap_before_final_file_check_rolls_back(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from plugins.kwrag_slot.consumer import (
+        FileConsumptionReceiptSink,
+        HermesSlotRetrievalError,
+    )
+
+    receipt_parent = tmp_path / "trusted-public-ledger"
+    receipt_parent.mkdir(mode=0o700)
+    receipt_parent.chmod(0o700)
+    detached_parent = tmp_path / "detached-public-ledger"
+    receipt_path = receipt_parent / "consumption.jsonl"
+    sink = FileConsumptionReceiptSink(receipt_path)
+    original_write_all = sink._write_all
+    original_assert_file = sink._assert_receipt_file_path_identity
+    write_finished = False
+    swapped = False
+
+    def observe_write(descriptor: int, raw: bytes) -> None:
+        nonlocal write_finished
+        original_write_all(descriptor, raw)
+        write_finished = True
+
+    def swap_before_relative_file_check(*args, **kwargs) -> None:
+        nonlocal swapped
+        if write_finished and not swapped:
+            swapped = True
+            receipt_parent.rename(detached_parent)
+            receipt_parent.mkdir(mode=0o700)
+            receipt_parent.chmod(0o700)
+            receipt_path.write_bytes(b"")
+            receipt_path.chmod(0o600)
+        original_assert_file(*args, **kwargs)
+
+    monkeypatch.setattr(sink, "_write_all", observe_write)
+    monkeypatch.setattr(
+        sink,
+        "_assert_receipt_file_path_identity",
+        swap_before_relative_file_check,
+    )
+    with pytest.raises(HermesSlotRetrievalError, match="approved POSIX ledger"):
+        sink.write({"schema_version": "fixture-consumption-v1"})
+
+    assert swapped is True
+    assert receipt_path.read_bytes() == b""
+    assert list(detached_parent.iterdir()) == []
 
 
 def test_consumer_budgets_complete_canonical_results_with_catch_and_valid_controls(
@@ -1718,6 +1881,61 @@ def test_invalid_provider_response_after_dispatch_cleans_task_resources(
     assert outcome["failed"] is True
     assert outcome["api_calls"] == 1
     assert outcome["error"] == "retrieval evidence provider response was invalid"
+
+
+def test_first_truncated_evidence_response_cleans_task_resources(
+    tmp_path: Path,
+) -> None:
+    from plugins.kwrag_slot.prompt_context import (
+        run_conversation_with_approved_retrieval,
+    )
+
+    prepared, _receipt_path = _prepared_hits(
+        tmp_path,
+        "first-truncated-response-cleanup.jsonl",
+    )
+    agent = _actual_chat_completions_agent("first-truncated-response-session")
+    request_client = _supported_openai_client()
+    truncated_response = SimpleNamespace(
+        choices=[SimpleNamespace(
+            message=SimpleNamespace(
+                content=None,
+                tool_calls=None,
+                reasoning=None,
+                reasoning_content=None,
+                reasoning_details=None,
+            ),
+            finish_reason="length",
+        )],
+        model="fixture-model",
+        usage=None,
+    )
+    request_client.chat.completions.create.return_value = truncated_response
+    transport = agent._get_transport()
+    normalized = transport.normalize_response(truncated_response)
+    transport_proxy = MagicMock(wraps=transport)
+    transport_proxy.normalize_response.side_effect = [normalized, None]
+
+    with (
+        patch.object(agent, "_create_request_openai_client", return_value=request_client),
+        patch.object(agent, "_close_request_openai_client"),
+        patch.object(agent, "_get_transport", return_value=transport_proxy),
+        patch.object(agent, "_persist_session"),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources") as cleanup,
+    ):
+        outcome = run_conversation_with_approved_retrieval(
+            agent,
+            "authorized retrieval turn",
+            prepared,
+        )
+
+    request_client.chat.completions.create.assert_called_once()
+    cleanup.assert_called_once()
+    assert outcome["completed"] is False
+    assert outcome["failed"] is True
+    assert outcome["api_calls"] == 1
+    assert outcome["error"] == "First response truncated due to output length limit"
 
 
 def test_post_dispatch_interruption_cleans_task_resources(tmp_path: Path) -> None:
