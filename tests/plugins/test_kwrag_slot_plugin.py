@@ -133,9 +133,15 @@ def _test_receipt_sink(path: Path):
     )
 
     sink = FileConsumptionReceiptSink(path)
-    if os.name == "posix":
+    if sys.platform == "linux":
         return sink
     outcomes: dict[str, bytes] = {}
+
+    def write(receipt: dict) -> str:
+        raw = canonical_json_bytes(receipt)
+        with path.open("ab") as stream:
+            stream.write(raw + b"\n")
+        return "sha256:" + hashlib.sha256(raw).hexdigest()
 
     def write_once(identity: str, receipt: dict) -> str:
         raw = canonical_json_bytes(receipt)
@@ -147,6 +153,9 @@ def _test_receipt_sink(path: Path):
         outcomes[identity] = raw
         return "sha256:" + hashlib.sha256(raw).hexdigest()
 
+    if os.name == "posix":
+        sink.preflight_before_retrieval = lambda: None  # type: ignore[method-assign]
+        sink.write = write  # type: ignore[method-assign]
     sink.write_once = write_once  # type: ignore[method-assign]
     return sink
 
@@ -687,7 +696,7 @@ def test_explicit_consumer_binds_operation_result_and_consumption_receipts(tmp_p
     }
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX insert-once contract")
+@pytest.mark.skipif(sys.platform != "linux", reason="POSIX insert-once contract")
 def test_provider_outcome_sink_is_insert_once_and_conflicts_fail_closed(
     tmp_path: Path,
 ) -> None:
@@ -722,7 +731,7 @@ def test_provider_outcome_sink_is_insert_once_and_conflicts_fail_closed(
     assert outcome_path.read_bytes() == canonical_json_bytes(receipt) + b"\n"
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX atomic outcome contract")
+@pytest.mark.skipif(sys.platform != "linux", reason="POSIX atomic outcome contract")
 def test_provider_outcome_publication_failure_never_exposes_partial_final_name(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -750,7 +759,7 @@ def test_provider_outcome_publication_failure_never_exposes_partial_final_name(
     assert list(outcome_root.iterdir()) == []
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX atomic outcome contract")
+@pytest.mark.skipif(sys.platform != "linux", reason="POSIX atomic outcome contract")
 def test_concurrent_provider_outcome_publication_has_one_complete_winner(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -801,7 +810,7 @@ def test_concurrent_provider_outcome_publication_has_one_complete_winner(
     assert [path.name for path in outcome_root.iterdir()] == [outcome_path.name]
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX outcome content contract")
+@pytest.mark.skipif(sys.platform != "linux", reason="POSIX outcome content contract")
 def test_provider_outcome_publication_rejects_same_inode_content_mutation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -843,7 +852,7 @@ def test_provider_outcome_publication_rejects_same_inode_content_mutation(
     assert not outcome_path.exists()
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX outcome content contract")
+@pytest.mark.skipif(sys.platform != "linux", reason="POSIX outcome content contract")
 def test_provider_outcome_replay_rejects_same_inode_content_mutation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -886,7 +895,7 @@ def test_provider_outcome_replay_rejects_same_inode_content_mutation(
     assert "public bytes changed" in str(caught.value.__cause__)
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX outcome replay size contract")
+@pytest.mark.skipif(sys.platform != "linux", reason="POSIX outcome replay size contract")
 def test_provider_outcome_replay_rejects_oversized_file_before_read(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -917,7 +926,7 @@ def test_provider_outcome_replay_rejects_oversized_file_before_read(
     bounded_read.assert_not_called()
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX outcome replay size contract")
+@pytest.mark.skipif(sys.platform != "linux", reason="POSIX outcome replay size contract")
 def test_provider_outcome_replay_growth_after_size_check_is_bounded(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -957,7 +966,7 @@ def test_provider_outcome_replay_growth_after_size_check_is_bounded(
     assert observed == {"limit": len(expected) + 1, "read": len(expected) + 1}
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX outcome linearization contract")
+@pytest.mark.skipif(sys.platform != "linux", reason="POSIX outcome linearization contract")
 @pytest.mark.parametrize("replay", [False, True], ids=["publication", "replay"])
 def test_provider_outcome_rejects_same_inode_pwrite_after_content_read(
     tmp_path: Path,
@@ -1005,7 +1014,7 @@ def test_provider_outcome_rejects_same_inode_pwrite_after_content_read(
     assert open_count == 2
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX receipt linearization contract")
+@pytest.mark.skipif(sys.platform != "linux", reason="POSIX receipt linearization contract")
 def test_consumption_receipt_rejects_same_inode_pwrite_after_append_read(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1046,7 +1055,7 @@ def test_consumption_receipt_rejects_same_inode_pwrite_after_append_read(
     assert receipt_path.read_bytes() == original
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX receipt prefix contract")
+@pytest.mark.skipif(sys.platform != "linux", reason="POSIX receipt prefix contract")
 @pytest.mark.parametrize("mutation", ["truncate", "rewrite"])
 def test_consumption_receipt_rejects_changed_published_prefix_before_append(
     tmp_path: Path,
@@ -1096,7 +1105,7 @@ def test_provider_outcome_sink_fails_closed_off_posix(tmp_path: Path) -> None:
         )
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX no-follow contract")
+@pytest.mark.skipif(sys.platform != "linux", reason="POSIX no-follow contract")
 def test_provider_outcome_sink_rejects_parent_and_final_symlinks(
     tmp_path: Path,
 ) -> None:
@@ -1228,7 +1237,7 @@ def test_provider_outcome_replay_rejects_fifo_without_blocking(
     assert isinstance(observed[0], HermesSlotRetrievalError)
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX single-link contract")
+@pytest.mark.skipif(sys.platform != "linux", reason="POSIX single-link contract")
 def test_provider_outcome_sink_rejects_hardlinked_existing_receipt(
     tmp_path: Path,
 ) -> None:
@@ -1253,7 +1262,7 @@ def test_provider_outcome_sink_rejects_hardlinked_existing_receipt(
         sink.write_once(identity, receipt)
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX directory fsync contract")
+@pytest.mark.skipif(sys.platform != "linux", reason="POSIX directory fsync contract")
 def test_provider_outcome_sink_fsyncs_new_directory_and_file_publication(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1280,7 +1289,7 @@ def test_provider_outcome_sink_fsyncs_new_directory_and_file_publication(
     assert outcome_root.stat().st_ino in fsynced_inodes
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX outcome inode binding contract")
+@pytest.mark.skipif(sys.platform != "linux", reason="POSIX outcome inode binding contract")
 def test_provider_outcome_directory_swap_during_write_rolls_back_publication(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1317,7 +1326,7 @@ def test_provider_outcome_directory_swap_during_write_rolls_back_publication(
     assert list(detached_root.iterdir()) == []
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX outcome inode binding contract")
+@pytest.mark.skipif(sys.platform != "linux", reason="POSIX outcome inode binding contract")
 def test_provider_outcome_file_swap_during_write_rolls_back_publication(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1358,7 +1367,7 @@ def test_provider_outcome_file_swap_during_write_rolls_back_publication(
     assert replacement_paths == []
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX outcome inode binding contract")
+@pytest.mark.skipif(sys.platform != "linux", reason="POSIX outcome inode binding contract")
 def test_provider_outcome_file_swap_during_final_directory_check_fails_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1412,7 +1421,7 @@ def test_provider_outcome_file_swap_during_final_directory_check_fails_closed(
     assert replacement_paths == []
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX atomic outcome contract")
+@pytest.mark.skipif(sys.platform != "linux", reason="POSIX atomic outcome contract")
 def test_provider_outcome_interrupt_after_rename_removes_public_inode(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1441,7 +1450,7 @@ def test_provider_outcome_interrupt_after_rename_removes_public_inode(
     assert list(outcome_root.iterdir()) == []
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX atomic outcome contract")
+@pytest.mark.skipif(sys.platform != "linux", reason="POSIX atomic outcome contract")
 def test_provider_outcome_cleanup_interrupt_preserves_owner_and_finishes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1499,7 +1508,7 @@ def test_provider_outcome_cleanup_interrupt_preserves_owner_and_finishes(
     assert list(outcome_root.iterdir()) == []
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX outcome inode binding contract")
+@pytest.mark.skipif(sys.platform != "linux", reason="POSIX outcome inode binding contract")
 def test_provider_outcome_file_swap_during_replay_fails_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1537,7 +1546,7 @@ def test_provider_outcome_file_swap_during_replay_fails_closed(
     assert detached_path.read_bytes() == canonical_json_bytes(receipt) + b"\n"
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX outcome inode binding contract")
+@pytest.mark.skipif(sys.platform != "linux", reason="POSIX outcome inode binding contract")
 def test_provider_outcome_file_swap_after_replay_read_fails_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1589,7 +1598,7 @@ def test_provider_outcome_file_swap_after_replay_read_fails_closed(
     assert detached_path.read_bytes() == canonical_json_bytes(receipt) + b"\n"
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX public path binding contract")
+@pytest.mark.skipif(sys.platform != "linux", reason="POSIX public path binding contract")
 @pytest.mark.parametrize("replacement_kind", ["directory", "symlink"])
 def test_provider_outcome_publication_detach_after_parent_open_fails_closed(
     tmp_path: Path,
@@ -1644,7 +1653,7 @@ def test_provider_outcome_publication_detach_after_parent_open_fails_closed(
     assert list(detached_root.iterdir()) == []
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX public path binding contract")
+@pytest.mark.skipif(sys.platform != "linux", reason="POSIX public path binding contract")
 @pytest.mark.parametrize("replacement_kind", ["directory", "symlink"])
 def test_provider_outcome_replay_detach_after_parent_open_fails_closed(
     tmp_path: Path,
@@ -1700,7 +1709,7 @@ def test_provider_outcome_replay_detach_after_parent_open_fails_closed(
     )
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX parent boundary contract")
+@pytest.mark.skipif(sys.platform != "linux", reason="POSIX parent boundary contract")
 def test_provider_outcome_sink_requires_preexisting_safe_receipt_parent(
     tmp_path: Path,
 ) -> None:
@@ -1725,7 +1734,7 @@ def test_provider_outcome_sink_requires_preexisting_safe_receipt_parent(
     assert not (unsafe_parent / "receipts.jsonl").exists()
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX parent inode binding contract")
+@pytest.mark.skipif(sys.platform != "linux", reason="POSIX parent inode binding contract")
 def test_consumption_receipt_parent_swap_before_append_writes_zero_bytes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1764,7 +1773,7 @@ def test_consumption_receipt_parent_swap_before_append_writes_zero_bytes(
     assert list(detached_parent.iterdir()) == []
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX parent inode binding contract")
+@pytest.mark.skipif(sys.platform != "linux", reason="POSIX parent inode binding contract")
 def test_consumption_receipt_parent_swap_at_first_write_rolls_back_to_zero_bytes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1799,7 +1808,7 @@ def test_consumption_receipt_parent_swap_at_first_write_rolls_back_to_zero_bytes
     assert list(detached_parent.iterdir()) == []
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX receipt inode binding contract")
+@pytest.mark.skipif(sys.platform != "linux", reason="POSIX receipt inode binding contract")
 def test_consumption_receipt_file_swap_during_final_parent_check_rolls_back(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1848,7 +1857,7 @@ def test_consumption_receipt_file_swap_during_final_parent_check_rolls_back(
     assert detached_path.read_bytes() == b""
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX public path binding contract")
+@pytest.mark.skipif(sys.platform != "linux", reason="POSIX public path binding contract")
 @pytest.mark.parametrize("replacement_kind", ["directory", "symlink"])
 def test_consumption_receipt_detach_after_parent_open_rolls_back(
     tmp_path: Path,
@@ -1946,6 +1955,49 @@ def test_consumer_budgets_complete_canonical_results_with_catch_and_valid_contro
         _test_receipt_sink(tmp_path / "exact.jsonl"),
     ).search(_request())
     assert prepared.result_receipt["result_characters"] == full_payload_characters
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX platform admission contract")
+def test_non_linux_posix_receipt_preflight_fails_before_retrieval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from plugins.kwrag_slot import consumer as consumer_module
+    from plugins.kwrag_slot.consumer import (
+        FileConsumptionReceiptSink,
+        HermesSlotRetrievalBinding,
+        HermesSlotRetrievalConsumer,
+        HermesSlotRetrievalError,
+    )
+
+    binding = HermesSlotRetrievalBinding.from_mapping({
+        "schema_version": "hermes-kwrag-slot-binding-v1",
+        "enabled": True,
+        "component_digest": load_component_manifest()["component_wheel"]["sha256"],
+        "runtime_binding_digest": "sha256:" + "c" * 64,
+        "expected_index_manifest": "sha256:" + "a" * 64,
+        "expected_pipeline_fingerprint": "sha256:" + "b" * 64,
+        "max_result_characters": _fixture_result_character_budget(),
+    })
+    runtime = SimpleNamespace(search_exchange=MagicMock(return_value=_exchange()))
+    receipt_path = tmp_path / "unsupported-platform.jsonl"
+    sink = FileConsumptionReceiptSink(receipt_path)
+    monkeypatch.setattr(consumer_module.sys, "platform", "darwin")
+
+    with pytest.raises(HermesSlotRetrievalError, match="Linux slot runtime"):
+        HermesSlotRetrievalConsumer(binding, runtime, sink).search(_request())
+
+    runtime.search_exchange.assert_not_called()
+    assert not receipt_path.exists()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux receipt runtime contract")
+def test_linux_receipt_preflight_accepts_supported_runtime(tmp_path: Path) -> None:
+    from plugins.kwrag_slot.consumer import FileConsumptionReceiptSink
+
+    FileConsumptionReceiptSink(
+        tmp_path / "supported-platform.jsonl"
+    ).preflight_before_retrieval()
 
 
 def test_disabled_binding_has_no_runtime_or_residual_slot_identity() -> None:
@@ -3225,7 +3277,7 @@ def test_actual_aiagent_client_creation_failure_stays_not_consumed(
     assert receipt_path.read_bytes() == canonical_json_bytes(prepared.result_receipt) + b"\n"
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX parent inode binding contract")
+@pytest.mark.skipif(sys.platform != "linux", reason="POSIX parent inode binding contract")
 def test_parent_swap_at_consumption_write_fails_before_sdk_and_rolls_back(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3281,7 +3333,7 @@ def test_parent_swap_at_consumption_write_fails_before_sdk_and_rolls_back(
     )
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX ledger inode binding contract")
+@pytest.mark.skipif(sys.platform != "linux", reason="POSIX ledger inode binding contract")
 def test_receipt_file_replacement_between_writes_fails_before_sdk(
     tmp_path: Path,
 ) -> None:

@@ -248,12 +248,24 @@ def interruptible_api_call(agent, api_kwargs: dict, *, on_request_dispatch=None)
             result["error"] = error
             terminal_owner["value"] = "worker"
 
-    def _publish_outer_error(owner: str, error: BaseException) -> None:
+    def _publish_worker_response(response) -> bool:
         with result_lock:
+            if terminal_owner["value"] in {"user_interrupt", "watchdog_timeout"}:
+                return False
+            result["response"] = response
+            terminal_owner["value"] = "worker_response"
+            return True
+
+    def _publish_outer_error(owner: str, error: BaseException) -> bool:
+        with result_lock:
+            if owner == "watchdog_timeout" and result["response"] is not None:
+                return False
             current = result["error"]
             if current is None or isinstance(current, DispatchAttemptsClosed):
                 result["error"] = error
                 terminal_owner["value"] = owner
+                return True
+            return False
     request_client_holder = {"client": None, "owner_tid": None}
     request_client_lock = threading.Lock()
     dispatch_handoff = coerce_request_dispatch_handoff(
@@ -320,14 +332,14 @@ def interruptible_api_call(agent, api_kwargs: dict, *, on_request_dispatch=None)
                     )
                 )
                 if on_request_dispatch is None:
-                    result["response"] = agent._run_codex_stream(
+                    response = agent._run_codex_stream(
                         api_kwargs,
                         client=request_client,
                         on_first_delta=getattr(agent, "_codex_on_first_delta", None),
                     )
                 else:
                     try:
-                        result["response"] = agent._run_codex_stream(
+                        response = agent._run_codex_stream(
                             api_kwargs,
                             client=request_client,
                             on_first_delta=getattr(agent, "_codex_on_first_delta", None),
@@ -344,14 +356,16 @@ def interruptible_api_call(agent, api_kwargs: dict, *, on_request_dispatch=None)
                         dispatch_handoff.record_terminal_outcome(
                             "response_observed"
                         )
+                _publish_worker_response(response)
             elif agent.api_mode == "anthropic_messages":
                 if on_request_dispatch is None:
-                    result["response"] = agent._anthropic_messages_create(api_kwargs)
+                    response = agent._anthropic_messages_create(api_kwargs)
                 else:
-                    result["response"] = agent._anthropic_messages_create(
+                    response = agent._anthropic_messages_create(
                         api_kwargs,
                         on_request_dispatch=dispatch_handoff,
                     )
+                _publish_worker_response(response)
             elif agent.api_mode == "bedrock_converse":
                 # Bedrock uses boto3 directly — no OpenAI client needed.
                 # normalize_converse_response produces an OpenAI-compatible
@@ -386,7 +400,7 @@ def interruptible_api_call(agent, api_kwargs: dict, *, on_request_dispatch=None)
                     if is_stale_connection_error(_bedrock_exc):
                         invalidate_runtime_client(region, expected_client=client)
                     raise
-                result["response"] = normalize_converse_response(raw_response)
+                _publish_worker_response(normalize_converse_response(raw_response))
             else:
                 request_client = _set_request_client(
                     agent._create_request_openai_client(
@@ -394,7 +408,7 @@ def interruptible_api_call(agent, api_kwargs: dict, *, on_request_dispatch=None)
                         api_kwargs=api_kwargs,
                     )
                 )
-                result["response"] = dispatch_handoff.commit_and_claim_dispatch(
+                response = dispatch_handoff.commit_and_claim_dispatch(
                     lambda bound_kwargs: request_client.chat.completions.create(
                         **bound_kwargs
                     ),
@@ -412,6 +426,7 @@ def interruptible_api_call(agent, api_kwargs: dict, *, on_request_dispatch=None)
                     fallback_index=int(getattr(agent, "_fallback_index", 0) or 0),
                     request_kwargs=api_kwargs,
                 )
+                _publish_worker_response(response)
                 _capture_request_provider_receipt(agent, request_client)
         except Exception as e:
             _publish_worker_error(e)
@@ -558,7 +573,13 @@ def interruptible_api_call(agent, api_kwargs: dict, *, on_request_dispatch=None)
                     f"(TTFB threshold: {int(_ttfb_timeout)}s)"
                 )
             )
-            _publish_outer_error("watchdog_timeout", timeout_error)
+            if not _publish_outer_error("watchdog_timeout", timeout_error):
+                # The worker published a response (or its own terminal error)
+                # before the watchdog acquired ownership.  Let worker cleanup
+                # finish and preserve that result instead of killing a valid,
+                # potentially billed response at the timeout boundary.
+                t.join(timeout=2.0)
+                break
             cancelled_before_dispatch = (
                 dispatch_handoff.abandon(cause="watchdog_timeout")
                 if on_request_dispatch is not None
@@ -614,7 +635,9 @@ def interruptible_api_call(agent, api_kwargs: dict, *, on_request_dispatch=None)
                 f"Codex stream produced no SSE events for {int(_event_stale_elapsed)}s "
                 f"after first byte (threshold: {int(_codex_idle_timeout)}s)"
             )
-            _publish_outer_error("watchdog_timeout", timeout_error)
+            if not _publish_outer_error("watchdog_timeout", timeout_error):
+                t.join(timeout=2.0)
+                break
             cancelled_before_dispatch = (
                 dispatch_handoff.abandon(cause="watchdog_timeout")
                 if on_request_dispatch is not None
@@ -673,7 +696,9 @@ def interruptible_api_call(agent, api_kwargs: dict, *, on_request_dispatch=None)
                     f"with no response (threshold: {int(_stale_timeout)}s)"
                 )
             )
-            _publish_outer_error("watchdog_timeout", timeout_error)
+            if not _publish_outer_error("watchdog_timeout", timeout_error):
+                t.join(timeout=2.0)
+                break
             cancelled_before_dispatch = dispatch_handoff.abandon(
                 cause="watchdog_timeout"
             )

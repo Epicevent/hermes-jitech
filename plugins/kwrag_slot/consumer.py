@@ -83,7 +83,16 @@ class FileConsumptionReceiptSink:
         self._trusted_receipt_digest: str | None = None
         self._trusted_outcome_root_identity: tuple[int, int] | None = None
 
+    def preflight_before_retrieval(self) -> None:
+        """Reject a known-unsupported durable sink before backend execution."""
+
+        if os.name == "posix" and sys.platform != "linux":
+            raise HermesSlotRetrievalError(
+                "durable KWRAG receipt persistence requires the Linux slot runtime"
+            )
+
     def write(self, receipt: Mapping[str, Any]) -> str:
+        self.preflight_before_retrieval()
         raw = canonical_json_bytes(dict(receipt)) + b"\n"
         receipt_digest = "sha256:" + hashlib.sha256(raw[:-1]).hexdigest()
         if os.name == "posix":
@@ -121,6 +130,7 @@ class FileConsumptionReceiptSink:
         return receipt_digest
 
     def write_once(self, identity: str, receipt: Mapping[str, Any]) -> str:
+        self.preflight_before_retrieval()
         identity_digest = _digest(identity, "receipt identity")
         raw = canonical_json_bytes(dict(receipt)) + b"\n"
         receipt_digest = "sha256:" + hashlib.sha256(raw[:-1]).hexdigest()
@@ -1418,6 +1428,17 @@ class HermesSlotRetrievalConsumer:
     def search(self, request: Mapping[str, Any]) -> HermesSlotRetrievalResult:
         if not self._binding.enabled or self._runtime is None or self._receipt_sink is None:
             raise HermesSlotRetrievalError("Hermes slot retrieval is disabled")
+        receipt_preflight = getattr(
+            self._receipt_sink,
+            "preflight_before_retrieval",
+            None,
+        )
+        if receipt_preflight is not None:
+            if not callable(receipt_preflight):
+                raise HermesSlotRetrievalError(
+                    "consumption receipt preflight is not callable"
+                )
+            receipt_preflight()
         try:
             from kwrag.slot_consumer import verify_slot_search_exchange
         except ImportError as exc:
