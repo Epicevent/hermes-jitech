@@ -13,6 +13,7 @@ sys.modules.setdefault("firecrawl", types.SimpleNamespace(Firecrawl=object))
 sys.modules.setdefault("fal_client", types.SimpleNamespace())
 
 import run_agent
+from agent import chat_completion_helpers
 
 
 class FakeRequestClient:
@@ -156,6 +157,26 @@ def test_stale_non_stream_close_is_single_owner(monkeypatch):
 def test_stored_ordinary_response_beats_watchdog_while_worker_closes(monkeypatch):
     response = {"ok": "billed-response"}
     close_started = threading.Event()
+    watchdog_clock_observed = threading.Event()
+    real_time = time.time
+    clock_start = real_time()
+
+    def ordered_watchdog_time():
+        # Keep the watchdog clock below its threshold until worker response
+        # publication has completed and request-client cleanup has started.
+        # This fixes the intended interleaving without assuming that Windows
+        # can construct the request client inside the first 0.3s poll.
+        if close_started.is_set():
+            if threading.current_thread() is threading.main_thread():
+                watchdog_clock_observed.set()
+            return clock_start + 1.0
+        return clock_start
+
+    monkeypatch.setattr(
+        chat_completion_helpers.time,
+        "time",
+        ordered_watchdog_time,
+    )
 
     class SlowCloseRequestClient(FakeRequestClient):
         def close(self):
@@ -173,6 +194,7 @@ def test_stored_ordinary_response_beats_watchdog_while_worker_closes(monkeypatch
     result = agent._interruptible_api_call({"model": agent.model, "messages": []})
 
     assert close_started.is_set()
+    assert watchdog_clock_observed.is_set()
     assert result is response
     assert request_client.close_calls == 1
 
