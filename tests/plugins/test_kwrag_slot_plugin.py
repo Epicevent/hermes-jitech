@@ -1340,9 +1340,9 @@ def test_provider_outcome_file_swap_during_write_rolls_back_publication(
         nonlocal swapped
         if not swapped:
             swapped = True
-            outcome_path.rename(detached_path)
-            outcome_path.write_bytes(b"")
-            outcome_path.chmod(0o600)
+            temporary_paths = list(outcome_root.glob(f".{outcome_path.name}.tmp-*"))
+            assert len(temporary_paths) == 1
+            temporary_paths[0].rename(detached_path)
         original_write_all(descriptor, raw)
 
     monkeypatch.setattr(sink, "_write_all", swap_at_outcome_write)
@@ -1352,8 +1352,10 @@ def test_provider_outcome_file_swap_during_write_rolls_back_publication(
             {"schema_version": "fixture-outcome-v1", "status": "unknown"},
         )
 
-    assert outcome_path.read_bytes() == b""
+    assert not outcome_path.exists()
     assert detached_path.read_bytes() == b""
+    replacement_paths = list(outcome_root.glob(f".{outcome_path.name}.tmp-*"))
+    assert replacement_paths == []
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX outcome inode binding contract")
@@ -1386,9 +1388,9 @@ def test_provider_outcome_file_swap_during_final_directory_check_fails_closed(
         nonlocal swapped
         if write_finished and not swapped:
             swapped = True
-            outcome_path.rename(detached_path)
-            outcome_path.write_bytes(b"")
-            outcome_path.chmod(0o600)
+            temporary_paths = list(outcome_root.glob(f".{outcome_path.name}.tmp-*"))
+            assert len(temporary_paths) == 1
+            temporary_paths[0].rename(detached_path)
         original_assert_directory(*args, **kwargs)
 
     monkeypatch.setattr(sink, "_write_all", observe_outcome_write)
@@ -1404,8 +1406,39 @@ def test_provider_outcome_file_swap_during_final_directory_check_fails_closed(
         )
 
     assert swapped is True
-    assert outcome_path.read_bytes() == b""
+    assert not outcome_path.exists()
     assert detached_path.read_bytes() == b""
+    replacement_paths = list(outcome_root.glob(f".{outcome_path.name}.tmp-*"))
+    assert replacement_paths == []
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX atomic outcome contract")
+def test_provider_outcome_interrupt_after_rename_removes_public_inode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from plugins.kwrag_slot.consumer import FileConsumptionReceiptSink
+
+    sink = FileConsumptionReceiptSink(tmp_path / "outcome-rename-interrupt.jsonl")
+    sink.write({"schema_version": "fixture-ledger-anchor-v1"})
+    identity = "sha256:" + "4" * 64
+    outcome_root = tmp_path / "outcome-rename-interrupt.jsonl.outcomes"
+    outcome_path = outcome_root / ("4" * 64 + ".json")
+    original_rename = sink._rename_noreplace
+
+    def interrupt_after_publication(parent: int, source: str, destination: str) -> None:
+        original_rename(parent, source, destination)
+        raise KeyboardInterrupt("interrupt after atomic publication")
+
+    monkeypatch.setattr(sink, "_rename_noreplace", interrupt_after_publication)
+    with pytest.raises(KeyboardInterrupt, match="after atomic publication"):
+        sink.write_once(
+            identity,
+            {"schema_version": "fixture-outcome-v1", "status": "unknown"},
+        )
+
+    assert not outcome_path.exists()
+    assert list(outcome_root.iterdir()) == []
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX outcome inode binding contract")

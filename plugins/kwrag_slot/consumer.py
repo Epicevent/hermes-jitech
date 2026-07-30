@@ -537,6 +537,9 @@ class FileConsumptionReceiptSink:
         outcome_name: str,
         raw: bytes,
     ) -> None:
+        trusted_parent_identity = self._trusted_parent_identity
+        if trusted_parent_identity is None:
+            raise OSError("provider attempt outcome has no trusted receipt parent")
         descriptor, outcome_file_identity = self._open_existing_outcome_for_read(
             outcome_directory,
             outcome_name,
@@ -560,7 +563,7 @@ class FileConsumptionReceiptSink:
                 raise HermesSlotRetrievalError(
                     "provider attempt outcome identity collision"
                 )
-            self._assert_receipt_parent_path_identity(self._trusted_parent_identity)
+            self._assert_receipt_parent_path_identity(trusted_parent_identity)
             self._assert_named_directory_identity(
                 current,
                 outcome_root.name,
@@ -828,8 +831,6 @@ class FileConsumptionReceiptSink:
                 0o600,
                 dir_fd=outcome_directory,
             )
-            temporary_present = True
-            published = False
             descriptor_info = os.fstat(descriptor)
             outcome_file_identity = (
                 descriptor_info.st_dev,
@@ -866,7 +867,6 @@ class FileConsumptionReceiptSink:
                     )
                 except FileExistsError:
                     os.unlink(temporary_name, dir_fd=outcome_directory)
-                    temporary_present = False
                     os.fsync(outcome_directory)
                     self._verify_existing_outcome_replay(
                         current=current,
@@ -877,8 +877,6 @@ class FileConsumptionReceiptSink:
                         raw=raw,
                     )
                     return outcome_root_identity
-                published = True
-                temporary_present = False
                 os.fsync(outcome_directory)
                 self._assert_named_outcome_file_identity(
                     outcome_directory,
@@ -893,11 +891,14 @@ class FileConsumptionReceiptSink:
                     expected_size=len(raw),
                 )
             except BaseException:
-                os.ftruncate(descriptor, 0)
-                os.fsync(descriptor)
-                try:
-                    cleanup_name = outcome_name if published else temporary_name
-                    if published or temporary_present:
+                # Do not trust a Python flag to say whether renameat2 already
+                # published: an asynchronous BaseException can arrive after
+                # the syscall succeeds but before the next assignment.  Find
+                # every public name that still owns our exact inode, unlink it
+                # first, and only then scrub the held (now unpublished) inode.
+                unlinked = False
+                for cleanup_name in (outcome_name, temporary_name):
+                    try:
                         file_info = os.stat(
                             cleanup_name,
                             dir_fd=outcome_directory,
@@ -908,11 +909,13 @@ class FileConsumptionReceiptSink:
                             outcome_file_identity[1],
                         ):
                             os.unlink(cleanup_name, dir_fd=outcome_directory)
-                            os.fsync(outcome_directory)
-                            if cleanup_name == temporary_name:
-                                temporary_present = False
-                except FileNotFoundError:
-                    pass
+                            unlinked = True
+                    except FileNotFoundError:
+                        continue
+                if unlinked:
+                    os.fsync(outcome_directory)
+                os.ftruncate(descriptor, 0)
+                os.fsync(descriptor)
                 raise
             finally:
                 os.close(descriptor)
