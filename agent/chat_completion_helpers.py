@@ -27,6 +27,7 @@ import sys
 import threading
 import time
 import uuid
+from contextlib import ExitStack
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -54,6 +55,14 @@ from agent.tool_dispatch_helpers import (
     _multimodal_text_summary,
 )
 from agent.retry_utils import jittered_backoff
+from agent.request_dispatch import (
+    DispatchAttemptsClosed,
+    endpoint_identity_for_dispatch,
+    ProviderAttemptLedgerRequired,
+    coerce_request_dispatch_handoff,
+    provider_leaf_adapter_identity,
+    require_authoritative_leaf_adapter,
+)
 from agent.tool_guardrails import (
     ToolGuardrailDecision,
     append_toolguard_guidance,
@@ -63,6 +72,22 @@ from tools.terminal_tool import is_persistent_env
 from utils import base_url_host_matches, base_url_hostname
 
 logger = logging.getLogger(__name__)
+
+
+def _dispatch_leaf_identity(dispatch_handoff, client) -> str:
+    if dispatch_handoff.requires_exact_provider_attempt_binding:
+        return require_authoritative_leaf_adapter(client)
+    return provider_leaf_adapter_identity(client)
+
+
+def _dispatch_endpoint_identity(dispatch_handoff, agent, client, *, base_url=None) -> str:
+    configured = base_url if base_url is not None else getattr(agent, "base_url", "")
+    return endpoint_identity_for_dispatch(
+        client,
+        provider=str(agent.provider or "unknown"),
+        configured_base_url=configured,
+        require_exact=dispatch_handoff.requires_exact_provider_attempt_binding,
+    )
 
 
 def _ra():
@@ -213,18 +238,29 @@ def interruptible_api_call(agent, api_kwargs: dict, *, on_request_dispatch=None)
     """
     agent.last_provider_receipt = None
     result = {"response": None, "error": None}
+    result_lock = threading.Lock()
+    terminal_owner = {"value": None}
+
+    def _publish_worker_error(error: BaseException) -> None:
+        with result_lock:
+            if terminal_owner["value"] in {"user_interrupt", "watchdog_timeout"}:
+                return
+            result["error"] = error
+            terminal_owner["value"] = "worker"
+
+    def _publish_outer_error(owner: str, error: BaseException) -> None:
+        with result_lock:
+            current = result["error"]
+            if current is None or isinstance(current, DispatchAttemptsClosed):
+                result["error"] = error
+                terminal_owner["value"] = owner
     request_client_holder = {"client": None, "owner_tid": None}
     request_client_lock = threading.Lock()
-    request_dispatch_notified = False
-
-    def _notify_request_dispatch() -> None:
-        nonlocal request_dispatch_notified
-        if on_request_dispatch is None or request_dispatch_notified:
-            return
-        if not callable(on_request_dispatch):
-            raise TypeError("on_request_dispatch must be callable")
-        on_request_dispatch()
-        request_dispatch_notified = True
+    dispatch_handoff = coerce_request_dispatch_handoff(
+        on_request_dispatch,
+        interrupted=lambda: bool(agent._interrupt_requested),
+        interrupted_message="Request was abandoned before provider dispatch",
+    )
 
     def _set_request_client(client):
         with request_client_lock:
@@ -290,19 +326,31 @@ def interruptible_api_call(agent, api_kwargs: dict, *, on_request_dispatch=None)
                         on_first_delta=getattr(agent, "_codex_on_first_delta", None),
                     )
                 else:
-                    result["response"] = agent._run_codex_stream(
-                        api_kwargs,
-                        client=request_client,
-                        on_first_delta=getattr(agent, "_codex_on_first_delta", None),
-                        on_request_dispatch=_notify_request_dispatch,
-                    )
+                    try:
+                        result["response"] = agent._run_codex_stream(
+                            api_kwargs,
+                            client=request_client,
+                            on_first_delta=getattr(agent, "_codex_on_first_delta", None),
+                            on_request_dispatch=dispatch_handoff,
+                        )
+                    except BaseException as exc:
+                        if dispatch_handoff.state == "dispatch_owned":
+                            dispatch_handoff.record_terminal_outcome(
+                                "sdk_exception",
+                                type(exc).__name__,
+                            )
+                        raise
+                    else:
+                        dispatch_handoff.record_terminal_outcome(
+                            "response_observed"
+                        )
             elif agent.api_mode == "anthropic_messages":
                 if on_request_dispatch is None:
                     result["response"] = agent._anthropic_messages_create(api_kwargs)
                 else:
                     result["response"] = agent._anthropic_messages_create(
                         api_kwargs,
-                        on_request_dispatch=_notify_request_dispatch,
+                        on_request_dispatch=dispatch_handoff,
                     )
             elif agent.api_mode == "bedrock_converse":
                 # Bedrock uses boto3 directly — no OpenAI client needed.
@@ -319,8 +367,19 @@ def interruptible_api_call(agent, api_kwargs: dict, *, on_request_dispatch=None)
                 api_kwargs.pop("__bedrock_converse__", None)
                 client = _get_bedrock_runtime_client(region)
                 try:
-                    _notify_request_dispatch()
-                    raw_response = client.converse(**api_kwargs)
+                    raw_response = dispatch_handoff.commit_and_claim_dispatch(
+                        lambda bound_kwargs: client.converse(**bound_kwargs),
+                        provider=str(agent.provider or "unknown"),
+                        api_mode=str(agent.api_mode or "bedrock_converse"),
+                        model=str(api_kwargs.get("model") or agent.model or "unknown"),
+                        sdk_method="bedrock-runtime.converse",
+                        leaf_adapter=_dispatch_leaf_identity(dispatch_handoff, client),
+                        endpoint_identity=_dispatch_endpoint_identity(
+                            dispatch_handoff, agent, client
+                        ),
+                        fallback_index=int(getattr(agent, "_fallback_index", 0) or 0),
+                        request_kwargs=api_kwargs,
+                    )
                 except Exception as _bedrock_exc:
                     # Evict the cached client on stale-connection failures
                     # so the outer retry loop builds a fresh client/pool.
@@ -335,11 +394,27 @@ def interruptible_api_call(agent, api_kwargs: dict, *, on_request_dispatch=None)
                         api_kwargs=api_kwargs,
                     )
                 )
-                _notify_request_dispatch()
-                result["response"] = request_client.chat.completions.create(**api_kwargs)
+                result["response"] = dispatch_handoff.commit_and_claim_dispatch(
+                    lambda bound_kwargs: request_client.chat.completions.create(
+                        **bound_kwargs
+                    ),
+                    provider=str(agent.provider or "unknown"),
+                    api_mode=str(agent.api_mode or "chat_completions"),
+                    model=str(api_kwargs.get("model") or agent.model or "unknown"),
+                    sdk_method="chat.completions.create",
+                    leaf_adapter=_dispatch_leaf_identity(
+                        dispatch_handoff,
+                        request_client,
+                    ),
+                    endpoint_identity=_dispatch_endpoint_identity(
+                        dispatch_handoff, agent, request_client
+                    ),
+                    fallback_index=int(getattr(agent, "_fallback_index", 0) or 0),
+                    request_kwargs=api_kwargs,
+                )
                 _capture_request_provider_receipt(agent, request_client)
         except Exception as e:
-            result["error"] = e
+            _publish_worker_error(e)
         finally:
             _close_request_client_once("request_complete")
 
@@ -472,6 +547,21 @@ def interruptible_api_call(agent, api_kwargs: dict, *, on_request_dispatch=None)
                     _silent_hint = _hint_fn(model=api_kwargs.get("model"))
                 except Exception:
                     _silent_hint = None
+            timeout_error = TimeoutError(
+                (
+                    f"Codex stream produced no bytes within {int(_elapsed)}s "
+                    f"(TTFB threshold: {int(_ttfb_timeout)}s). {_silent_hint}"
+                )
+                if _silent_hint
+                else (
+                    f"Codex stream produced no bytes within {int(_elapsed)}s "
+                    f"(TTFB threshold: {int(_ttfb_timeout)}s)"
+                )
+            )
+            _publish_outer_error("watchdog_timeout", timeout_error)
+            cancelled_before_dispatch = dispatch_handoff.abandon(
+                cause="watchdog_timeout"
+            )
             logger.warning(
                 "Codex stream produced no bytes within TTFB cutoff "
                 "(%.0fs > %.0fs, model=%s). Backend accepted the connection "
@@ -492,7 +582,11 @@ def interruptible_api_call(agent, api_kwargs: dict, *, on_request_dispatch=None)
                     f"Reconnecting."
                 )
             try:
-                _close_request_client_once("codex_ttfb_kill")
+                _close_request_client_once(
+                    "codex_ttfb_before_dispatch"
+                    if cancelled_before_dispatch
+                    else "codex_ttfb_in_flight"
+                )
             except Exception:
                 pass
             agent._touch_activity(
@@ -500,17 +594,6 @@ def interruptible_api_call(agent, api_kwargs: dict, *, on_request_dispatch=None)
             )
             # Wait briefly for the worker to notice the closed connection.
             t.join(timeout=2.0)
-            if result["error"] is None and result["response"] is None:
-                if _silent_hint:
-                    result["error"] = TimeoutError(
-                        f"Codex stream produced no bytes within {int(_elapsed)}s "
-                        f"(TTFB threshold: {int(_ttfb_timeout)}s). {_silent_hint}"
-                    )
-                else:
-                    result["error"] = TimeoutError(
-                        f"Codex stream produced no bytes within {int(_elapsed)}s "
-                        f"(TTFB threshold: {int(_ttfb_timeout)}s)"
-                    )
             break
 
         # Stream-idle detector: the Codex backend emitted at least one SSE
@@ -523,6 +606,14 @@ def interruptible_api_call(agent, api_kwargs: dict, *, on_request_dispatch=None)
             and (time.time() - _last_codex_event_ts) > _codex_idle_timeout
         ):
             _event_stale_elapsed = time.time() - _last_codex_event_ts
+            timeout_error = TimeoutError(
+                f"Codex stream produced no SSE events for {int(_event_stale_elapsed)}s "
+                f"after first byte (threshold: {int(_codex_idle_timeout)}s)"
+            )
+            _publish_outer_error("watchdog_timeout", timeout_error)
+            cancelled_before_dispatch = dispatch_handoff.abandon(
+                cause="watchdog_timeout"
+            )
             logger.warning(
                 "Codex stream produced no SSE events for %.0fs after first byte "
                 "(threshold %.0fs, model=%s, context=~%s tokens). Killing "
@@ -538,18 +629,17 @@ def interruptible_api_call(agent, api_kwargs: dict, *, on_request_dispatch=None)
                 f"Reconnecting."
             )
             try:
-                _close_request_client_once("codex_stream_idle_kill")
+                _close_request_client_once(
+                    "codex_stream_idle_before_dispatch"
+                    if cancelled_before_dispatch
+                    else "codex_stream_idle_in_flight"
+                )
             except Exception:
                 pass
             agent._touch_activity(
                 f"codex stream killed after {int(_event_stale_elapsed)}s with no SSE events"
             )
             t.join(timeout=2.0)
-            if result["error"] is None and result["response"] is None:
-                result["error"] = TimeoutError(
-                    f"Codex stream produced no SSE events for {int(_event_stale_elapsed)}s "
-                    f"after first byte (threshold: {int(_codex_idle_timeout)}s)"
-                )
             break
 
         # Stale-call detector: kill the connection if no response
@@ -563,6 +653,22 @@ def interruptible_api_call(agent, api_kwargs: dict, *, on_request_dispatch=None)
                     _silent_hint = _hint_fn(model=api_kwargs.get("model"))
                 except Exception:
                     _silent_hint = None
+            timeout_error = TimeoutError(
+                (
+                    f"Non-streaming API call timed out after {int(_elapsed)}s "
+                    f"with no response (threshold: {int(_stale_timeout)}s). "
+                    f"{_silent_hint}"
+                )
+                if _silent_hint
+                else (
+                    f"Non-streaming API call timed out after {int(_elapsed)}s "
+                    f"with no response (threshold: {int(_stale_timeout)}s)"
+                )
+            )
+            _publish_outer_error("watchdog_timeout", timeout_error)
+            cancelled_before_dispatch = dispatch_handoff.abandon(
+                cause="watchdog_timeout"
+            )
             logger.warning(
                 "Non-streaming API call stale for %.0fs (threshold %.0fs). "
                 "model=%s context=~%s tokens. Killing connection.",
@@ -586,7 +692,11 @@ def interruptible_api_call(agent, api_kwargs: dict, *, on_request_dispatch=None)
                     agent._anthropic_client.close()
                     agent._rebuild_anthropic_client()
                 else:
-                    _close_request_client_once("stale_call_kill")
+                    _close_request_client_once(
+                        "stale_call_before_dispatch"
+                        if cancelled_before_dispatch
+                        else "stale_call_in_flight"
+                    )
             except Exception:
                 pass
             agent._touch_activity(
@@ -594,21 +704,14 @@ def interruptible_api_call(agent, api_kwargs: dict, *, on_request_dispatch=None)
             )
             # Wait briefly for the thread to notice the closed connection.
             t.join(timeout=2.0)
-            if result["error"] is None and result["response"] is None:
-                if _silent_hint:
-                    result["error"] = TimeoutError(
-                        f"Non-streaming API call timed out after {int(_elapsed)}s "
-                        f"with no response (threshold: {int(_stale_timeout)}s). "
-                        f"{_silent_hint}"
-                    )
-                else:
-                    result["error"] = TimeoutError(
-                        f"Non-streaming API call timed out after {int(_elapsed)}s "
-                        f"with no response (threshold: {int(_stale_timeout)}s)"
-                    )
             break
 
         if agent._interrupt_requested:
+            interrupt_error = InterruptedError("Agent interrupted during API call")
+            _publish_outer_error("user_interrupt", interrupt_error)
+            cancelled_before_dispatch = dispatch_handoff.abandon(
+                cause="user_interrupt"
+            )
             # Force-close the in-flight worker-local HTTP connection to stop
             # token generation without poisoning the shared client used to
             # seed future retries.
@@ -617,12 +720,22 @@ def interruptible_api_call(agent, api_kwargs: dict, *, on_request_dispatch=None)
                     agent._anthropic_client.close()
                     agent._rebuild_anthropic_client()
                 else:
-                    _close_request_client_once("interrupt_abort")
+                    _close_request_client_once(
+                        "interrupt_before_dispatch"
+                        if cancelled_before_dispatch
+                        else "interrupt_in_flight"
+                    )
             except Exception:
                 pass
-            raise InterruptedError("Agent interrupted during API call")
+            raise interrupt_error
     if result["error"] is not None:
-        raise result["error"]
+        error = result["error"]
+        if isinstance(error, DispatchAttemptsClosed):
+            if error.cause == "user_interrupt":
+                raise InterruptedError("Agent interrupted during API call")
+            if error.cause == "watchdog_timeout":
+                raise TimeoutError("Provider request closed by watchdog timeout")
+        raise error
     return result["response"]
 
 
@@ -1676,16 +1789,28 @@ def interruptible_streaming_api_call(
     if agent._interrupt_requested:
         raise InterruptedError("Agent interrupted before streaming API call")
 
-    request_dispatch_notified = False
+    stream_abandoned = {"yes": False}
+    dispatch_handoff = coerce_request_dispatch_handoff(
+        on_request_dispatch,
+        interrupted=lambda: bool(agent._interrupt_requested),
+        interrupted_message="Streaming request was abandoned before provider dispatch",
+    )
+    result_lock = threading.Lock()
+    terminal_owner = {"value": None}
 
-    def _notify_request_dispatch() -> None:
-        nonlocal request_dispatch_notified
-        if on_request_dispatch is None or request_dispatch_notified:
-            return
-        if not callable(on_request_dispatch):
-            raise TypeError("on_request_dispatch must be callable")
-        on_request_dispatch()
-        request_dispatch_notified = True
+    def _publish_stream_worker_error(error: BaseException) -> None:
+        with result_lock:
+            if terminal_owner["value"] in {"user_interrupt", "watchdog_timeout"}:
+                return
+            result["error"] = error
+            terminal_owner["value"] = "worker"
+
+    def _publish_stream_outer_error(owner: str, error: BaseException) -> None:
+        with result_lock:
+            current = result["error"]
+            if current is None or isinstance(current, DispatchAttemptsClosed):
+                result["error"] = error
+                terminal_owner["value"] = owner
 
     if agent.api_mode == "codex_responses":
         # Codex streams internally via _run_codex_stream. The main dispatch
@@ -1698,7 +1823,7 @@ def interruptible_streaming_api_call(
                 return agent._interruptible_api_call(api_kwargs)
             return agent._interruptible_api_call(
                 api_kwargs,
-                on_request_dispatch=_notify_request_dispatch,
+                on_request_dispatch=dispatch_handoff,
             )
         finally:
             agent._codex_on_first_delta = None
@@ -1730,8 +1855,20 @@ def interruptible_streaming_api_call(
                 api_kwargs.pop("__bedrock_converse__", None)
                 client = _get_bedrock_runtime_client(region)
                 try:
-                    _notify_request_dispatch()
-                    raw_response = client.converse_stream(**api_kwargs)
+                    raw_response = dispatch_handoff.commit_and_claim_dispatch(
+                        lambda bound_kwargs: client.converse_stream(**bound_kwargs),
+                        provider=str(agent.provider or "unknown"),
+                        api_mode=str(agent.api_mode or "bedrock_converse"),
+                        model=str(api_kwargs.get("model") or agent.model or "unknown"),
+                        sdk_method="bedrock-runtime.converse_stream",
+                        leaf_adapter=_dispatch_leaf_identity(dispatch_handoff, client),
+                        endpoint_identity=_dispatch_endpoint_identity(
+                            dispatch_handoff, agent, client
+                        ),
+                        fallback_index=int(getattr(agent, "_fallback_index", 0) or 0),
+                        request_kwargs=api_kwargs,
+                        outcome_on_return=None,
+                    )
                 except Exception as _bedrock_exc:
                     # Evict the cached client on stale-connection failures
                     # so the outer retry loop builds a fresh client/pool.
@@ -1759,15 +1896,33 @@ def interruptible_streaming_api_call(
                     on_reasoning_delta=_on_reasoning if agent.reasoning_callback or agent.stream_delta_callback else None,
                     on_interrupt_check=lambda: agent._interrupt_requested,
                 )
+                dispatch_handoff.record_terminal_outcome("response_observed")
             except Exception as e:
-                result["error"] = e
+                if dispatch_handoff.state == "dispatch_owned":
+                    dispatch_handoff.record_terminal_outcome(
+                        "sdk_exception",
+                        type(e).__name__,
+                    )
+                _publish_stream_worker_error(e)
 
         t = threading.Thread(target=_bedrock_call, daemon=True)
         t.start()
         while t.is_alive():
             t.join(timeout=0.3)
             if agent._interrupt_requested:
-                raise InterruptedError("Agent interrupted during Bedrock API call")
+                stream_abandoned["yes"] = True
+                interrupt_error = InterruptedError(
+                    "Agent interrupted during Bedrock API call"
+                )
+                _publish_stream_outer_error("user_interrupt", interrupt_error)
+                cancelled_before_dispatch = dispatch_handoff.abandon(
+                    cause="user_interrupt"
+                )
+                raise InterruptedError(
+                    "Agent interrupted before Bedrock provider dispatch"
+                    if cancelled_before_dispatch
+                    else "Agent interrupted during Bedrock API call"
+                )
         if result["error"] is not None:
             raise result["error"]
         return result["response"]
@@ -1824,7 +1979,6 @@ def interruptible_streaming_api_call(
     # at its chunk/event loops and retry-attempt boundaries so a zombie
     # stream that later revives cleans itself up instead of firing
     # callbacks into a conversation that has already moved on.
-    stream_abandoned = {"yes": False}
     # Kill-escalation state, armed by the stale-kill block below.  A
     # stale-kill only *shuts down sockets*; if the abort primitive cannot
     # reach the worker's sockets (an unknown client shape) the worker
@@ -1900,8 +2054,25 @@ def interruptible_streaming_api_call(
         # ``request_client_holder["diag"]`` for closure access.
         _diag = agent._stream_diag_init()
         request_client_holder["diag"] = _diag
-        _notify_request_dispatch()
-        stream = request_client.chat.completions.create(**stream_kwargs)
+        stream = dispatch_handoff.commit_and_claim_dispatch(
+            lambda bound_kwargs: request_client.chat.completions.create(
+                **bound_kwargs
+            ),
+            provider=str(agent.provider or "unknown"),
+            api_mode=str(agent.api_mode or "chat_completions"),
+            model=str(stream_kwargs.get("model") or agent.model or "unknown"),
+            sdk_method="chat.completions.create",
+            leaf_adapter=_dispatch_leaf_identity(
+                dispatch_handoff,
+                request_client,
+            ),
+            endpoint_identity=_dispatch_endpoint_identity(
+                dispatch_handoff, agent, request_client
+            ),
+            fallback_index=int(getattr(agent, "_fallback_index", 0) or 0),
+            request_kwargs=stream_kwargs,
+            outcome_on_return=None,
+        )
 
         # Capture rate limit headers from the initial HTTP response.
         # The OpenAI SDK Stream object exposes the underlying httpx
@@ -2143,6 +2314,10 @@ def interruptible_streaming_api_call(
         works unchanged.
         """
         has_tool_use = False
+        # The credential/watchdog paths may replace agent._anthropic_client
+        # concurrently.  Bind validation, endpoint measurement, and invoke to
+        # one exact leaf object for this attempt.
+        anthropic_client = agent._anthropic_client
 
         # Reset stale-stream timer for this attempt
         last_chunk_time["t"] = time.time()
@@ -2150,8 +2325,29 @@ def interruptible_streaming_api_call(
         _diag = agent._stream_diag_init()
         request_client_holder["diag"] = _diag
         # Use the Anthropic SDK's streaming context manager
-        _notify_request_dispatch()
-        with agent._anthropic_client.messages.stream(**api_kwargs) as stream:
+        with ExitStack() as dispatch_stack:
+            stream = dispatch_handoff.commit_and_claim_dispatch(
+                lambda bound_kwargs: dispatch_stack.enter_context(
+                    anthropic_client.messages.stream(**bound_kwargs)
+                ),
+                provider=str(agent.provider or "unknown"),
+                api_mode=str(agent.api_mode or "anthropic_messages"),
+                model=str(api_kwargs.get("model") or agent.model or "unknown"),
+                sdk_method="anthropic.messages.stream.__enter__",
+                leaf_adapter=_dispatch_leaf_identity(
+                    dispatch_handoff,
+                    anthropic_client,
+                ),
+                endpoint_identity=_dispatch_endpoint_identity(
+                    dispatch_handoff,
+                    agent,
+                    anthropic_client,
+                    base_url=getattr(agent, "_anthropic_base_url", ""),
+                ),
+                fallback_index=int(getattr(agent, "_fallback_index", 0) or 0),
+                request_kwargs=api_kwargs,
+                outcome_on_return=None,
+            )
             # The Anthropic SDK exposes the raw httpx response on
             # ``stream.response``.  Snapshot diagnostic headers
             # immediately so they survive a stream that dies before the
@@ -2249,8 +2445,34 @@ def interruptible_streaming_api_call(
                         result["response"] = _call_anthropic()
                     else:
                         result["response"] = _call_chat_completions()
+                    dispatch_handoff.record_terminal_outcome("response_observed")
                     return  # success
+                except DispatchAttemptsClosed as e:
+                    _publish_stream_worker_error(e)
+                    return
+                except ProviderAttemptLedgerRequired as e:
+                    _publish_stream_worker_error(e)
+                    return
+                except InterruptedError as e:
+                    # The shared dispatch handoff may close future attempts
+                    # after this retry loop's flag check but before SDK claim.
+                    # Preserve the terminal interruption and never classify it
+                    # as a provider transport error or retry it again.
+                    _publish_stream_worker_error(e)
+                    return
                 except Exception as e:
+                    if dispatch_handoff.state == "dispatch_owned":
+                        dispatch_handoff.record_terminal_outcome(
+                            "sdk_exception",
+                            type(e).__name__,
+                        )
+                    if dispatch_handoff.future_attempts_closed:
+                        # An evidence-bearing handoff with max_attempts=1 has
+                        # already committed its only durable provider attempt.
+                        # Preserve the original transport error; do not enter
+                        # the helper's invisible retry loop.
+                        _publish_stream_worker_error(e)
+                        return
                     _is_timeout = isinstance(
                         e, (_httpx.ReadTimeout, _httpx.ConnectTimeout, _httpx.PoolTimeout)
                     )
@@ -2317,7 +2539,7 @@ def interruptible_streaming_api_call(
                             logger.warning(
                                 "Streaming failed after partial delivery, not retrying: %s", e
                             )
-                            result["error"] = e
+                            _publish_stream_worker_error(e)
                             return
                         # Tool call was in-flight AND error is transient:
                         # retry silently.  Clear per-attempt state so the
@@ -2464,13 +2686,13 @@ def interruptible_streaming_api_call(
                     # richer recovery: credential rotation, provider fallback,
                     # backoff, and — for "stream not supported" — will switch
                     # to non-streaming on the next attempt via _disable_streaming.
-                    result["error"] = e
+                    _publish_stream_worker_error(e)
                     return
         except InterruptedError as e:
             # The interrupt may be noticed inside the worker thread before
             # the polling loop sees it. Surface it through the normal result
             # channel so callers never miss a fast pre-retry interrupt.
-            result["error"] = e
+            _publish_stream_worker_error(e)
             return
         finally:
             _close_request_client_once("stream_request_complete")
@@ -2618,13 +2840,27 @@ def interruptible_streaming_api_call(
             kill_escalation["deadline"] = None
             if _still_pinned:
                 stream_abandoned["yes"] = True
+                timeout_error = TimeoutError(
+                    "Streaming connection stalled and could not be "
+                    f"aborted (worker did not unwind within "
+                    f"{int(_kill_grace)}s grace after socket shutdown); "
+                    "stream abandoned"
+                )
+                _publish_stream_outer_error("watchdog_timeout", timeout_error)
+                cancelled_before_dispatch = dispatch_handoff.abandon(
+                    cause="watchdog_timeout"
+                )
                 # Last-ditch abort, mirroring the interrupt path below.
                 try:
                     if agent.api_mode == "anthropic_messages":
                         agent._anthropic_client.close()
                         agent._rebuild_anthropic_client()
                     else:
-                        _close_request_client_once("stale_stream_kill_escalation")
+                        _close_request_client_once(
+                            "stale_stream_escalation_before_dispatch"
+                            if cancelled_before_dispatch
+                            else "stale_stream_escalation_in_flight"
+                        )
                 except Exception:
                     pass
                 logger.error(
@@ -2639,26 +2875,36 @@ def interruptible_streaming_api_call(
                     f"and retrying."
                 )
                 agent._touch_activity("stalled stream abandoned (kill escalation)")
-                if result["error"] is None and result["response"] is None:
-                    result["error"] = TimeoutError(
-                        "Streaming connection stalled and could not be "
-                        f"aborted (worker did not unwind within "
-                        f"{int(_kill_grace)}s grace after socket shutdown); "
-                        "stream abandoned"
-                    )
                 break
 
         if agent._interrupt_requested:
+            stream_abandoned["yes"] = True
+            interrupt_error = InterruptedError(
+                "Agent interrupted during streaming API call"
+            )
+            _publish_stream_outer_error("user_interrupt", interrupt_error)
+            cancelled_before_dispatch = dispatch_handoff.abandon(
+                cause="user_interrupt"
+            )
             try:
                 if agent.api_mode == "anthropic_messages":
                     agent._anthropic_client.close()
                     agent._rebuild_anthropic_client()
                 else:
-                    _close_request_client_once("stream_interrupt_abort")
+                    _close_request_client_once(
+                        "stream_interrupt_before_dispatch"
+                        if cancelled_before_dispatch
+                        else "stream_interrupt_in_flight"
+                    )
             except Exception:
                 pass
-            raise InterruptedError("Agent interrupted during streaming API call")
+            raise interrupt_error
     if result["error"] is not None:
+        if isinstance(result["error"], DispatchAttemptsClosed):
+            if result["error"].cause == "user_interrupt":
+                raise InterruptedError("Agent interrupted during streaming API call")
+            if result["error"].cause == "watchdog_timeout":
+                raise TimeoutError("Provider stream closed by watchdog timeout")
         if deltas_were_sent["yes"]:
             # Streaming failed AFTER some tokens were already delivered to
             # the platform.  Re-raising would let the outer retry loop make

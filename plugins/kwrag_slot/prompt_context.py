@@ -50,6 +50,7 @@ def run_conversation_with_approved_retrieval(
         "persist_user_message" in kwargs
         or "ephemeral_user_context" in kwargs
         or "ephemeral_user_context_on_request" in kwargs
+        or "ephemeral_user_context_on_outcome" in kwargs
     ):
         raise HermesSlotRetrievalError("user-message projection is owned by the retrieval seam")
     if getattr(agent, "api_mode", None) == "codex_app_server":
@@ -62,7 +63,9 @@ def run_conversation_with_approved_retrieval(
     context = _prompt_context(result)
     context_digest = "sha256:" + hashlib.sha256(context.encode("utf-8")).hexdigest()
 
-    def _commit_consumption_at_first_request() -> None:
+    def _commit_consumption_at_first_request(
+        provider_attempt_binding: dict[str, Any],
+    ) -> None:
         session_id = str(getattr(agent, "session_id", "") or "")
         if not session_id:
             raise HermesSlotRetrievalError("Hermes session identity is unavailable at dispatch")
@@ -76,12 +79,25 @@ def run_conversation_with_approved_retrieval(
         result.record_prompt_consumption(
             session_binding_digest=session_digest,
             prompt_context_digest=context_digest,
+            provider_attempt_binding=provider_attempt_binding,
+        )
+
+    def _record_first_request_outcome(
+        transport_outcome_status: str,
+        provider_attempt_binding_digest: str,
+        error_category: str | None,
+    ) -> None:
+        result.record_provider_attempt_outcome(
+            provider_attempt_binding_digest=provider_attempt_binding_digest,
+            transport_outcome_status=transport_outcome_status,
+            error_category=error_category,
         )
 
     outcome = agent.run_conversation(
         user_message,
         ephemeral_user_context=context,
         ephemeral_user_context_on_request=_commit_consumption_at_first_request,
+        ephemeral_user_context_on_outcome=_record_first_request_outcome,
         **kwargs,
     )
     if result.consumption_receipt_status != "written":
@@ -90,4 +106,11 @@ def run_conversation_with_approved_retrieval(
         )
     if not isinstance(outcome, dict):
         raise HermesSlotRetrievalError("Hermes conversation result is invalid")
+    if (
+        outcome.get("completed") is True
+        and result.provider_attempt_outcome_status != "written"
+    ):
+        raise HermesSlotRetrievalError(
+            "Hermes conversation completed without a durable provider attempt outcome"
+        )
     return outcome

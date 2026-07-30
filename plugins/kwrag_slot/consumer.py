@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import stat
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Protocol
@@ -40,6 +43,8 @@ class SlotRuntimeProtocol(Protocol):
 class ConsumptionReceiptSink(Protocol):
     def write(self, receipt: Mapping[str, Any]) -> str: ...
 
+    def write_once(self, identity: str, receipt: Mapping[str, Any]) -> str: ...
+
 
 class FileConsumptionReceiptSink:
     """Persist canonical consumption receipts using the KWRAG POSIX writer."""
@@ -51,13 +56,216 @@ class FileConsumptionReceiptSink:
             from kwrag.operation import ReceiptWriter
         except ImportError as exc:
             raise HermesSlotRetrievalError("embedded KWRAG component is unavailable") from exc
+        self._path = path
         self._writer = ReceiptWriter(path)
+        self._write_once_lock = threading.Lock()
+        self._trusted_parent_identity: tuple[int, int] | None = None
 
     def write(self, receipt: Mapping[str, Any]) -> str:
+        if os.name == "posix":
+            try:
+                opened, parent = self._open_existing_posix_receipt_parent()
+                try:
+                    info = os.fstat(parent)
+                    parent_identity = (info.st_dev, info.st_ino)
+                finally:
+                    for descriptor in reversed(opened):
+                        os.close(descriptor)
+            except OSError as exc:
+                raise HermesSlotRetrievalError(
+                    "consumption receipt parent is not an approved POSIX ledger boundary"
+                ) from exc
+        else:
+            parent_identity = None
         result = self._writer.write(dict(receipt))
         if result.status != "written":
             raise HermesSlotRetrievalError("consumption receipt was not written")
+        if parent_identity is not None:
+            if (
+                self._trusted_parent_identity is not None
+                and self._trusted_parent_identity != parent_identity
+            ):
+                raise HermesSlotRetrievalError(
+                    "consumption receipt parent identity changed"
+                )
+            self._trusted_parent_identity = parent_identity
         return result.digest
+
+    def write_once(self, identity: str, receipt: Mapping[str, Any]) -> str:
+        identity_digest = _digest(identity, "receipt identity")
+        raw = canonical_json_bytes(dict(receipt)) + b"\n"
+        receipt_digest = "sha256:" + hashlib.sha256(raw[:-1]).hexdigest()
+        outcome_root = self._path.parent / f"{self._path.name}.outcomes"
+        outcome_name = f"{identity_digest.removeprefix('sha256:')}.json"
+        if os.name != "posix":
+            raise HermesSlotRetrievalError(
+                "provider attempt outcome persistence requires the POSIX slot runtime"
+            )
+        try:
+            with self._write_once_lock:
+                self._write_once_posix(outcome_root, outcome_name, raw)
+        except HermesSlotRetrievalError:
+            raise
+        except OSError as exc:
+            raise HermesSlotRetrievalError(
+                "provider attempt outcome could not be persisted safely"
+            ) from exc
+        return receipt_digest
+
+    @staticmethod
+    def _write_all(descriptor: int, raw: bytes) -> None:
+        view = memoryview(raw)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError("provider attempt outcome made no forward progress")
+            view = view[written:]
+
+    @staticmethod
+    def _read_all(descriptor: int) -> bytes:
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(descriptor, 64 * 1024)
+            if not chunk:
+                return b"".join(chunks)
+            chunks.append(chunk)
+
+    @staticmethod
+    def _verify_outcome_file(descriptor: int, *, require_owner_mode: bool) -> None:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise OSError("provider attempt outcome is not a single-link regular file")
+        if require_owner_mode and (
+            info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600
+        ):
+            raise OSError("provider attempt outcome owner or mode is invalid")
+
+    def _open_existing_posix_receipt_parent(self) -> tuple[list[int], int]:
+        if not self._path.parent.is_absolute():
+            raise OSError("POSIX receipt parent path must be absolute")
+        if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
+            raise OSError("POSIX receipt parent requires no-follow opens")
+        directory_flags = (
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+        )
+        opened: list[int] = []
+        try:
+            current = os.open("/", directory_flags)
+            opened.append(current)
+            for part in self._path.parent.parts[1:]:
+                following = os.open(part, directory_flags, dir_fd=current)
+                info = os.fstat(following)
+                if not stat.S_ISDIR(info.st_mode) or info.st_nlink < 1:
+                    os.close(following)
+                    raise OSError("consumption receipt parent identity is invalid")
+                opened.append(following)
+                current = following
+            parent_info = os.fstat(current)
+            if (
+                parent_info.st_uid != os.geteuid()
+                or stat.S_IMODE(parent_info.st_mode) != 0o700
+            ):
+                raise OSError("consumption receipt parent owner or mode is invalid")
+            return opened, current
+        except BaseException:
+            for descriptor in reversed(opened):
+                os.close(descriptor)
+            raise
+
+    def _write_once_posix(
+        self,
+        outcome_root: Path,
+        outcome_name: str,
+        raw: bytes,
+    ) -> None:
+        directory_flags = (
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+        )
+        if self._trusted_parent_identity is None:
+            raise OSError("provider attempt outcome has no trusted receipt parent")
+        opened, current = self._open_existing_posix_receipt_parent()
+        try:
+            current_info = os.fstat(current)
+            if (current_info.st_dev, current_info.st_ino) != (
+                self._trusted_parent_identity
+            ):
+                raise OSError("consumption receipt parent was substituted")
+
+            outcome_root_created = False
+            try:
+                os.mkdir(outcome_root.name, 0o700, dir_fd=current)
+                outcome_root_created = True
+            except FileExistsError:
+                pass
+            outcome_directory = os.open(
+                outcome_root.name,
+                directory_flags,
+                dir_fd=current,
+            )
+            opened.append(outcome_directory)
+            root_info = os.fstat(outcome_directory)
+            if (
+                not stat.S_ISDIR(root_info.st_mode)
+                or root_info.st_nlink < 1
+                or root_info.st_uid != os.geteuid()
+                or stat.S_IMODE(root_info.st_mode) != 0o700
+            ):
+                raise OSError("provider attempt outcome directory identity is invalid")
+            if outcome_root_created:
+                os.fsync(current)
+
+            flags = (
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | os.O_CLOEXEC
+                | os.O_NOFOLLOW
+            )
+            try:
+                descriptor = os.open(
+                    outcome_name,
+                    flags,
+                    0o600,
+                    dir_fd=outcome_directory,
+                )
+            except FileExistsError:
+                existing_info = os.stat(
+                    outcome_name,
+                    dir_fd=outcome_directory,
+                    follow_symlinks=False,
+                )
+                if (
+                    not stat.S_ISREG(existing_info.st_mode)
+                    or existing_info.st_nlink != 1
+                    or existing_info.st_uid != os.geteuid()
+                    or stat.S_IMODE(existing_info.st_mode) != 0o600
+                ):
+                    raise OSError("existing provider attempt outcome identity is invalid")
+                descriptor = os.open(
+                    outcome_name,
+                    os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                    dir_fd=outcome_directory,
+                )
+                try:
+                    self._verify_outcome_file(descriptor, require_owner_mode=True)
+                    existing = self._read_all(descriptor)
+                finally:
+                    os.close(descriptor)
+                if existing != raw:
+                    raise HermesSlotRetrievalError(
+                        "provider attempt outcome identity collision"
+                    )
+                return
+            try:
+                self._verify_outcome_file(descriptor, require_owner_mode=True)
+                self._write_all(descriptor, raw)
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            os.fsync(outcome_directory)
+        finally:
+            for descriptor in reversed(opened):
+                os.close(descriptor)
 
 
 def _digest(value: object, field: str) -> str:
@@ -122,6 +330,9 @@ class HermesSlotRetrievalResult:
     consumption_receipt: dict[str, Any] | None = None
     consumption_receipt_digest: str | None = None
     consumption_receipt_status: str = "pending"
+    provider_attempt_outcome_receipt: dict[str, Any] | None = None
+    provider_attempt_outcome_receipt_digest: str | None = None
+    provider_attempt_outcome_status: str = "pending"
     _receipt_sink: ConsumptionReceiptSink | None = field(repr=False, compare=False, default=None)
 
     def _verified_evidence(self) -> tuple[tuple[dict[str, Any], ...], dict[str, Any]]:
@@ -166,21 +377,105 @@ class HermesSlotRetrievalResult:
         *,
         session_binding_digest: str,
         prompt_context_digest: str,
+        provider_attempt_binding: Mapping[str, Any],
     ) -> str:
         verified_results, verified_receipt = self._verified_evidence()
         if self.consumption_receipt_status != "pending" or self.consumption_receipt is not None:
             raise HermesSlotRetrievalError("retrieval evidence was already consumed")
         if verified_receipt.get("result_status") != "hits" or not verified_results:
             raise HermesSlotRetrievalError("retrieval evidence has no verified hits to consume")
+        if not isinstance(provider_attempt_binding, Mapping):
+            raise HermesSlotRetrievalError("provider attempt binding is unavailable")
+        required_attempt_fields = {
+            "schema",
+            "providerAttemptId",
+            "configuredProvider",
+            "configuredModel",
+            "provider",
+            "apiMode",
+            "model",
+            "sdkMethod",
+            "leafAdapter",
+            "endpointIdentity",
+            "fallbackIndex",
+            "configuredRouteChainDigest",
+            "finalRequestKwargsDigest",
+            "providerAttemptBindingDigest",
+        }
+        if set(provider_attempt_binding) != required_attempt_fields:
+            raise HermesSlotRetrievalError("provider attempt binding fields are invalid")
+        binding = dict(provider_attempt_binding)
+        binding_digest = _digest(
+            binding.pop("providerAttemptBindingDigest", None),
+            "provider attempt binding digest",
+        )
+        computed_binding_digest = "sha256:" + hashlib.sha256(
+            canonical_json_bytes(binding)
+        ).hexdigest()
+        if binding_digest != computed_binding_digest:
+            raise HermesSlotRetrievalError("provider attempt binding digest is not bound")
+        if binding.get("schema") != "jitech-provider-sdk-request-attempt-binding/v1":
+            raise HermesSlotRetrievalError("provider attempt binding schema is invalid")
+        if binding.get("providerAttemptId") != 1:
+            raise HermesSlotRetrievalError("retrieval evidence requires provider attempt 1")
+        for field_name in (
+            "configuredProvider",
+            "configuredModel",
+            "provider",
+            "apiMode",
+            "model",
+            "sdkMethod",
+            "leafAdapter",
+            "endpointIdentity",
+        ):
+            if not isinstance(binding.get(field_name), str) or not binding[field_name]:
+                raise HermesSlotRetrievalError(
+                    f"provider attempt {field_name} is invalid"
+                )
+        fallback_index = binding.get("fallbackIndex")
+        if (
+            isinstance(fallback_index, bool)
+            or not isinstance(fallback_index, int)
+            or fallback_index < 0
+        ):
+            raise HermesSlotRetrievalError(
+                "provider attempt fallbackIndex is invalid"
+            )
+        request_kwargs_digest = _digest(
+            binding.get("finalRequestKwargsDigest"),
+            "final provider request kwargs digest",
+        )
+        route_chain_digest = _digest(
+            binding.get("configuredRouteChainDigest"),
+            "configured provider route chain digest",
+        )
         receipt = {
             "schema_version": "hermes-kwrag-consumption-receipt-v1",
             "consumer_family": "hermes",
-            "consumption_status": "assembled_into_ephemeral_user_context",
+            "consumption_status": "evidence_dispatch_handoff_committed",
+            "evidence_projection_status": "verified_hits",
+            "dispatch_handoff_status": "evidence_dispatch_handoff_committed",
+            "transport_outcome_status": "unknown",
+            "provider_attestation_status": "unavailable",
+            "billing_status": "unavailable",
             "component_digest": verified_receipt["component_digest"],
             "runtime_binding_digest": verified_receipt["runtime_binding_digest"],
             "index_manifest": verified_receipt["index_manifest"],
             "session_binding_digest": _digest(session_binding_digest, "session binding digest"),
             "prompt_context_digest": _digest(prompt_context_digest, "prompt context digest"),
+            "provider_attempt_id": 1,
+            "provider_attempt_binding_digest": binding_digest,
+            "provider_request_kwargs_digest": request_kwargs_digest,
+            "configured_route_chain_digest": route_chain_digest,
+            "configured_provider": binding["configuredProvider"],
+            "configured_model": binding["configuredModel"],
+            "provider": binding["provider"],
+            "api_mode": binding["apiMode"],
+            "model": binding["model"],
+            "sdk_method": binding["sdkMethod"],
+            "leaf_adapter": binding["leafAdapter"],
+            "endpoint_identity": binding["endpointIdentity"],
+            "fallback_index": fallback_index,
             "request_id": verified_receipt["request_id"],
             "operation_id": verified_receipt["operation_id"],
             "run_id": verified_receipt["run_id"],
@@ -200,17 +495,92 @@ class HermesSlotRetrievalResult:
         self.consumption_receipt_status = "written"
         return receipt_digest
 
+    def record_provider_attempt_outcome(
+        self,
+        *,
+        provider_attempt_binding_digest: str,
+        transport_outcome_status: str,
+        error_category: str | None = None,
+    ) -> str:
+        if self.consumption_receipt_status != "written" or self.consumption_receipt is None:
+            raise HermesSlotRetrievalError("provider attempt outcome has no dispatch receipt")
+        if self.provider_attempt_outcome_status != "pending":
+            raise HermesSlotRetrievalError("provider attempt outcome was already recorded")
+        binding_digest = _digest(
+            provider_attempt_binding_digest,
+            "provider attempt binding digest",
+        )
+        if binding_digest != self.consumption_receipt.get(
+            "provider_attempt_binding_digest"
+        ):
+            raise HermesSlotRetrievalError("provider attempt outcome binding mismatch")
+        if transport_outcome_status not in {
+            "response_observed",
+            "sdk_exception",
+            "interrupted",
+            "unknown",
+        }:
+            raise HermesSlotRetrievalError("provider attempt outcome status is invalid")
+        if error_category is not None and (
+            not isinstance(error_category, str) or not error_category
+        ):
+            raise HermesSlotRetrievalError("provider attempt error category is invalid")
+        if (
+            transport_outcome_status == "response_observed"
+            and error_category is not None
+        ):
+            raise HermesSlotRetrievalError(
+                "observed provider response must not carry an error category"
+            )
+        receipt = {
+            "schema_version": "hermes-kwrag-provider-attempt-outcome-receipt-v1",
+            "consumer_family": "hermes",
+            "provider_attempt_id": 1,
+            "provider_attempt_binding_digest": binding_digest,
+            "transport_outcome_status": transport_outcome_status,
+            "error_category": error_category,
+        }
+        receipt_digest = "sha256:" + hashlib.sha256(
+            canonical_json_bytes(receipt)
+        ).hexdigest()
+        if self._receipt_sink is None:
+            raise HermesSlotRetrievalError("provider attempt outcome sink is unavailable")
+        write_once = getattr(self._receipt_sink, "write_once", None)
+        if not callable(write_once):
+            raise HermesSlotRetrievalError(
+                "provider attempt outcome sink is not insert-once capable"
+            )
+        written_digest = write_once(binding_digest, receipt)
+        if written_digest != receipt_digest:
+            raise HermesSlotRetrievalError(
+                "written provider attempt outcome receipt digest is not bound"
+            )
+        self.provider_attempt_outcome_receipt = receipt
+        self.provider_attempt_outcome_receipt_digest = receipt_digest
+        self.provider_attempt_outcome_status = "written"
+        return receipt_digest
+
     def content_free_attestation(self) -> dict[str, Any]:
         """Project exact result/consumption lineage for an enabled canary."""
 
         _verified_results, verified_receipt = self._verified_evidence()
         result_status = verified_receipt.get("result_status")
         if result_status == "zero_hits":
-            linkage_status = "not_consumed_zero_hits"
+            projection_status = "verified_zero_hits"
+            dispatch_handoff_status = "not_committed"
+            transport_outcome_status = "not_attempted"
         elif self.consumption_receipt_status == "written":
-            linkage_status = "complete"
+            projection_status = "verified_hits"
+            dispatch_handoff_status = "evidence_dispatch_handoff_committed"
+            transport_outcome_status = (
+                self.provider_attempt_outcome_receipt.get("transport_outcome_status")
+                if self.provider_attempt_outcome_receipt is not None
+                else "unknown"
+            )
         else:
-            linkage_status = "not_consumed"
+            projection_status = "verified_hits"
+            dispatch_handoff_status = "not_committed"
+            transport_outcome_status = "not_attempted"
         return {
             "schema": "jitech-hermes-kwrag-consumption-attestation/v1",
             "componentDigest": verified_receipt["component_digest"],
@@ -220,7 +590,24 @@ class HermesSlotRetrievalResult:
             "operationReceiptDigest": verified_receipt["operation_receipt_digest"],
             "resultReceiptDigest": self.result_receipt_digest,
             "consumptionReceiptDigest": self.consumption_receipt_digest,
-            "linkageStatus": linkage_status,
+            "providerAttemptId": (
+                self.consumption_receipt.get("provider_attempt_id")
+                if self.consumption_receipt is not None
+                else None
+            ),
+            "providerAttemptBindingDigest": (
+                self.consumption_receipt.get("provider_attempt_binding_digest")
+                if self.consumption_receipt is not None
+                else None
+            ),
+            "providerAttemptOutcomeReceiptDigest": (
+                self.provider_attempt_outcome_receipt_digest
+            ),
+            "evidenceProjectionStatus": projection_status,
+            "dispatchHandoffStatus": dispatch_handoff_status,
+            "transportOutcomeStatus": transport_outcome_status,
+            "providerAttestationStatus": "unavailable",
+            "billingStatus": "unavailable",
         }
 
 

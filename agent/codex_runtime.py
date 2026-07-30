@@ -23,6 +23,12 @@ import time
 from types import SimpleNamespace
 from typing import Any, Dict, List
 
+from agent.request_dispatch import (
+    coerce_request_dispatch_handoff,
+    endpoint_identity_for_dispatch,
+    require_authoritative_leaf_adapter,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -444,16 +450,11 @@ def run_codex_stream(
     )
     # Accumulate streamed text so callers / compat shims can read it.
     agent._codex_streamed_text_parts: list = []
-    request_dispatch_notified = False
-
-    def _notify_request_dispatch() -> None:
-        nonlocal request_dispatch_notified
-        if on_request_dispatch is None or request_dispatch_notified:
-            return
-        if not callable(on_request_dispatch):
-            raise TypeError("on_request_dispatch must be callable")
-        on_request_dispatch()
-        request_dispatch_notified = True
+    dispatch_handoff = coerce_request_dispatch_handoff(
+        on_request_dispatch,
+        interrupted=lambda: bool(agent._interrupt_requested),
+        interrupted_message="Agent interrupted before Codex provider dispatch",
+    )
 
     def _on_text_delta(text: str) -> None:
         agent._codex_streamed_text_parts.append(text)
@@ -478,10 +479,31 @@ def run_codex_stream(
         stream_kwargs["stream"] = True
 
         try:
-            _notify_request_dispatch()
-            event_stream = active_client.responses.create(**stream_kwargs)
+            event_stream = dispatch_handoff.commit_and_claim_dispatch(
+                lambda bound_kwargs: active_client.responses.create(**bound_kwargs),
+                provider=str(agent.provider or "unknown"),
+                api_mode=str(agent.api_mode or "codex_responses"),
+                model=str(stream_kwargs.get("model") or agent.model or "unknown"),
+                sdk_method="responses.create",
+                leaf_adapter=(
+                    require_authoritative_leaf_adapter(active_client)
+                    if dispatch_handoff.requires_exact_provider_attempt_binding
+                    else f"{type(active_client).__module__}.{type(active_client).__qualname__}"
+                ),
+                endpoint_identity=endpoint_identity_for_dispatch(
+                    active_client,
+                    provider=str(agent.provider or "unknown"),
+                    configured_base_url=getattr(agent, "base_url", ""),
+                    require_exact=(
+                        dispatch_handoff.requires_exact_provider_attempt_binding
+                    ),
+                ),
+                fallback_index=int(getattr(agent, "_fallback_index", 0) or 0),
+                request_kwargs=stream_kwargs,
+                outcome_on_return=None,
+            )
         except (_httpx.RemoteProtocolError, _httpx.ReadTimeout, _httpx.ConnectError, ConnectionError) as exc:
-            if attempt < max_stream_retries:
+            if attempt < max_stream_retries and not dispatch_handoff.future_attempts_closed:
                 logger.debug(
                     "Codex Responses stream connect failed (attempt %s/%s); retrying. %s error=%s",
                     attempt + 1, max_stream_retries + 1,
@@ -507,7 +529,7 @@ def run_codex_stream(
                     interrupt_check=_interrupt_check,
                 )
             except (_httpx.RemoteProtocolError, _httpx.ReadTimeout, _httpx.ConnectError, ConnectionError) as exc:
-                if attempt < max_stream_retries:
+                if attempt < max_stream_retries and not dispatch_handoff.future_attempts_closed:
                     logger.debug(
                         "Codex Responses stream transport failed mid-iteration "
                         "(attempt %s/%s); retrying. %s error=%s",
