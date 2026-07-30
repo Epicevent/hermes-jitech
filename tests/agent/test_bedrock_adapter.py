@@ -1496,6 +1496,44 @@ class TestInvalidateRuntimeClient:
 
         invalidate.assert_called_once_with("eu-west-1", expected_client=client)
 
+    def test_lazy_stream_failure_invalidates_only_the_exact_failing_client(self):
+        from agent.chat_completion_helpers import interruptible_streaming_api_call
+
+        stale = ConnectionError("stale lazy bedrock event stream")
+        client = MagicMock()
+        client.converse_stream.return_value = {"stream": object()}
+        invalidate = MagicMock(return_value=True)
+        with (
+            patch(
+                "agent.bedrock_adapter._get_bedrock_runtime_client",
+                return_value=client,
+            ),
+            patch(
+                "agent.bedrock_adapter.stream_converse_with_callbacks",
+                side_effect=stale,
+            ),
+            patch(
+                "agent.bedrock_adapter.is_stale_connection_error",
+                return_value=True,
+            ),
+            patch(
+                "agent.bedrock_adapter.invalidate_runtime_client",
+                invalidate,
+            ),
+            pytest.raises(ConnectionError, match="stale lazy bedrock event stream"),
+        ):
+            interruptible_streaming_api_call(
+                self._dispatch_agent(),
+                {
+                    "model": "anthropic.claude-test-v1:0",
+                    "messages": [],
+                    "__bedrock_region__": "eu-west-1",
+                    "__bedrock_converse__": True,
+                },
+            )
+
+        invalidate.assert_called_once_with("eu-west-1", expected_client=client)
+
 
 class TestIsStaleConnectionError:
     """Classifier that decides whether an exception warrants client eviction."""

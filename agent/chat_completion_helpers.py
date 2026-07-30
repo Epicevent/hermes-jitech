@@ -1897,13 +1897,24 @@ def interruptible_streaming_api_call(
                     _fire_first()
                     agent._fire_reasoning_delta(text)
 
-                result["response"] = stream_converse_with_callbacks(
-                    raw_response,
-                    on_text_delta=_on_text if agent._has_stream_consumers() else None,
-                    on_tool_start=_on_tool,
-                    on_reasoning_delta=_on_reasoning if agent.reasoning_callback or agent.stream_delta_callback else None,
-                    on_interrupt_check=lambda: agent._interrupt_requested,
-                )
+                try:
+                    result["response"] = stream_converse_with_callbacks(
+                        raw_response,
+                        on_text_delta=(
+                            _on_text if agent._has_stream_consumers() else None
+                        ),
+                        on_tool_start=_on_tool,
+                        on_reasoning_delta=(
+                            _on_reasoning
+                            if agent.reasoning_callback or agent.stream_delta_callback
+                            else None
+                        ),
+                        on_interrupt_check=lambda: agent._interrupt_requested,
+                    )
+                except Exception as _bedrock_stream_exc:
+                    if is_stale_connection_error(_bedrock_stream_exc):
+                        invalidate_runtime_client(region, expected_client=client)
+                    raise
                 dispatch_handoff.record_terminal_outcome("response_observed")
             except Exception as e:
                 if dispatch_handoff.state == "dispatch_owned":

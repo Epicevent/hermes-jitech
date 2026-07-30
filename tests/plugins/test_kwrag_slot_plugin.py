@@ -722,6 +722,85 @@ def test_provider_outcome_sink_is_insert_once_and_conflicts_fail_closed(
     assert outcome_path.read_bytes() == canonical_json_bytes(receipt) + b"\n"
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX atomic outcome contract")
+def test_provider_outcome_publication_failure_never_exposes_partial_final_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from plugins.kwrag_slot.consumer import (
+        FileConsumptionReceiptSink,
+        HermesSlotRetrievalError,
+    )
+
+    sink = FileConsumptionReceiptSink(tmp_path / "atomic-failure.jsonl")
+    sink.write({"schema_version": "fixture-ledger-anchor-v1"})
+    identity = "sha256:" + "a" * 64
+    receipt = {"schema_version": "fixture-outcome-v1", "status": "unknown"}
+    outcome_root = tmp_path / "atomic-failure.jsonl.outcomes"
+    outcome_path = outcome_root / ("a" * 64 + ".json")
+
+    def fail_before_publication(*_args) -> None:
+        raise OSError("simulated crash before atomic publication")
+
+    monkeypatch.setattr(sink, "_rename_noreplace", fail_before_publication)
+    with pytest.raises(HermesSlotRetrievalError, match="persisted safely"):
+        sink.write_once(identity, receipt)
+
+    assert not outcome_path.exists()
+    assert list(outcome_root.iterdir()) == []
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX atomic outcome contract")
+def test_concurrent_provider_outcome_publication_has_one_complete_winner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from plugins.kwrag_slot.consumer import FileConsumptionReceiptSink
+
+    receipt_path = tmp_path / "atomic-concurrent.jsonl"
+    first = FileConsumptionReceiptSink(receipt_path)
+    second = FileConsumptionReceiptSink(receipt_path)
+    first.write({"schema_version": "fixture-ledger-anchor-v1", "writer": 1})
+    second.write({"schema_version": "fixture-ledger-anchor-v1", "writer": 2})
+    identity = "sha256:" + "b" * 64
+    receipt = {"schema_version": "fixture-outcome-v1", "status": "unknown"}
+    expected_digest = "sha256:" + hashlib.sha256(canonical_json_bytes(receipt)).hexdigest()
+    barrier = threading.Barrier(2)
+    original_rename = first._rename_noreplace
+
+    def race_rename(parent: int, source: str, destination: str) -> None:
+        barrier.wait(timeout=5)
+        original_rename(parent, source, destination)
+
+    monkeypatch.setattr(first, "_rename_noreplace", race_rename)
+    monkeypatch.setattr(second, "_rename_noreplace", race_rename)
+    results: list[str] = []
+    errors: list[BaseException] = []
+
+    def publish(sink: FileConsumptionReceiptSink) -> None:
+        try:
+            results.append(sink.write_once(identity, receipt))
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    workers = [
+        threading.Thread(target=publish, args=(sink,), daemon=True)
+        for sink in (first, second)
+    ]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=10)
+
+    assert all(not worker.is_alive() for worker in workers)
+    assert errors == []
+    assert results == [expected_digest, expected_digest]
+    outcome_root = tmp_path / "atomic-concurrent.jsonl.outcomes"
+    outcome_path = outcome_root / ("b" * 64 + ".json")
+    assert outcome_path.read_bytes() == canonical_json_bytes(receipt) + b"\n"
+    assert [path.name for path in outcome_root.iterdir()] == [outcome_path.name]
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX outcome content contract")
 def test_provider_outcome_publication_rejects_same_inode_content_mutation(
     tmp_path: Path,
@@ -782,12 +861,12 @@ def test_provider_outcome_replay_rejects_same_inode_content_mutation(
     outcome_path = (
         tmp_path / "outcome-in-place-replay.jsonl.outcomes" / ("2" * 64 + ".json")
     )
-    original_read_all = sink._read_all
+    original_read_bounded = sink._read_bounded
     read_count = 0
 
-    def mutate_after_initial_replay_read(descriptor: int) -> bytes:
+    def mutate_after_initial_replay_read(descriptor: int, limit: int) -> bytes:
         nonlocal read_count
-        raw = original_read_all(descriptor)
+        raw = original_read_bounded(descriptor, limit)
         read_count += 1
         if read_count == 1:
             replacement = os.open(outcome_path, os.O_WRONLY | os.O_CLOEXEC)
@@ -798,13 +877,84 @@ def test_provider_outcome_replay_rejects_same_inode_content_mutation(
                 os.close(replacement)
         return raw
 
-    monkeypatch.setattr(sink, "_read_all", mutate_after_initial_replay_read)
+    monkeypatch.setattr(sink, "_read_bounded", mutate_after_initial_replay_read)
     with pytest.raises(HermesSlotRetrievalError, match="persisted safely") as caught:
         sink.write_once(identity, receipt)
 
-    assert read_count == 2
+    assert read_count == 1
     assert isinstance(caught.value.__cause__, OSError)
     assert "public bytes changed" in str(caught.value.__cause__)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX outcome replay size contract")
+def test_provider_outcome_replay_rejects_oversized_file_before_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from plugins.kwrag_slot.consumer import (
+        FileConsumptionReceiptSink,
+        HermesSlotRetrievalError,
+    )
+
+    sink = FileConsumptionReceiptSink(tmp_path / "outcome-oversized-replay.jsonl")
+    sink.write({"schema_version": "fixture-ledger-anchor-v1"})
+    identity = "sha256:" + "e" * 64
+    receipt = {"schema_version": "fixture-outcome-v1", "status": "unknown"}
+    sink.write_once(identity, receipt)
+    outcome_path = (
+        tmp_path / "outcome-oversized-replay.jsonl.outcomes" / ("e" * 64 + ".json")
+    )
+    with outcome_path.open("ab") as outcome_file:
+        outcome_file.write(b"X" * (1024 * 1024))
+        outcome_file.flush()
+        os.fsync(outcome_file.fileno())
+    bounded_read = MagicMock(side_effect=AssertionError("oversized replay was read"))
+    monkeypatch.setattr(sink, "_read_bounded", bounded_read)
+
+    with pytest.raises(HermesSlotRetrievalError, match="identity collision"):
+        sink.write_once(identity, receipt)
+
+    bounded_read.assert_not_called()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX outcome replay size contract")
+def test_provider_outcome_replay_growth_after_size_check_is_bounded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from plugins.kwrag_slot.consumer import (
+        FileConsumptionReceiptSink,
+        HermesSlotRetrievalError,
+    )
+
+    sink = FileConsumptionReceiptSink(tmp_path / "outcome-growing-replay.jsonl")
+    sink.write({"schema_version": "fixture-ledger-anchor-v1"})
+    identity = "sha256:" + "f" * 64
+    receipt = {"schema_version": "fixture-outcome-v1", "status": "unknown"}
+    sink.write_once(identity, receipt)
+    outcome_path = (
+        tmp_path / "outcome-growing-replay.jsonl.outcomes" / ("f" * 64 + ".json")
+    )
+    expected = canonical_json_bytes(receipt) + b"\n"
+    original_read_bounded = sink._read_bounded
+    observed: dict[str, int] = {}
+
+    def grow_then_read(descriptor: int, limit: int) -> bytes:
+        with outcome_path.open("ab") as outcome_file:
+            outcome_file.write(b"X" * (1024 * 1024))
+            outcome_file.flush()
+            os.fsync(outcome_file.fileno())
+        raw = original_read_bounded(descriptor, limit)
+        observed["limit"] = limit
+        observed["read"] = len(raw)
+        return raw
+
+    monkeypatch.setattr(sink, "_read_bounded", grow_then_read)
+
+    with pytest.raises(HermesSlotRetrievalError, match="identity collision"):
+        sink.write_once(identity, receipt)
+
+    assert observed == {"limit": len(expected) + 1, "read": len(expected) + 1}
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX outcome linearization contract")
@@ -894,6 +1044,40 @@ def test_consumption_receipt_rejects_same_inode_pwrite_after_append_read(
 
     assert open_count == 2
     assert receipt_path.read_bytes() == original
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX receipt prefix contract")
+@pytest.mark.parametrize("mutation", ["truncate", "rewrite"])
+def test_consumption_receipt_rejects_changed_published_prefix_before_append(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    from plugins.kwrag_slot.consumer import (
+        FileConsumptionReceiptSink,
+        HermesSlotRetrievalError,
+    )
+
+    receipt_path = tmp_path / f"receipt-prefix-{mutation}.jsonl"
+    sink = FileConsumptionReceiptSink(receipt_path)
+    sink.write({"schema_version": "fixture-first-receipt-v1"})
+    original = receipt_path.read_bytes()
+    if mutation == "truncate":
+        with receipt_path.open("r+b") as receipt_file:
+            receipt_file.truncate(max(0, len(original) - 1))
+            receipt_file.flush()
+            os.fsync(receipt_file.fileno())
+    else:
+        with receipt_path.open("r+b") as receipt_file:
+            receipt_file.write(b"X")
+            receipt_file.flush()
+            os.fsync(receipt_file.fileno())
+    tampered = receipt_path.read_bytes()
+
+    with pytest.raises(HermesSlotRetrievalError, match="approved POSIX ledger"):
+        sink.write({"schema_version": "fixture-second-receipt-v1"})
+
+    assert receipt_path.read_bytes() == tampered
+    assert b"fixture-second-receipt-v1" not in tampered
 
 
 @pytest.mark.skipif(os.name == "posix", reason="non-POSIX fail-closed contract")
@@ -1242,19 +1426,19 @@ def test_provider_outcome_file_swap_during_replay_fails_closed(
     outcome_root = tmp_path / "outcome-replay-swap.jsonl.outcomes"
     outcome_path = outcome_root / ("6" * 64 + ".json")
     detached_path = outcome_root / "detached-replay.json"
-    original_read_all = sink._read_all
+    original_read_bounded = sink._read_bounded
     swapped = False
 
-    def swap_at_outcome_read(descriptor: int) -> bytes:
+    def swap_at_outcome_read(descriptor: int, limit: int) -> bytes:
         nonlocal swapped
         if not swapped:
             swapped = True
             outcome_path.rename(detached_path)
             outcome_path.write_bytes(b"")
             outcome_path.chmod(0o600)
-        return original_read_all(descriptor)
+        return original_read_bounded(descriptor, limit)
 
-    monkeypatch.setattr(sink, "_read_all", swap_at_outcome_read)
+    monkeypatch.setattr(sink, "_read_bounded", swap_at_outcome_read)
     with pytest.raises(HermesSlotRetrievalError, match="persisted safely"):
         sink.write_once(identity, receipt)
 
@@ -1280,14 +1464,14 @@ def test_provider_outcome_file_swap_after_replay_read_fails_closed(
     outcome_root = tmp_path / "outcome-replay-late-swap.jsonl.outcomes"
     outcome_path = outcome_root / ("7" * 64 + ".json")
     detached_path = outcome_root / "detached-late-replay.json"
-    original_read_all = sink._read_all
+    original_read_bounded = sink._read_bounded
     original_assert_directory = sink._assert_named_directory_identity
     replay_read_finished = False
     swapped = False
 
-    def observe_replay_read(descriptor: int) -> bytes:
+    def observe_replay_read(descriptor: int, limit: int) -> bytes:
         nonlocal replay_read_finished
-        raw = original_read_all(descriptor)
+        raw = original_read_bounded(descriptor, limit)
         replay_read_finished = True
         return raw
 
@@ -1300,7 +1484,7 @@ def test_provider_outcome_file_swap_after_replay_read_fails_closed(
             outcome_path.chmod(0o600)
         original_assert_directory(*args, **kwargs)
 
-    monkeypatch.setattr(sink, "_read_all", observe_replay_read)
+    monkeypatch.setattr(sink, "_read_bounded", observe_replay_read)
     monkeypatch.setattr(
         sink,
         "_assert_named_directory_identity",

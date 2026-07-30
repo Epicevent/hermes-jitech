@@ -53,6 +53,27 @@ def test_product_revision_has_no_retrieval_evidence_dispatch_adapter() -> None:
         require_retrieval_evidence_dispatch_capability(SimpleNamespace())
 
 
+def test_ephemeral_context_requires_receipt_callbacks_before_conversation_entry() -> None:
+    from agent.conversation_loop import run_conversation
+
+    agent = SimpleNamespace(
+        api_mode="chat_completions",
+        _ensure_db_session=MagicMock(),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="requires request commit and outcome callbacks",
+    ):
+        run_conversation(
+            agent,
+            "fixture question",
+            ephemeral_user_context="private retrieval evidence",
+        )
+
+    agent._ensure_db_session.assert_not_called()
+
+
 def test_abandon_wins_before_commit() -> None:
     receipt_called = threading.Event()
     sdk_called = threading.Event()
@@ -734,6 +755,30 @@ def test_transport_secret_in_final_kwargs_blocks_receipt_and_sdk(forbidden) -> N
 
     assert receipt_calls == 0
     assert sdk_calls == 0
+
+
+def test_ordinary_dispatch_does_not_project_or_reject_transport_credentials() -> None:
+    observed: list[dict] = []
+    handoff = RequestDispatchHandoff(
+        None,
+        interrupted=lambda: False,
+        interrupted_message="request abandoned before dispatch",
+    )
+    request = {
+        "model": "fixture-model",
+        "messages": [],
+        "extra_headers": {"Authorization": "Bearer ordinary-call-token"},
+    }
+
+    response = handoff.commit_and_claim_dispatch(
+        lambda kwargs: observed.append(kwargs) or "ok",
+        request_kwargs=request,
+    )
+
+    assert response == "ok"
+    assert observed == [request]
+    assert handoff.requires_exact_provider_attempt_binding is False
+    assert handoff.provider_call_id is None
 
 
 def test_receipt_callback_gets_an_isolated_request_projection() -> None:

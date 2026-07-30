@@ -678,7 +678,9 @@ def run_conversation(
             the in-memory conversation, persisted transcript, or returned
             message history. Persistent Codex app-server sessions reject this
             option because their reused provider thread cannot provide that
-            request-only guarantee.
+            request-only guarantee. Nonempty context requires both receipt
+            callbacks below; unledgered context is rejected before any
+            conversation side effect.
         ephemeral_user_context_on_request: Optional one-shot commit callback
             invoked immediately before the first provider dispatch, after the
             request copy contains ephemeral_user_context. It receives the
@@ -706,11 +708,20 @@ def run_conversation(
             raise ValueError(
                 "ephemeral_user_context_on_request requires ephemeral_user_context"
             )
+    if (
+        ephemeral_user_context_on_outcome is not None
+        and not callable(ephemeral_user_context_on_outcome)
+    ):
+        raise TypeError("ephemeral_user_context_on_outcome must be callable")
     if (ephemeral_user_context_on_request is None) != (
         ephemeral_user_context_on_outcome is None
     ):
         raise ValueError(
             "ephemeral request commit and outcome callbacks must be provided together"
+        )
+    if ephemeral_user_context and ephemeral_user_context_on_request is None:
+        raise ValueError(
+            "ephemeral_user_context requires request commit and outcome callbacks"
         )
 
     # Guard stdio against OSError from broken pipes (systemd/headless/daemon).

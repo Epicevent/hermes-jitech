@@ -16,6 +16,7 @@ import re
 import stat
 import sys
 import threading
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Protocol
@@ -57,7 +58,14 @@ class ConsumptionReceiptSink(Protocol):
 
 
 class FileConsumptionReceiptSink:
-    """Persist canonical consumption receipts using the KWRAG POSIX writer."""
+    """Persist canonical consumption receipts inside a single-writer boundary.
+
+    The POSIX checks fail closed on pathname/inode substitution and observable
+    byte-version changes during each finite publication operation.  They do
+    not claim isolation from a hostile process with the same effective UID
+    that can keep a pre-dirtied writable mapping without an observable inode
+    version transition; the slot runtime must keep this ledger single-writer.
+    """
 
     def __init__(self, path: Path):
         if not path.is_absolute():
@@ -71,6 +79,8 @@ class FileConsumptionReceiptSink:
         self._write_once_lock = threading.Lock()
         self._trusted_parent_identity: tuple[int, int] | None = None
         self._trusted_receipt_identity: tuple[int, int] | None = None
+        self._trusted_receipt_size: int | None = None
+        self._trusted_receipt_digest: str | None = None
         self._trusted_outcome_root_identity: tuple[int, int] | None = None
 
     def write(self, receipt: Mapping[str, Any]) -> str:
@@ -79,7 +89,12 @@ class FileConsumptionReceiptSink:
         if os.name == "posix":
             try:
                 with self._write_once_lock:
-                    parent_identity, receipt_identity = self._append_receipt_posix(raw)
+                    (
+                        parent_identity,
+                        receipt_identity,
+                        receipt_size,
+                        receipt_file_digest,
+                    ) = self._append_receipt_posix(raw)
                     if (
                         self._trusted_parent_identity is not None
                         and self._trusted_parent_identity != parent_identity
@@ -92,6 +107,8 @@ class FileConsumptionReceiptSink:
                         raise OSError("consumption receipt file identity changed")
                     self._trusted_parent_identity = parent_identity
                     self._trusted_receipt_identity = receipt_identity
+                    self._trusted_receipt_size = receipt_size
+                    self._trusted_receipt_digest = receipt_file_digest
             except OSError as exc:
                 raise HermesSlotRetrievalError(
                     "consumption receipt parent is not an approved POSIX ledger boundary"
@@ -151,6 +168,35 @@ class FileConsumptionReceiptSink:
             if not chunk:
                 return b"".join(chunks)
             chunks.append(chunk)
+
+    @staticmethod
+    def _read_bounded(descriptor: int, limit: int) -> bytes:
+        if limit < 0:
+            raise ValueError("read limit must be nonnegative")
+        chunks: list[bytes] = []
+        remaining = limit
+        while remaining:
+            chunk = os.read(descriptor, min(64 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+
+    @staticmethod
+    def _hash_exact_prefix(descriptor: int, size: int) -> Any:
+        if size < 0:
+            raise ValueError("receipt prefix size must be nonnegative")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        hasher = hashlib.sha256()
+        remaining = size
+        while remaining:
+            chunk = os.read(descriptor, min(64 * 1024, remaining))
+            if not chunk:
+                raise OSError("consumption receipt prefix was truncated")
+            hasher.update(chunk)
+            remaining -= len(chunk)
+        return hasher
 
     @staticmethod
     def _verify_outcome_file(descriptor: int, *, require_owner_mode: bool) -> None:
@@ -442,10 +488,103 @@ class FileConsumptionReceiptSink:
         finally:
             os.close(identity_descriptor)
 
+    @staticmethod
+    def _rename_noreplace(
+        parent: int,
+        source_name: str,
+        destination_name: str,
+    ) -> None:
+        """Atomically publish one fully-synced Linux file without replacement."""
+
+        if sys.platform != "linux":
+            raise OSError(errno.ENOTSUP, "renameat2 outcome publication is unavailable")
+        libc = ctypes.CDLL(None, use_errno=True)
+        renameat2 = getattr(libc, "renameat2", None)
+        if renameat2 is None:
+            raise OSError(errno.ENOTSUP, "libc renameat2 is unavailable")
+        renameat2.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        renameat2.restype = ctypes.c_int
+        result = renameat2(
+            parent,
+            ctypes.c_char_p(os.fsencode(source_name)),
+            parent,
+            ctypes.c_char_p(os.fsencode(destination_name)),
+            1,  # RENAME_NOREPLACE
+        )
+        if result != 0:
+            error_number = ctypes.get_errno()
+            if error_number == errno.EEXIST:
+                raise FileExistsError(
+                    error_number,
+                    os.strerror(error_number),
+                    destination_name,
+                )
+            raise OSError(error_number, os.strerror(error_number), destination_name)
+
+    def _verify_existing_outcome_replay(
+        self,
+        *,
+        current: int,
+        outcome_directory: int,
+        outcome_root: Path,
+        outcome_root_identity: tuple[int, int],
+        outcome_name: str,
+        raw: bytes,
+    ) -> None:
+        descriptor, outcome_file_identity = self._open_existing_outcome_for_read(
+            outcome_directory,
+            outcome_name,
+        )
+        try:
+            self._assert_named_outcome_file_identity(
+                outcome_directory,
+                outcome_name,
+                outcome_file_identity,
+            )
+            existing_info = os.fstat(descriptor)
+            if existing_info.st_size != len(raw):
+                raise HermesSlotRetrievalError(
+                    "provider attempt outcome identity collision"
+                )
+            # Read at most one byte beyond the canonical receipt.  A same-UID
+            # peer that grows the file after the size check cannot make replay
+            # allocate or drain attacker-sized data.
+            existing = self._read_bounded(descriptor, len(raw) + 1)
+            if existing != raw:
+                raise HermesSlotRetrievalError(
+                    "provider attempt outcome identity collision"
+                )
+            self._assert_receipt_parent_path_identity(self._trusted_parent_identity)
+            self._assert_named_directory_identity(
+                current,
+                outcome_root.name,
+                outcome_root_identity,
+            )
+            self._assert_named_outcome_file_identity(
+                outcome_directory,
+                outcome_name,
+                outcome_file_identity,
+            )
+            self._assert_public_file_path_identity(
+                outcome_root / outcome_name,
+                outcome_file_identity,
+                label="provider attempt outcome file",
+                expected_bytes=raw,
+                expected_size=len(raw),
+            )
+        finally:
+            os.close(descriptor)
+
     def _append_receipt_posix(
         self,
         raw: bytes,
-    ) -> tuple[tuple[int, int], tuple[int, int]]:
+    ) -> tuple[tuple[int, int], tuple[int, int], int, str]:
         opened, parent = self._open_existing_posix_receipt_parent()
         try:
             parent_info = os.fstat(parent)
@@ -518,7 +657,32 @@ class FileConsumptionReceiptSink:
                 import fcntl
 
                 fcntl.flock(descriptor, fcntl.LOCK_EX)
-                original_size = os.fstat(descriptor).st_size
+                original_info = os.fstat(descriptor)
+                original_size = original_info.st_size
+                prefix_hasher = self._hash_exact_prefix(descriptor, original_size)
+                prefix_info = os.fstat(descriptor)
+                prefix_version_fields = (
+                    "st_dev",
+                    "st_ino",
+                    "st_mode",
+                    "st_nlink",
+                    "st_uid",
+                    "st_size",
+                    "st_mtime_ns",
+                    "st_ctime_ns",
+                )
+                if tuple(
+                    getattr(prefix_info, field) for field in prefix_version_fields
+                ) != tuple(
+                    getattr(original_info, field) for field in prefix_version_fields
+                ):
+                    raise OSError("consumption receipt prefix changed while hashing")
+                prefix_digest = prefix_hasher.hexdigest()
+                if self._trusted_receipt_size is not None and (
+                    original_size != self._trusted_receipt_size
+                    or prefix_digest != self._trusted_receipt_digest
+                ):
+                    raise OSError("consumption receipt published prefix changed")
                 try:
                     # Keep the approved directory fd open, and prove the
                     # pathname still resolves to that inode immediately
@@ -528,6 +692,17 @@ class FileConsumptionReceiptSink:
                     try:
                         self._write_all(descriptor, raw)
                         os.fsync(descriptor)
+                        expected_full_hasher = prefix_hasher.copy()
+                        expected_full_hasher.update(raw)
+                        expected_full_digest = expected_full_hasher.hexdigest()
+                        published_hasher = self._hash_exact_prefix(
+                            descriptor,
+                            original_size + len(raw),
+                        )
+                        if published_hasher.hexdigest() != expected_full_digest:
+                            raise OSError(
+                                "consumption receipt prior bytes changed during append"
+                            )
                         # A same-UID peer can rename the directory while the
                         # held fd remains valid.  Success therefore requires a
                         # post-publication identity check as well.  If the
@@ -568,7 +743,12 @@ class FileConsumptionReceiptSink:
                     fcntl.flock(descriptor, fcntl.LOCK_UN)
             finally:
                 os.close(descriptor)
-            return parent_identity, receipt_identity
+            return (
+                parent_identity,
+                receipt_identity,
+                original_size + len(raw),
+                expected_full_digest,
+            )
         finally:
             for descriptor in reversed(opened):
                 os.close(descriptor)
@@ -626,103 +806,100 @@ class FileConsumptionReceiptSink:
                 outcome_root_identity,
             )
 
-            flags = (
-                os.O_RDWR
-                | os.O_CREAT
-                | os.O_EXCL
-                | os.O_CLOEXEC
-                | os.O_NOFOLLOW
+            try:
+                self._verify_existing_outcome_replay(
+                    current=current,
+                    outcome_directory=outcome_directory,
+                    outcome_root=outcome_root,
+                    outcome_root_identity=outcome_root_identity,
+                    outcome_name=outcome_name,
+                    raw=raw,
+                )
+            except FileNotFoundError:
+                pass
+            else:
+                return outcome_root_identity
+
+            flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW
+            temporary_name = f".{outcome_name}.tmp-{uuid.uuid4().hex}"
+            descriptor = os.open(
+                temporary_name,
+                flags,
+                0o600,
+                dir_fd=outcome_directory,
+            )
+            temporary_present = True
+            published = False
+            descriptor_info = os.fstat(descriptor)
+            outcome_file_identity = (
+                descriptor_info.st_dev,
+                descriptor_info.st_ino,
             )
             try:
-                descriptor = os.open(
-                    outcome_name,
-                    flags,
-                    0o600,
-                    dir_fd=outcome_directory,
-                )
-            except FileExistsError:
-                descriptor, outcome_file_identity = (
-                    self._open_existing_outcome_for_read(
-                        outcome_directory,
-                        outcome_name,
-                    )
-                )
-                try:
-                    self._assert_named_outcome_file_identity(
-                        outcome_directory,
-                        outcome_name,
-                        outcome_file_identity,
-                    )
-                    existing = self._read_all(descriptor)
-                    if existing != raw:
-                        raise HermesSlotRetrievalError(
-                            "provider attempt outcome identity collision"
-                        )
-                    self._assert_receipt_parent_path_identity(
-                        self._trusted_parent_identity
-                    )
-                    self._assert_named_directory_identity(
-                        current,
-                        outcome_root.name,
-                        outcome_root_identity,
-                    )
-                    self._assert_named_outcome_file_identity(
-                        outcome_directory,
-                        outcome_name,
-                        outcome_file_identity,
-                    )
-                    self._assert_public_file_path_identity(
-                        outcome_root / outcome_name,
-                        outcome_file_identity,
-                        label="provider attempt outcome file",
-                        expected_bytes=raw,
-                        expected_size=len(raw),
-                    )
-                finally:
-                    os.close(descriptor)
-                return outcome_root_identity
-            try:
+                os.fchmod(descriptor, 0o600)
                 self._verify_outcome_file(descriptor, require_owner_mode=True)
-                descriptor_info = os.fstat(descriptor)
-                outcome_file_identity = (
-                    descriptor_info.st_dev,
-                    descriptor_info.st_ino,
+                self._assert_named_outcome_file_identity(
+                    outcome_directory,
+                    temporary_name,
+                    outcome_file_identity,
+                )
+                self._write_all(descriptor, raw)
+                os.fsync(descriptor)
+                self._assert_receipt_parent_path_identity(
+                    self._trusted_parent_identity
+                )
+                self._assert_named_directory_identity(
+                    current,
+                    outcome_root.name,
+                    outcome_root_identity,
+                )
+                self._assert_named_outcome_file_identity(
+                    outcome_directory,
+                    temporary_name,
+                    outcome_file_identity,
                 )
                 try:
-                    self._assert_named_outcome_file_identity(
+                    self._rename_noreplace(
                         outcome_directory,
+                        temporary_name,
                         outcome_name,
-                        outcome_file_identity,
                     )
-                    self._write_all(descriptor, raw)
-                    os.fsync(descriptor)
-                    self._assert_receipt_parent_path_identity(
-                        self._trusted_parent_identity
-                    )
-                    self._assert_named_directory_identity(
-                        current,
-                        outcome_root.name,
-                        outcome_root_identity,
-                    )
+                except FileExistsError:
+                    os.unlink(temporary_name, dir_fd=outcome_directory)
+                    temporary_present = False
                     os.fsync(outcome_directory)
-                    self._assert_named_outcome_file_identity(
-                        outcome_directory,
-                        outcome_name,
-                        outcome_file_identity,
+                    self._verify_existing_outcome_replay(
+                        current=current,
+                        outcome_directory=outcome_directory,
+                        outcome_root=outcome_root,
+                        outcome_root_identity=outcome_root_identity,
+                        outcome_name=outcome_name,
+                        raw=raw,
                     )
-                    self._assert_public_file_path_identity(
-                        outcome_root / outcome_name,
-                        outcome_file_identity,
-                        label="provider attempt outcome file",
-                        expected_bytes=raw,
-                        expected_size=len(raw),
-                    )
-                except BaseException:
-                    os.ftruncate(descriptor, 0)
-                    os.fsync(descriptor)
-                    try:
+                    return outcome_root_identity
+                published = True
+                temporary_present = False
+                os.fsync(outcome_directory)
+                self._assert_named_outcome_file_identity(
+                    outcome_directory,
+                    outcome_name,
+                    outcome_file_identity,
+                )
+                self._assert_public_file_path_identity(
+                    outcome_root / outcome_name,
+                    outcome_file_identity,
+                    label="provider attempt outcome file",
+                    expected_bytes=raw,
+                    expected_size=len(raw),
+                )
+            except BaseException:
+                os.ftruncate(descriptor, 0)
+                os.fsync(descriptor)
+                try:
+                    cleanup_name = outcome_name if published else temporary_name
+                    if published or temporary_present:
                         file_info = os.stat(
-                            outcome_name,
+                            cleanup_name,
                             dir_fd=outcome_directory,
                             follow_symlinks=False,
                         )
@@ -730,11 +907,13 @@ class FileConsumptionReceiptSink:
                             outcome_file_identity[0],
                             outcome_file_identity[1],
                         ):
-                            os.unlink(outcome_name, dir_fd=outcome_directory)
+                            os.unlink(cleanup_name, dir_fd=outcome_directory)
                             os.fsync(outcome_directory)
-                    except FileNotFoundError:
-                        pass
-                    raise
+                            if cleanup_name == temporary_name:
+                                temporary_present = False
+                except FileNotFoundError:
+                    pass
+                raise
             finally:
                 os.close(descriptor)
             return outcome_root_identity

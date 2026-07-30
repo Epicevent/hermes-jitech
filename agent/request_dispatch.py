@@ -612,39 +612,37 @@ class RequestDispatchHandoff:
         bound_kwargs: dict[str, Any] | None = None
         request_projection: Any = None
         if request_kwargs is not None:
-            if not all(
-                isinstance(item, str) and item
-                for item in (
-                    provider,
-                    api_mode,
-                    model,
-                    sdk_method,
-                    leaf_adapter,
-                    endpoint_identity,
-                )
-            ):
-                raise ValueError(
-                    "provider, api_mode, model, sdk_method, leaf_adapter, and "
-                    "endpoint_identity are required for a bound provider attempt"
-                )
-            if isinstance(fallback_index, bool) or fallback_index < 0:
-                raise ValueError("fallback_index must be a nonnegative integer")
-            if self._callback_accepts_attempt_binding and not all(
-                isinstance(item, str) and item
-                for item in (self._configured_provider, self._configured_model)
-            ):
-                raise ValueError(
-                    "configured provider and model are required for a bound receipt"
-                )
-            if (
-                self._callback_accepts_attempt_binding
-                and not self._allowed_provider_routes
-            ):
-                raise ValueError(
-                    "bound receipt callback requires an immutable provider route chain"
-                )
             bound_kwargs = _snapshot_request_value(dict(request_kwargs))
-            request_projection = _canonical_request_projection(bound_kwargs)
+            if self._callback_accepts_attempt_binding:
+                if not all(
+                    isinstance(item, str) and item
+                    for item in (
+                        provider,
+                        api_mode,
+                        model,
+                        sdk_method,
+                        leaf_adapter,
+                        endpoint_identity,
+                    )
+                ):
+                    raise ValueError(
+                        "provider, api_mode, model, sdk_method, leaf_adapter, and "
+                        "endpoint_identity are required for a bound provider attempt"
+                    )
+                if isinstance(fallback_index, bool) or fallback_index < 0:
+                    raise ValueError("fallback_index must be a nonnegative integer")
+                if not all(
+                    isinstance(item, str) and item
+                    for item in (self._configured_provider, self._configured_model)
+                ):
+                    raise ValueError(
+                        "configured provider and model are required for a bound receipt"
+                    )
+                if not self._allowed_provider_routes:
+                    raise ValueError(
+                        "bound receipt callback requires an immutable provider route chain"
+                    )
+                request_projection = _canonical_request_projection(bound_kwargs)
         elif self._callback_accepts_attempt_binding:
             raise ValueError("bound receipt callback requires final provider kwargs")
         with self._lock:
@@ -669,7 +667,7 @@ class RequestDispatchHandoff:
                 raise DispatchAttemptsClosed("user_interrupt")
             attempt_id = self._attempt_claim_count + 1
             attempt_binding: dict[str, Any] | None = None
-            if bound_kwargs is not None:
+            if request_projection is not None:
                 # Revalidate the private SDK kwargs snapshot before any
                 # durable callback.  The callback receives only a separate
                 # canonical projection, never the object that will be passed
