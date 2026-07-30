@@ -1401,7 +1401,7 @@ def test_committed_evidence_sdk_exception_cannot_fallback_or_dispatch_again(
 
 @pytest.mark.parametrize(
     "response_kind",
-    ["empty", "incomplete_scratchpad", "invalid_tool"],
+    ["empty", "incomplete_scratchpad", "invalid_tool", "truncated_tool"],
 )
 def test_unaccepted_first_evidence_response_cannot_start_a_clean_second_request(
     tmp_path: Path,
@@ -1419,14 +1419,17 @@ def test_unaccepted_first_evidence_response_cannot_start_a_clean_second_request(
         f"unaccepted-first-{response_kind}-session"
     )
     request_client = _supported_openai_client()
-    if response_kind == "invalid_tool":
+    if response_kind in {"invalid_tool", "truncated_tool"}:
         tool_calls = [SimpleNamespace(
             id="call-invalid",
             type="function",
-            function=SimpleNamespace(name="missing_tool", arguments="{}"),
+            function=SimpleNamespace(
+                name="missing_tool",
+                arguments='{"incomplete":' if response_kind == "truncated_tool" else "{}",
+            ),
         )]
         content = ""
-        finish_reason = "tool_calls"
+        finish_reason = "length" if response_kind == "truncated_tool" else "tool_calls"
     elif response_kind == "incomplete_scratchpad":
         tool_calls = None
         content = "<REASONING_SCRATCHPAD>unfinished"
@@ -1473,7 +1476,10 @@ def test_unaccepted_first_evidence_response_cannot_start_a_clean_second_request(
     assert outcome["completed"] is False
     assert outcome["failed"] is True
     assert outcome["api_calls"] == 1
-    assert "clean follow-up request is forbidden" in outcome["error"]
+    if response_kind == "truncated_tool":
+        assert "unledgered retry is forbidden" in outcome["error"]
+    else:
+        assert "clean follow-up request is forbidden" in outcome["error"]
     assert prepared.consumption_receipt_status == "written"
     assert prepared.provider_attempt_outcome_status == "written"
 

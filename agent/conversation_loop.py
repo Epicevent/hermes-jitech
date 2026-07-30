@@ -2490,6 +2490,22 @@ def run_conversation(
                         assistant_message = _trunc_msg
                         if assistant_message is not None and _trunc_has_tool_calls:
                             if truncated_tool_call_retries < 1:
+                                if (
+                                    ephemeral_user_context_request_committed
+                                    and not ephemeral_first_response_accepted
+                                ):
+                                    agent._persist_session(messages, conversation_history)
+                                    return {
+                                        "final_response": None,
+                                        "messages": messages,
+                                        "api_calls": api_call_count,
+                                        "completed": False,
+                                        "failed": True,
+                                        "error": (
+                                            "retrieval evidence first provider response "
+                                            "was truncated; an unledgered retry is forbidden"
+                                        ),
+                                    }
                                 truncated_tool_call_retries += 1
                                 agent._buffer_vprint(
                                     f"⚠️  Truncated tool call detected — retrying API call..."
