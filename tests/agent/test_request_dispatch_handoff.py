@@ -575,7 +575,9 @@ def test_unsupported_provider_facade_has_no_authoritative_leaf_binding(
         require_authoritative_leaf_adapter(client_type())
 
 
-def test_exact_unhooked_native_gemini_has_authoritative_leaf_binding() -> None:
+def test_exact_unhooked_native_gemini_has_authoritative_leaf_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import httpx
 
     from agent.gemini_native_adapter import GeminiNativeClient
@@ -588,6 +590,10 @@ def test_exact_unhooked_native_gemini_has_authoritative_leaf_binding() -> None:
         client._default_headers = {"X-Fixture": "not-allowed"}
         with pytest.raises(FinalProviderBindingUnsupported, match="unhooked atomic"):
             require_authoritative_leaf_adapter(client)
+        client._default_headers = None
+        monkeypatch.setattr(httpx.HTTPTransport, "handle_request", lambda *_: None)
+        with pytest.raises(FinalProviderBindingUnsupported, match="unhooked atomic"):
+            require_authoritative_leaf_adapter(client)
     finally:
         client.close()
 
@@ -595,14 +601,17 @@ def test_exact_unhooked_native_gemini_has_authoritative_leaf_binding() -> None:
 def test_native_gemini_binding_covers_prepared_headers_without_exposing_them(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    import httpcore
     import httpx
 
     from agent.gemini_native_adapter import GeminiNativeClient
 
-    def handler(_transport, request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, request=request, json={"candidates": []})
-
-    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", handler)
+    def handler(_request) -> httpcore.Response:
+        return httpcore.Response(
+            200,
+            content=b'{"candidates": []}',
+            headers=[(b"content-type", b"application/json")],
+        )
     final_request_digests = []
     observed_projections = []
     for index, billing_project in enumerate(("billing-a", "billing-b"), start=1):
@@ -628,6 +637,7 @@ def test_native_gemini_binding_covers_prepared_headers_without_exposing_them(
             api_key="fixture-secret-key",
             http_client=httpx.Client(headers={"X-Goog-User-Project": billing_project}),
         )
+        monkeypatch.setattr(client._http._transport._pool, "handle_request", handler)
         try:
             client._create_chat_completion(
                 model="gemini-test",

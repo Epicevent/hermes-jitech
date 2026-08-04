@@ -3434,6 +3434,7 @@ def test_native_gemini_actual_conversation_binds_final_json_and_response(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    import httpcore
     import httpx
 
     from agent.gemini_native_adapter import GeminiNativeClient
@@ -3444,21 +3445,25 @@ def test_native_gemini_actual_conversation_binds_final_json_and_response(
     prepared, _ = _prepared_hits(tmp_path, "native-gemini-conversation.jsonl")
     observations: list[dict] = []
 
-    def handler(_transport, request: httpx.Request) -> httpx.Response:
-        body = json.loads(request.content)
+    def handler(request) -> httpcore.Response:
+        body = json.loads(b"".join(request.stream))
         observations.append({
             "body": body,
             "receipt": prepared.consumption_receipt_status,
         })
-        return httpx.Response(200, request=request, json={
-            "candidates": [{
-                "content": {"role": "model", "parts": [{"text": "bound answer"}]},
-                "finishReason": "STOP",
-            }],
-            "modelVersion": "gemini-test",
-            "responseId": "response-fixture",
-            "usageMetadata": {},
-        })
+        return httpcore.Response(
+            200,
+            content=canonical_json_bytes({
+                "candidates": [{
+                    "content": {"role": "model", "parts": [{"text": "bound answer"}]},
+                    "finishReason": "STOP",
+                }],
+                "modelVersion": "gemini-test",
+                "responseId": "response-fixture",
+                "usageMetadata": {},
+            }),
+            headers=[(b"content-type", b"application/json")],
+        )
 
     client = GeminiNativeClient(
         api_key="fixture-key",
@@ -3477,7 +3482,7 @@ def test_native_gemini_actual_conversation_binds_final_json_and_response(
         require_retrieval_evidence_dispatch_capability,
     )
     monkeypatch.setenv("HERMES_DUMP_REQUESTS", "1")
-    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", handler)
+    monkeypatch.setattr(client._http._transport._pool, "handle_request", handler)
     with (
         patch.object(agent, "_create_request_openai_client", return_value=client),
         patch.object(agent, "_close_request_openai_client"),

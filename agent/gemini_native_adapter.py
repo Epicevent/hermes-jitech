@@ -29,6 +29,7 @@ import httpx
 
 from agent.gemini_schema import sanitize_gemini_tool_parameters
 
+_HERMES_ATOMIC_HTTPX_METHODS = (httpx.Client.build_request, httpx.HTTPTransport.handle_request)
 logger = logging.getLogger(__name__)
 
 DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
@@ -973,11 +974,10 @@ class GeminiNativeClient:
             prepared = self._http.build_request(
                 "POST", url, json=request, headers=self._headers(), timeout=timeout
             )
+
             def prepared_digest():
                 digest = hashlib.sha256()
-                chunks = [prepared.method.encode(), str(prepared.url).encode()]
-                chunks += [name + b":" + value for name, value in prepared.headers.raw]
-                chunks.append(prepared.content)
+                chunks = [prepared.method.encode(), str(prepared.url).encode(), *[name + b":" + value for name, value in prepared.headers.raw], prepared.content]
                 for chunk in chunks:
                     digest.update(len(chunk).to_bytes(8, "big") + chunk)
                 return "sha256:" + digest.hexdigest()

@@ -163,7 +163,7 @@ def require_authoritative_leaf_adapter(client: Any) -> str:
     identity = provider_leaf_adapter_identity(client)
     if identity == "agent.gemini_native_adapter.GeminiNativeClient":
         import httpx
-        from agent.gemini_native_adapter import GeminiNativeClient
+        from agent.gemini_native_adapter import GeminiNativeClient, _HERMES_ATOMIC_HTTPX_METHODS
 
         transport = getattr(client, "_http", None)
         hooks = getattr(transport, "event_hooks", {})
@@ -172,11 +172,11 @@ def require_authoritative_leaf_adapter(client: Any) -> str:
             and type(transport) is httpx.Client
             and type(getattr(transport, "_transport", None)) is httpx.HTTPTransport
             and getattr(getattr(transport, "build_request", None), "__func__", None)
-            is httpx.Client.build_request
+            is _HERMES_ATOMIC_HTTPX_METHODS[0]
             and getattr(
                 getattr(transport._transport, "handle_request", None), "__func__", None
             )
-            is httpx.HTTPTransport.handle_request
+            is _HERMES_ATOMIC_HTTPX_METHODS[1]
             and not getattr(client, "_default_headers", None)
             and not any(hooks.values())
         ):
