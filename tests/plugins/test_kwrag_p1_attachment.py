@@ -32,10 +32,10 @@ ROOT = Path(__file__).parents[2]
 KWRAG_WHEEL = ROOT / "vendor" / "kwrag" / "kwrag_product_service-0.1.0-py3-none-any.whl"
 P1_WHEEL = ROOT / "vendor" / "kwrag_p1" / "kwrag_p1_attachment-0.1.2-py3-none-any.whl"
 P1_COMPONENT_WHEEL_DIGEST = (
-    "sha256:7ecbb2faf12a712ca7604533b7800bccc8bf3ef8e233af5e7bbfe526c7eed5d4"
+    "sha256:ddad82d3b7cd6a8c617ad26c1217d04083fb3af4e3f3662426525d5afe33a24b"
 )
 P1_COMPONENT_MANIFEST_DIGEST = (
-    "sha256:92aeeb4ec0588c7159344a327575d3f4e01a0edc2014dfb879ee2b1b5bd8d772"
+    "sha256:b765437014c51e8a6054a1d744964c9352fa12d275892a7e910941206242a498"
 )
 P1_FACTORY_SOURCE_DIGEST = (
     "sha256:104276b46fa427d741fcf63db87b70d9a6d8a2ad32e63c4a43e87692041ed43e"
@@ -555,9 +555,13 @@ def test_semantically_corrupt_consumption_receipt_is_rejected(
         ("operation", "schema_version", "kwrag-slot-search-operation-receipt-v0"),
         ("operation", "authorization_basis", "unbound"),
         ("operation", "pipeline_backend", "different-backend"),
+        ("operation", "pipeline_scope", "external"),
+        ("operation", "provider_billing", "charged"),
+        ("operation", "extra_field", "unexpected"),
         ("result", "schema_version", "hermes-kwrag-result-receipt-v0"),
         ("result", "consumer_family", "openclaw"),
         ("result", "adapter_status", "unverified"),
+        ("result", "extra_field", "unexpected"),
     ],
 )
 @POSIX_RUNTIME
@@ -580,6 +584,12 @@ def test_self_consistent_semantic_receipt_corruption_is_rejected(
     if target == "operation":
         if field == "pipeline_backend":
             operation["pipeline_evidence"]["backend_id"] = replacement
+        elif field == "pipeline_scope":
+            operation["pipeline_evidence"]["stages"][0]["execution_scope"] = replacement
+        elif field == "provider_billing":
+            operation["provider_billing"]["status"] = replacement
+        elif field == "extra_field":
+            operation["unexpected"] = replacement
         else:
             operation[field] = replacement
         operation_raw = canonical_json_bytes(operation)
@@ -638,12 +648,16 @@ def test_self_consistent_invalid_result_semantics_are_rejected(
 
 
 @pytest.mark.parametrize("target", ["operation", "result"])
-@pytest.mark.parametrize("replacement", [True, 1.0])
+@pytest.mark.parametrize(
+    "field,replacement",
+    [("result_count", True), ("result_count", 1.0), ("attempt", True)],
+)
 @POSIX_RUNTIME
-def test_each_linked_receipt_requires_an_exact_integer_result_count(
+def test_each_linked_receipt_requires_exact_identity_types(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     target: str,
+    field: str,
     replacement: object,
 ) -> None:
     fixture = _fixture(tmp_path, monkeypatch)
@@ -656,7 +670,7 @@ def test_each_linked_receipt_requires_an_exact_integer_result_count(
     result = json.loads(result_path.read_text())
     consumption = json.loads(consumption_path.read_text())
     receipt = operation if target == "operation" else result
-    receipt["result_count"] = replacement
+    receipt[field] = replacement
     operation_raw = canonical_json_bytes(operation)
     operation_path.write_bytes(operation_raw + b"\n")
     operation_digest = _digest(operation_raw)
