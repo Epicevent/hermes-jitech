@@ -32,10 +32,10 @@ ROOT = Path(__file__).parents[2]
 KWRAG_WHEEL = ROOT / "vendor" / "kwrag" / "kwrag_product_service-0.1.0-py3-none-any.whl"
 P1_WHEEL = ROOT / "vendor" / "kwrag_p1" / "kwrag_p1_attachment-0.1.2-py3-none-any.whl"
 P1_COMPONENT_WHEEL_DIGEST = (
-    "sha256:d52ef1371f4d5ecddd1f51243187adb65b5c5eb4438cfe368895fe0520eb0a69"
+    "sha256:8d01690b5a8db806e6de049ccb1d095ad04f78764c94edf1a2a6363d12300080"
 )
 P1_COMPONENT_MANIFEST_DIGEST = (
-    "sha256:15df10f1195242afa94d99e33129a19efbc8e34807aa18b31217e27560da2418"
+    "sha256:68f1de94c471d5d3cf7e9758ac9af58ad282816b9ba7a780abb04befbb931a84"
 )
 P1_FACTORY_SOURCE_DIGEST = (
     "sha256:104276b46fa427d741fcf63db87b70d9a6d8a2ad32e63c4a43e87692041ed43e"
@@ -556,6 +556,10 @@ def test_semantically_corrupt_consumption_receipt_is_rejected(
         ("operation", "authorization_basis", "unbound"),
         ("operation", "pipeline_backend", "different-backend"),
         ("operation", "pipeline_scope", "external"),
+        ("operation", "pipeline_stage_id", "other-stage"),
+        ("operation", "pipeline_model", "local-model"),
+        ("operation", "pipeline_revision", "sha256:" + "9" * 64),
+        ("operation", "pipeline_call_count", 0),
         ("operation", "provider_billing", "charged"),
         ("operation", "extra_field", "unexpected"),
         ("result", "schema_version", "hermes-kwrag-result-receipt-v0"),
@@ -588,6 +592,9 @@ def test_self_consistent_semantic_receipt_corruption_is_rejected(
             operation["pipeline_evidence"]["backend_id"] = replacement
         elif field == "pipeline_scope":
             operation["pipeline_evidence"]["stages"][0]["execution_scope"] = replacement
+        elif field.startswith("pipeline_"):
+            stage_field = field.removeprefix("pipeline_")
+            operation["pipeline_evidence"]["stages"][0][stage_field] = replacement
         elif field == "provider_billing":
             operation["provider_billing"]["status"] = replacement
         elif field == "extra_field":
@@ -601,6 +608,38 @@ def test_self_consistent_semantic_receipt_corruption_is_rejected(
         consumption["operation_receipt_digest"] = operation_digest
     else:
         result[field] = replacement
+    result_raw = canonical_json_bytes(result)
+    result_path.write_bytes(result_raw + b"\n")
+    consumption["result_receipt_digest"] = _digest(result_raw)
+    consumption_path.write_bytes(canonical_json_bytes(consumption) + b"\n")
+    with pytest.raises(ValueError, match="linkage"):
+        enabled_p1_status(state_root=root)
+
+
+@POSIX_RUNTIME
+def test_result_count_cannot_exceed_requested_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = _fixture(tmp_path, monkeypatch)
+    _probe(fixture)
+    root = fixture["state"]
+    operation_path = root / "operation-receipts.jsonl"
+    result_path = root / "result-receipts.jsonl"
+    consumption_path = root / "attachment-receipts.jsonl"
+    operation = json.loads(operation_path.read_text())
+    result = json.loads(result_path.read_text())
+    consumption = json.loads(consumption_path.read_text())
+    operation["requested_max_results"] = 1
+    operation["pipeline_evidence"]["candidate_count"] = 2
+    operation["pipeline_evidence"]["returned_count"] = 2
+    operation["pipeline_evidence"]["stages"][0]["output_count"] = 2
+    for receipt in (operation, result, consumption):
+        receipt["result_count"] = 2
+    operation_raw = canonical_json_bytes(operation)
+    operation_path.write_bytes(operation_raw + b"\n")
+    operation_digest = _digest(operation_raw)
+    result["operation_receipt_digest"] = operation_digest
+    consumption["operation_receipt_digest"] = operation_digest
     result_raw = canonical_json_bytes(result)
     result_path.write_bytes(result_raw + b"\n")
     consumption["result_receipt_digest"] = _digest(result_raw)
