@@ -485,7 +485,7 @@ def test_embedded_wheel_and_disabled_status_bind_exact_component(monkeypatch) ->
     monkeypatch.setenv("JITECH_RETRIEVAL_BINDING_DIGEST", "sha256:" + "d" * 64)
     monkeypatch.setenv("JITECH_RETRIEVAL_RESOURCE_PROFILE_DIGEST", resource["profileDigest"])
     monkeypatch.setenv("HERMES_WORKSPACE_DIR", "/workspace")
-    monkeypatch.setattr("plugins.kwrag_slot.cli.os.statvfs", lambda _path: SimpleNamespace(f_flag=1), raising=False)
+    monkeypatch.setattr("plugins.kwrag_slot.p1_attachment.os.statvfs", lambda _path: SimpleNamespace(f_flag=1), raising=False)
     status = _status()
     assert set(status) == {
         "bindingDigest",
@@ -527,7 +527,7 @@ def test_status_fails_closed_before_caller_explicit_attachment_proof(monkeypatch
     monkeypatch.setenv("JITECH_RETRIEVAL_BINDING_DIGEST", "sha256:" + "d" * 64)
     monkeypatch.setenv("JITECH_RETRIEVAL_RESOURCE_PROFILE_DIGEST", resource["profileDigest"])
     monkeypatch.setenv("HERMES_WORKSPACE_DIR", "/workspace")
-    monkeypatch.setattr("plugins.kwrag_slot.cli.os.statvfs", lambda _path: SimpleNamespace(f_flag=1), raising=False)
+    monkeypatch.setattr("plugins.kwrag_slot.p1_attachment.os.statvfs", lambda _path: SimpleNamespace(f_flag=1), raising=False)
     with pytest.raises(RuntimeError, match="p1-attachment-status"):
         _status()
 
@@ -3425,6 +3425,86 @@ def test_synthetic_atomic_aiagent_commits_once_at_sdk_dispatch_handoff(
     assert lines[0] == canonical_json_bytes(prepared.result_receipt)
     assert lines[1] == canonical_json_bytes(prepared.consumption_receipt)
     assert prepared.provider_attempt_outcome_status == "written"
+    assert prepared.content_free_attestation()["transportOutcomeStatus"] == (
+        "response_observed"
+    )
+
+
+def test_native_gemini_actual_conversation_binds_final_json_and_response(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import httpx
+
+    from agent.gemini_native_adapter import GeminiNativeClient
+    from agent.request_dispatch import require_retrieval_evidence_dispatch_capability
+    from plugins.kwrag_slot import prompt_context
+    from plugins.kwrag_slot.prompt_context import run_conversation_with_approved_retrieval
+
+    prepared, _ = _prepared_hits(tmp_path, "native-gemini-conversation.jsonl")
+    observations: list[dict] = []
+
+    def handler(_transport, request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        observations.append({
+            "body": body,
+            "receipt": prepared.consumption_receipt_status,
+        })
+        return httpx.Response(200, request=request, json={
+            "candidates": [{
+                "content": {"role": "model", "parts": [{"text": "bound answer"}]},
+                "finishReason": "STOP",
+            }],
+            "modelVersion": "gemini-test",
+            "responseId": "response-fixture",
+            "usageMetadata": {},
+        })
+
+    client = GeminiNativeClient(
+        api_key="fixture-key",
+        http_client=httpx.Client(),
+    )
+    agent = _actual_chat_completions_agent("native-gemini-session")
+    agent.provider = "gemini"
+    agent.base_url = "https://generativelanguage.googleapis.com/v1beta"
+    agent.model = "gemini-test"
+    agent._disable_streaming = True
+    hook = MagicMock()
+    dump = MagicMock()
+    monkeypatch.setattr(
+        prompt_context,
+        "require_retrieval_evidence_dispatch_capability",
+        require_retrieval_evidence_dispatch_capability,
+    )
+    monkeypatch.setenv("HERMES_DUMP_REQUESTS", "1")
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", handler)
+    with (
+        patch.object(agent, "_create_request_openai_client", return_value=client),
+        patch.object(agent, "_close_request_openai_client"),
+        patch.object(agent, "_save_session_log"),
+        patch.object(agent, "_flush_messages_to_session_db"),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+        patch.object(agent, "_dump_api_request_debug", dump),
+        patch("hermes_cli.plugins.invoke_hook", hook),
+    ):
+        outcome = run_conversation_with_approved_retrieval(
+            agent, "authorized retrieval turn", prepared
+        )
+
+    serialized = json.dumps(observations[0]["body"], ensure_ascii=False)
+    assert outcome["final_response"] == "bound answer"
+    assert observations[0]["receipt"] == "written"
+    assert serialized.count("<kwrag_slot_evidence>") == 1
+    assert not any(call.args and call.args[0] == "pre_api_request" for call in hook.mock_calls)
+    dump.assert_not_called()
+    assert prepared.consumption_receipt["sdk_method"] == (
+        "httpx.HTTPTransport.handle_request:gemini.generateContent"
+    )
+    assert "kwrag_slot_evidence" not in json.dumps(prepared.consumption_receipt)
+    assert prepared.content_free_attestation()["dispatchHandoffStatus"] == (
+        "evidence_dispatch_handoff_committed"
+    )
     assert prepared.content_free_attestation()["transportOutcomeStatus"] == (
         "response_observed"
     )

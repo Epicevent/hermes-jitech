@@ -455,8 +455,6 @@ def test_actual_fts_probe_and_restart_status_are_content_free(
     before = fixture["database"].read_bytes()
     proof = _probe(fixture)
     assert proof["resultStatus"] == "hits" and proof["resultCount"] == 1
-    assert proof["consumptionStatus"] == "not_consumed"
-    assert proof["providerDispatchAttempted"] is False
     assert fixture["database"].read_bytes() == before
     assert "parcel marker" not in json.dumps(proof)
     status = enabled_p1_status(state_root=fixture["state"])
@@ -472,6 +470,69 @@ def test_actual_fts_probe_and_restart_status_are_content_free(
                 / "jitech-embedded-retrieval-attachment-status-v1.valid.json"
             ).read_text()
         )
+    )
+
+
+@POSIX_RUNTIME
+def test_p1_hits_enter_existing_conversation_consumption_seam(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from plugins.kwrag_slot.prompt_context import run_conversation_with_approved_retrieval
+
+    fixture = _fixture(tmp_path, monkeypatch)
+
+    class Agent:
+        session_id = "oc20-conversation-fixture"
+
+        def run_conversation(self, _message, **kwargs):
+            binding = {
+                "schema": "jitech-provider-sdk-request-attempt-binding/v1",
+                "providerAttemptId": 1,
+                "providerCallId": "11111111-1111-4111-8111-111111111111",
+                "configuredProvider": "gemini",
+                "configuredModel": "gemini-test",
+                "provider": "gemini",
+                "apiMode": "chat_completions",
+                "model": "gemini-test",
+                "sdkMethod": "httpx.HTTPTransport.handle_request:gemini.generateContent",
+                "leafAdapter": "agent.gemini_native_adapter.GeminiNativeAtomicHttpRequest/v1",
+                "endpointIdentity": "https://generativelanguage.googleapis.com/v1beta",
+                "fallbackIndex": 0,
+                "configuredRouteChainDigest": _digest(b"route"),
+                "finalRequestKwargsDigest": _digest(b"request"),
+            }
+            binding["providerAttemptBindingDigest"] = _digest(
+                canonical_json_bytes(binding)
+            )
+            kwargs["ephemeral_user_context_on_request"](binding)
+            kwargs["ephemeral_user_context_on_outcome"](
+                "response_observed", binding["providerAttemptBindingDigest"], None
+            )
+            return {"completed": True, "final_response": "bound answer"}
+
+    def run_existing_seam(prompt, *, approved_retrieval, **_kwargs):
+        return run_conversation_with_approved_retrieval(
+            Agent(), prompt, approved_retrieval
+        )
+
+    monkeypatch.setattr(
+        "plugins.kwrag_slot.prompt_context.require_retrieval_evidence_dispatch_capability",
+        lambda _agent: "fixture",
+    )
+    monkeypatch.setattr("hermes_cli.oneshot._run_agent", run_existing_seam)
+    proof = run_p1_attachment_probe(
+        runtime_binding_path=fixture["runtime"],
+        p1_binding_path=fixture["binding"],
+        resource_observation_path=fixture["resource"],
+        request_path=fixture["request"],
+        conversation_message="answer with the approved evidence",
+        state_root=fixture["state"],
+    )
+    assert proof["conversationAttestation"]["dispatchHandoffStatus"] == (
+        "evidence_dispatch_handoff_committed"
+    )
+    assert proof["conversationAttestation"]["transportOutcomeStatus"] == (
+        "response_observed"
     )
 
 
@@ -505,7 +566,6 @@ def test_zero_hit_is_linked_without_provider_dispatch(
     _write(fixture["request"], request)
     proof = _probe(fixture)
     assert proof["resultStatus"] == "zero_hits" and proof["resultCount"] == 0
-    assert proof["providerDispatchAttempted"] is False
 
 
 @pytest.mark.parametrize(
@@ -869,8 +929,22 @@ def test_disabled_probe_has_no_backend_or_receipt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fixture = _fixture(tmp_path, monkeypatch, enabled=False)
-    with pytest.raises(HermesP1AttachmentError, match="disabled"):
-        _probe(fixture)
+    run_agent = pytest.MonkeyPatch()
+    called = []
+    run_agent.setattr("hermes_cli.oneshot._run_agent", lambda *_a, **_k: called.append(1))
+    try:
+        with pytest.raises(HermesP1AttachmentError, match="disabled"):
+            run_p1_attachment_probe(
+                runtime_binding_path=fixture["runtime"],
+                p1_binding_path=fixture["binding"],
+                resource_observation_path=fixture["resource"],
+                request_path=fixture["request"],
+                conversation_message="must not run",
+                state_root=fixture["state"],
+            )
+    finally:
+        run_agent.undo()
+    assert called == []
     assert not list(fixture["state"].glob("*-receipts.jsonl"))
 
 

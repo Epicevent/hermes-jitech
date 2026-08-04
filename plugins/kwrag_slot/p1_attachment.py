@@ -47,6 +47,12 @@ def _hash(value: object) -> str:
 P1_IDENTITY_DIGEST = _hash(P1_IDENTITY)
 
 
+def _component():
+    import kwrag_p1_attachment
+
+    return kwrag_p1_attachment
+
+
 def _digest(value: object, label: str) -> str:
     if not _SHA256.fullmatch(text := str(value or "")):
         raise HermesP1AttachmentError(f"{label} is invalid")
@@ -54,15 +60,11 @@ def _digest(value: object, label: str) -> str:
 
 
 def _read_json(path: Path, label: str) -> tuple[dict[str, Any], str]:
-    from kwrag_p1_attachment import load_canonical_mapping
-
-    return load_canonical_mapping(path, label)
+    return _component().load_canonical_mapping(path, label)
 
 
 def _read_resource_observation(path: Path) -> tuple[dict[str, Any], str]:
-    from kwrag_p1_attachment import load_authoritative_canonical_mapping
-
-    return load_authoritative_canonical_mapping(
+    return _component().load_authoritative_canonical_mapping(
         path, "resource observation", required_owner_uid=_OPS_OBSERVATION_UID
     )
 
@@ -116,10 +118,8 @@ def _validate_binding(
     component: str,
     resource: str,
 ) -> None:
-    from kwrag_p1_attachment import validate_attachment_binding
-
     manifest = load_component_manifest()
-    validate_attachment_binding(
+    _component().validate_attachment_binding(
         value,
         digest=digest,
         expected_digest=expected_digest,
@@ -131,11 +131,9 @@ def _validate_binding(
 
 
 def _validate_resource(value: dict[str, Any], *, profile: str, instance: str) -> int:
-    from kwrag_p1_attachment import validate_resource_observation
-
     container, cgroup = _runtime_identity()
     limits = load_resource_profile()
-    return validate_resource_observation(
+    return _component().validate_resource_observation(
         value,
         profile_digest=profile,
         instance_id=instance,
@@ -164,9 +162,7 @@ def _root(root: Path | None) -> Path:
 
 
 def _receipt(path: Path, digest: str | None, label: str) -> dict[str, Any]:
-    from kwrag_p1_attachment import load_receipt
-
-    return load_receipt(path, digest, label)
+    return _component().load_receipt(path, digest, label)
 
 
 def _runtime(
@@ -178,9 +174,7 @@ def _runtime(
     room: str,
     maximum_bytes: int,
 ):
-    from kwrag_p1_attachment import build_p1_runtime
-
-    return build_p1_runtime(
+    return _component().build_p1_runtime(
         runtime,
         runtime_digest,
         binding,
@@ -198,21 +192,19 @@ def run_p1_attachment_probe(
     p1_binding_path: Path,
     resource_observation_path: Path,
     request_path: Path,
+    conversation_message: str | None = None,
     state_root: Path | None = None,
 ) -> dict[str, Any]:
     enabled, component, ops_digest, resource_digest, mount = _environment()
     if not enabled:
         raise HermesP1AttachmentError("caller-explicit P1 attachment is disabled")
     root = _root(state_root)
-    expected = {
-        "binding": root / "binding-v2.json",
-        "runtime": root / "runtime-binding.json",
-        "resource": root / "resource-observation.json",
-    }
-    if (
-        Path(p1_binding_path) != expected["binding"]
-        or Path(runtime_binding_path) != expected["runtime"]
-        or Path(resource_observation_path) != expected["resource"]
+    if tuple(
+        map(Path, (p1_binding_path, runtime_binding_path, resource_observation_path))
+    ) != (
+        root / "binding-v2.json",
+        root / "runtime-binding.json",
+        root / "resource-observation.json",
     ):
         raise HermesP1AttachmentError(
             "attachment inputs are outside the OPS state root"
@@ -281,21 +273,34 @@ def run_p1_attachment_probe(
         consumption_digest = FileConsumptionReceiptSink(
             root / "attachment-receipts.jsonl"
         ).write(consumption)
-        return {
+        proof = {
             "schema": "jitech-hermes-kwrag-p1-attachment-proof/v1",
-            "componentDigest": component,
-            "bindingDigest": binding_digest,
-            "p1IdentityDigest": P1_IDENTITY_DIGEST,
-            "attachmentDataDigest": _hash(binding["attachmentData"]),
-            "databaseSizeBytes": pipeline.database_size,
             "operationReceiptDigest": receipt["operation_receipt_digest"],
             "resultReceiptDigest": result.result_receipt_digest,
             "consumptionReceiptDigest": consumption_digest,
             "resultStatus": receipt["result_status"],
             "resultCount": receipt["result_count"],
-            "consumptionStatus": "not_consumed",
-            "providerDispatchAttempted": False,
         }
+        if conversation_message is not None:
+            if not conversation_message:
+                raise HermesP1AttachmentError("conversation message is empty")
+            from hermes_cli.oneshot import _run_agent
+
+            outcome = _run_agent(
+                conversation_message,
+                toolsets=[],
+                use_config_toolsets=False,
+                approved_retrieval=result,
+            )
+            attestation = result.content_free_attestation()
+            if not (
+                isinstance(outcome, dict)
+                and outcome.get("completed") is True
+                and attestation["transportOutcomeStatus"] == "response_observed"
+            ):
+                raise HermesP1AttachmentError("retrieval conversation did not complete")
+            proof["conversationAttestation"] = attestation
+        return proof
     finally:
         pipeline.close()
 
@@ -363,9 +368,7 @@ def enabled_p1_status(*, state_root: Path | None = None) -> dict[str, Any]:
         )
     finally:
         pipeline.close()
-    from kwrag_p1_attachment import validate_receipt_linkage
-
-    validate_receipt_linkage(
+    _component().validate_receipt_linkage(
         consumption,
         operation,
         result,

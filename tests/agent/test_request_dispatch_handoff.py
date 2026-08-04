@@ -45,10 +45,15 @@ def _route(
     }
 
 
-def test_product_revision_has_no_retrieval_evidence_dispatch_adapter() -> None:
+def test_retrieval_evidence_capability_is_native_gemini_only() -> None:
+    assert require_retrieval_evidence_dispatch_capability(SimpleNamespace(
+        provider="gemini",
+        api_mode="chat_completions",
+        base_url="https://generativelanguage.googleapis.com/v1beta",
+    )) == "agent.gemini_native_adapter.GeminiNativeAtomicHttpRequest/v1"
     with pytest.raises(
         FinalProviderBindingUnsupported,
-        match="no production atomic serialized-request adapter",
+        match="native Gemini atomic request boundary",
     ):
         require_retrieval_evidence_dispatch_capability(SimpleNamespace())
 
@@ -557,7 +562,6 @@ def test_nonconfigured_final_route_fails_before_receipt_or_sdk(override) -> None
 @pytest.mark.parametrize(
     ("module_name", "class_name"),
     [
-        ("agent.gemini_native_adapter", "GeminiNativeClient"),
         ("agent.gemini_cloudcode_adapter", "GeminiCloudCodeClient"),
         ("agent.copilot_acp_client", "CopilotACPClient"),
     ],
@@ -569,6 +573,60 @@ def test_unsupported_provider_facade_has_no_authoritative_leaf_binding(
     client_type = type(class_name, (), {"__module__": module_name})
     with pytest.raises(FinalProviderBindingUnsupported):
         require_authoritative_leaf_adapter(client_type())
+
+
+def test_exact_unhooked_native_gemini_has_authoritative_leaf_binding() -> None:
+    import httpx
+
+    from agent.gemini_native_adapter import GeminiNativeClient
+
+    client = GeminiNativeClient(api_key="fixture-key", http_client=httpx.Client())
+    try:
+        assert require_authoritative_leaf_adapter(client) == (
+            "agent.gemini_native_adapter.GeminiNativeAtomicHttpRequest/v1"
+        )
+        client._default_headers = {"X-Fixture": "not-allowed"}
+        with pytest.raises(FinalProviderBindingUnsupported, match="unhooked atomic"):
+            require_authoritative_leaf_adapter(client)
+    finally:
+        client.close()
+
+
+def test_native_gemini_streaming_rejects_before_receipt_or_sdk() -> None:
+    import httpx
+
+    from agent.gemini_native_adapter import GeminiNativeClient
+
+    receipts: list[dict] = []
+    handoff = RequestDispatchHandoff(
+        lambda binding, _kwargs: receipts.append(binding),
+        interrupted=lambda: False,
+        interrupted_message="abandoned",
+        max_attempts=1,
+        callback_accepts_attempt_binding=True,
+        configured_provider="gemini",
+        configured_model="gemini-test",
+        allowed_provider_routes=(_route(
+            provider="gemini",
+            model="gemini-test",
+            endpoint_identity="https://generativelanguage.googleapis.com/v1beta",
+        ),),
+    )
+    handoff.bind_provider_call_identity("11111111-1111-4111-8111-111111111111")
+    client = GeminiNativeClient(api_key="fixture-key", http_client=httpx.Client())
+    try:
+        with pytest.raises(RuntimeError, match="non-streaming atomic Gemini"):
+            client._create_chat_completion(
+                model="gemini-test",
+                messages=[{"role": "user", "content": "fixture"}],
+                stream=True,
+                _hermes_request_dispatch_handoff=handoff,
+            )
+    finally:
+        client.close()
+    assert receipts == []
+    assert handoff.state == "pending"
+    assert handoff.sdk_entry_intent_committed is False
 
 
 @pytest.mark.parametrize(

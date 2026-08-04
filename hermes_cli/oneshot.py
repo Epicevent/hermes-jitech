@@ -221,7 +221,8 @@ def _run_agent(
     provider: Optional[str] = None,
     toolsets: object = None,
     use_config_toolsets: bool = True,
-) -> str:
+    approved_retrieval: object = None,
+) -> object:
     """Build an AIAgent exactly like a normal CLI chat turn would, then
     run a single conversation.  Returns the final response string."""
     # Imports are local so they don't run when hermes is invoked for
@@ -337,6 +338,15 @@ def _run_agent(
     agent.stream_delta_callback = None
     agent.tool_gen_callback = None
 
+    if approved_retrieval is not None:
+        from plugins.kwrag_slot.prompt_context import (
+            run_conversation_with_approved_retrieval,
+        )
+
+        agent._disable_streaming = True
+        return run_conversation_with_approved_retrieval(
+            agent, prompt, approved_retrieval
+        )
     return agent.chat(prompt) or ""
 
 

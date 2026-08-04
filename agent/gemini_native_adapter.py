@@ -936,6 +936,8 @@ class GeminiNativeClient:
         stop: Any = None,
         extra_body: Optional[Dict[str, Any]] = None,
         timeout: Any = None,
+        _hermes_request_dispatch_handoff: Any = None,
+        _hermes_fallback_index: int = 0,
         **_: Any,
     ) -> Any:
         self.last_provider_receipt = None
@@ -954,11 +956,50 @@ class GeminiNativeClient:
             thinking_config=thinking_config,
         )
 
+        if stream and _hermes_request_dispatch_handoff is not None:
+            raise RuntimeError("retrieval evidence requires one non-streaming atomic Gemini request")
         if stream:
             return self._stream_completion(model=model, request=request, timeout=timeout)
 
         url = f"{self.base_url}/models/{model}:generateContent"
-        response = self._http.post(url, json=request, headers=self._headers(), timeout=timeout)
+        if _hermes_request_dispatch_handoff is None:
+            response = self._http.post(url, json=request, headers=self._headers(), timeout=timeout)
+        else:
+            import hashlib
+
+            from agent.request_dispatch import canonical_endpoint_identity, require_authoritative_leaf_adapter
+
+            leaf = require_authoritative_leaf_adapter(self)
+            prepared = self._http.build_request(
+                "POST", url, json=request, headers=self._headers(), timeout=timeout
+            )
+            body_digest = "sha256:" + hashlib.sha256(prepared.content).hexdigest()
+            send = self._http._transport.handle_request
+
+            def send_prepared(_bound):
+                if "sha256:" + hashlib.sha256(prepared.content).hexdigest() != body_digest:
+                    raise RuntimeError("prepared Gemini request mutated before dispatch")
+                response = send(prepared)
+                response.read()
+                return response
+
+            response = _hermes_request_dispatch_handoff.commit_and_claim_dispatch(
+                send_prepared,
+                provider="gemini",
+                api_mode="chat_completions",
+                model=model,
+                sdk_method="httpx.HTTPTransport.handle_request:gemini.generateContent",
+                leaf_adapter=leaf,
+                endpoint_identity=canonical_endpoint_identity(self.base_url, provider="gemini"),
+                fallback_index=_hermes_fallback_index,
+                request_kwargs={
+                    "url": url,
+                    "json": request,
+                    "bodySha256": body_digest,
+                    "timeout": prepared.extensions.get("timeout"),
+                    "credentialHeaderName": "x-goog-api-key",
+                },
+            )
         if response.status_code != 200:
             raise gemini_http_error(response)
         try:

@@ -1199,18 +1199,7 @@ def run_conversation(
     ) -> None:
         if not isinstance(ephemeral_user_context, str) or not ephemeral_user_context:
             raise RuntimeError("ephemeral user context is unavailable at dispatch")
-        request_messages = final_api_kwargs.get("messages")
-        if not isinstance(request_messages, list):
-            request_messages = final_api_kwargs.get("input")
-        if not isinstance(request_messages, list):
-            raise RuntimeError(
-                "provider request has no message collection for ephemeral context"
-            )
-        exact_occurrences = 0
-        for item in request_messages:
-            if not isinstance(item, dict) or item.get("role") != "user":
-                continue
-            exact_occurrences += _count_exact_ephemeral_context(item.get("content"))
+        exact_occurrences = _count_exact_ephemeral_context(final_api_kwargs)
         if exact_occurrences != 1:
             raise RuntimeError(
                 "final provider request does not contain exactly one unmodified "
@@ -1829,6 +1818,8 @@ def run_conversation(
                     # mutated by the agent loop, so a shallow copy is
                     # sufficient; a deepcopy would walk every tool result
                     # and base64 image on every API call.
+                    if ephemeral_user_context:
+                        raise LookupError("retrieval evidence is not exposed to request hooks")
                     _invoke_hook(
                         "pre_api_request",
                         task_id=effective_task_id,
@@ -1851,7 +1842,7 @@ def run_conversation(
                 except Exception:
                     pass
 
-                if env_var_enabled("HERMES_DUMP_REQUESTS"):
+                if not ephemeral_user_context and env_var_enabled("HERMES_DUMP_REQUESTS"):
                     agent._dump_api_request_debug(api_kwargs, reason="preflight")
 
                 # Always prefer the streaming path — even without stream
@@ -4065,7 +4056,7 @@ def run_conversation(
                         compression_attempts = 0
                         primary_recovery_attempted = False
                         continue
-                    if api_kwargs is not None:
+                    if api_kwargs is not None and not ephemeral_user_context:
                         agent._dump_api_request_debug(
                             api_kwargs, reason="non_retryable_client_error", error=api_error,
                         )
@@ -4267,7 +4258,7 @@ def run_conversation(
                         agent.log_prefix, max_retries, _final_summary,
                         _provider, _model, len(api_messages), f"{approx_tokens:,}",
                     )
-                    if api_kwargs is not None:
+                    if api_kwargs is not None and not ephemeral_user_context:
                         agent._dump_api_request_debug(
                             api_kwargs, reason="max_retries_exhausted", error=api_error,
                         )

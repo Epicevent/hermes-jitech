@@ -90,6 +90,30 @@ def _dispatch_endpoint_identity(dispatch_handoff, agent, client, *, base_url=Non
     )
 
 
+def _dispatch_chat_completion(dispatch_handoff, agent, client, kwargs, *, streaming=False):
+    """Dispatch through the exact native leaf when evidence is bound."""
+
+    leaf = _dispatch_leaf_identity(dispatch_handoff, client)
+    if leaf == "agent.gemini_native_adapter.GeminiNativeAtomicHttpRequest/v1":
+        return client._create_chat_completion(
+            **kwargs,
+            _hermes_request_dispatch_handoff=dispatch_handoff,
+            _hermes_fallback_index=int(getattr(agent, "_fallback_index", 0) or 0),
+        )
+    return dispatch_handoff.commit_and_claim_dispatch(
+        lambda bound_kwargs: client.chat.completions.create(**bound_kwargs),
+        provider=str(agent.provider or "unknown"),
+        api_mode=str(agent.api_mode or "chat_completions"),
+        model=str(kwargs.get("model") or agent.model or "unknown"),
+        sdk_method="chat.completions.create",
+        leaf_adapter=leaf,
+        endpoint_identity=_dispatch_endpoint_identity(dispatch_handoff, agent, client),
+        fallback_index=int(getattr(agent, "_fallback_index", 0) or 0),
+        request_kwargs=kwargs,
+        outcome_on_return=None if streaming else "response_observed",
+    )
+
+
 def _ra():
     """Lazy ``run_agent`` reference.
 
@@ -408,23 +432,8 @@ def interruptible_api_call(agent, api_kwargs: dict, *, on_request_dispatch=None)
                         api_kwargs=api_kwargs,
                     )
                 )
-                response = dispatch_handoff.commit_and_claim_dispatch(
-                    lambda bound_kwargs: request_client.chat.completions.create(
-                        **bound_kwargs
-                    ),
-                    provider=str(agent.provider or "unknown"),
-                    api_mode=str(agent.api_mode or "chat_completions"),
-                    model=str(api_kwargs.get("model") or agent.model or "unknown"),
-                    sdk_method="chat.completions.create",
-                    leaf_adapter=_dispatch_leaf_identity(
-                        dispatch_handoff,
-                        request_client,
-                    ),
-                    endpoint_identity=_dispatch_endpoint_identity(
-                        dispatch_handoff, agent, request_client
-                    ),
-                    fallback_index=int(getattr(agent, "_fallback_index", 0) or 0),
-                    request_kwargs=api_kwargs,
+                response = _dispatch_chat_completion(
+                    dispatch_handoff, agent, request_client, api_kwargs
                 )
                 _publish_worker_response(response)
                 _capture_request_provider_receipt(agent, request_client)
@@ -2098,24 +2107,8 @@ def interruptible_streaming_api_call(
         # ``request_client_holder["diag"]`` for closure access.
         _diag = agent._stream_diag_init()
         request_client_holder["diag"] = _diag
-        stream = dispatch_handoff.commit_and_claim_dispatch(
-            lambda bound_kwargs: request_client.chat.completions.create(
-                **bound_kwargs
-            ),
-            provider=str(agent.provider or "unknown"),
-            api_mode=str(agent.api_mode or "chat_completions"),
-            model=str(stream_kwargs.get("model") or agent.model or "unknown"),
-            sdk_method="chat.completions.create",
-            leaf_adapter=_dispatch_leaf_identity(
-                dispatch_handoff,
-                request_client,
-            ),
-            endpoint_identity=_dispatch_endpoint_identity(
-                dispatch_handoff, agent, request_client
-            ),
-            fallback_index=int(getattr(agent, "_fallback_index", 0) or 0),
-            request_kwargs=stream_kwargs,
-            outcome_on_return=None,
+        stream = _dispatch_chat_completion(
+            dispatch_handoff, agent, request_client, stream_kwargs, streaming=True
         )
 
         # Capture rate limit headers from the initial HTTP response.
