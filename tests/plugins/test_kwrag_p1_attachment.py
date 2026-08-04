@@ -672,8 +672,12 @@ def test_self_consistent_semantic_receipt_corruption_is_rejected(
     result_path.write_bytes(result_raw + b"\n")
     consumption["result_receipt_digest"] = _digest(result_raw)
     consumption_path.write_bytes(canonical_json_bytes(consumption) + b"\n")
-    with pytest.raises(ValueError, match="linkage"):
+    with pytest.raises(ValueError) as error:
         enabled_p1_status(state_root=root)
+    if field == "corpora":
+        assert str(error.value) == "FTS database is not uniquely bound"
+    else:
+        assert "linkage" in str(error.value)
 
 
 @POSIX_RUNTIME
