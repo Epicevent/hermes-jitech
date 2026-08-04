@@ -32,10 +32,10 @@ ROOT = Path(__file__).parents[2]
 KWRAG_WHEEL = ROOT / "vendor" / "kwrag" / "kwrag_product_service-0.1.0-py3-none-any.whl"
 P1_WHEEL = ROOT / "vendor" / "kwrag_p1" / "kwrag_p1_attachment-0.1.2-py3-none-any.whl"
 P1_COMPONENT_WHEEL_DIGEST = (
-    "sha256:8bf4ba490a68091678c7cf3cea529457a93cd58d9c189ca566337fc9999f7790"
+    "sha256:e0d71a0278d7f20603c82d8050f7516ae8e4d5d8dbaed5e34541a9998422dc4a"
 )
 P1_COMPONENT_MANIFEST_DIGEST = (
-    "sha256:46376296597c08df1f85cd3d8de05dcdb543174bdee81116c3a5357c94de60ce"
+    "sha256:b391d632b264104bfe5d5fdcb25d18d411dc5ddcf7302215342ac58dcef8e956"
 )
 P1_FACTORY_SOURCE_DIGEST = (
     "sha256:104276b46fa427d741fcf63db87b70d9a6d8a2ad32e63c4a43e87692041ed43e"
@@ -313,6 +313,8 @@ def test_component_selects_latest_canonical_receipt(tmp_path: Path) -> None:
     ledger = (tmp_path / "receipts.jsonl").resolve()
     ledger.write_bytes(first_raw + b"\n" + second_raw + b"\n")
     assert load_receipt(ledger, None, "receipt") == second
+    assert load_receipt(ledger, _digest(first_raw), "receipt") == first
+    ledger.write_bytes(first_raw + b"\n" + first_raw + b"\n")
     assert load_receipt(ledger, _digest(first_raw), "receipt") == first
     ledger.write_bytes(first_raw + b"\n" + b'{"attempt": 2}' + b"\n")
     with pytest.raises(ValueError, match="ledger is invalid"):
@@ -593,6 +595,65 @@ def test_self_consistent_semantic_receipt_corruption_is_rejected(
     consumption_path.write_bytes(canonical_json_bytes(consumption) + b"\n")
     with pytest.raises(ValueError, match="linkage"):
         enabled_p1_status(state_root=root)
+
+
+@pytest.mark.parametrize(
+    "field,replacement",
+    [
+        ("result_status", "invented"),
+        ("result_count", -1),
+        ("result_count", False),
+        ("result_digest", "not-a-digest"),
+    ],
+)
+@POSIX_RUNTIME
+def test_self_consistent_invalid_result_semantics_are_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    replacement: object,
+) -> None:
+    fixture = _fixture(tmp_path, monkeypatch)
+    _probe(fixture)
+    root = fixture["state"]
+    operation_path = root / "operation-receipts.jsonl"
+    result_path = root / "result-receipts.jsonl"
+    consumption_path = root / "attachment-receipts.jsonl"
+    operation = json.loads(operation_path.read_text())
+    result = json.loads(result_path.read_text())
+    consumption = json.loads(consumption_path.read_text())
+    for receipt in (operation, result, consumption):
+        receipt[field] = replacement
+    operation_raw = canonical_json_bytes(operation)
+    operation_path.write_bytes(operation_raw + b"\n")
+    operation_digest = _digest(operation_raw)
+    result["operation_receipt_digest"] = operation_digest
+    consumption["operation_receipt_digest"] = operation_digest
+    result_raw = canonical_json_bytes(result)
+    result_path.write_bytes(result_raw + b"\n")
+    consumption["result_receipt_digest"] = _digest(result_raw)
+    consumption_path.write_bytes(canonical_json_bytes(consumption) + b"\n")
+    with pytest.raises(ValueError, match="linkage"):
+        enabled_p1_status(state_root=root)
+
+
+@POSIX_RUNTIME
+def test_identical_replayed_receipts_preserve_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = _fixture(tmp_path, monkeypatch)
+    _probe(fixture)
+    for name in (
+        "operation-receipts.jsonl",
+        "result-receipts.jsonl",
+        "attachment-receipts.jsonl",
+    ):
+        ledger = fixture["state"] / name
+        raw = ledger.read_bytes()
+        ledger.write_bytes(raw + raw)
+    status = enabled_p1_status(state_root=fixture["state"])
+    assert status["attachmentHealth"] == "healthy"
+    assert status["linkageStatus"] == "complete"
 
 
 @POSIX_RUNTIME
