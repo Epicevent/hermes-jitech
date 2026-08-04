@@ -519,7 +519,7 @@ def test_embedded_wheel_and_disabled_status_bind_exact_component(monkeypatch) ->
     assert status["consumptionReceiptDigest"] is None
 
 
-def test_status_fails_closed_before_enabled_product_invocation(monkeypatch) -> None:
+def test_status_fails_closed_before_caller_explicit_attachment_proof(monkeypatch) -> None:
     manifest = load_component_manifest()
     resource = load_resource_profile()
     monkeypatch.setenv("JITECH_RETRIEVAL_ENABLED", "true")
@@ -528,7 +528,7 @@ def test_status_fails_closed_before_enabled_product_invocation(monkeypatch) -> N
     monkeypatch.setenv("JITECH_RETRIEVAL_RESOURCE_PROFILE_DIGEST", resource["profileDigest"])
     monkeypatch.setenv("HERMES_WORKSPACE_DIR", "/workspace")
     monkeypatch.setattr("plugins.kwrag_slot.cli.os.statvfs", lambda _path: SimpleNamespace(f_flag=1), raising=False)
-    with pytest.raises(RuntimeError, match="approved product invocation"):
+    with pytest.raises(RuntimeError, match="p1-attachment-status"):
         _status()
 
 
@@ -554,6 +554,7 @@ def test_docker_labels_match_embedded_retrieval_ops_contract() -> None:
     resource_json = json.dumps(resource, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     assert f"{prefix}resource.json='{resource_json}'" in dockerfile
     assert f"{prefix}verify-command.json='[\"hermes\",\"kwrag-slot\",\"status\",\"--json\"]'" in dockerfile
+    assert "com.epicevent.hermes.kwrag.p1.verify-command.json='[\"hermes\",\"kwrag-slot\",\"p1-attachment-status\",\"--json\"]'" in dockerfile
 
 
 def test_enabled_and_disabled_status_fixtures_are_canonical_and_content_free() -> None:

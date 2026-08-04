@@ -14,6 +14,7 @@ SOURCE_REVISION = "49c10212ff12433941cfbe43d95013d1d2f0aebe"
 RESOURCE_PROFILE_DIGEST = "sha256:2d4ff46a2d76e712421a9758ecb0ae1d262e2d42ea00cee888c103477e6709ed"
 BINDING_DIGEST = "sha256:" + "d" * 64
 LABEL_PREFIX = "com.epicevent.agent-runtime.retrieval."
+P1_LABEL_PREFIX = "com.epicevent.hermes.kwrag.p1."
 
 
 def _inspect_labels(image: str) -> dict[str, str]:
@@ -46,6 +47,13 @@ def test_image_binds_embedded_component_and_default_off_status(built_image, tmp_
     }
     for suffix, value in expected.items():
         assert labels[f"{LABEL_PREFIX}{suffix}"] == value
+    assert labels[f"{P1_LABEL_PREFIX}status"] == "research_selected_p1_attachment_probe_candidate"
+    assert labels[f"{P1_LABEL_PREFIX}backend-id"] == "slot-local-fts5-trigram-or-attachment-v1"
+    assert labels[f"{P1_LABEL_PREFIX}default-enabled"] == "false"
+    assert labels[f"{P1_LABEL_PREFIX}caller-explicit"] == "true"
+    assert labels[f"{P1_LABEL_PREFIX}provider-dispatch-required"] == "false"
+    assert labels[f"{P1_LABEL_PREFIX}status-schema"] == "jitech-embedded-retrieval-attachment-status/v1"
+    assert labels[f"{P1_LABEL_PREFIX}verify-command.json"] == '["hermes","kwrag-slot","p1-attachment-status","--json"]'
 
     result = subprocess.run(
         [
