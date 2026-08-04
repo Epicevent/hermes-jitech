@@ -973,11 +973,20 @@ class GeminiNativeClient:
             prepared = self._http.build_request(
                 "POST", url, json=request, headers=self._headers(), timeout=timeout
             )
-            body_digest = "sha256:" + hashlib.sha256(prepared.content).hexdigest()
+            def prepared_digest():
+                digest = hashlib.sha256()
+                chunks = [prepared.method.encode(), str(prepared.url).encode()]
+                chunks += [name + b":" + value for name, value in prepared.headers.raw]
+                chunks.append(prepared.content)
+                for chunk in chunks:
+                    digest.update(len(chunk).to_bytes(8, "big") + chunk)
+                return "sha256:" + digest.hexdigest()
+
+            request_digest = prepared_digest()
             send = self._http._transport.handle_request
 
             def send_prepared(_bound):
-                if "sha256:" + hashlib.sha256(prepared.content).hexdigest() != body_digest:
+                if prepared_digest() != request_digest:
                     raise RuntimeError("prepared Gemini request mutated before dispatch")
                 response = send(prepared)
                 response.read()
@@ -995,9 +1004,8 @@ class GeminiNativeClient:
                 request_kwargs={
                     "url": str(prepared.url),
                     "json": request,
-                    "bodySha256": body_digest,
+                    "preparedRequestSha256": request_digest,
                     "timeout": prepared.extensions.get("timeout"),
-                    "credentialHeaderName": "x-goog-api-key",
                 },
             )
         if response.status_code != 200:

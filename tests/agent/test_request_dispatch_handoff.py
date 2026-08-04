@@ -592,6 +592,61 @@ def test_exact_unhooked_native_gemini_has_authoritative_leaf_binding() -> None:
         client.close()
 
 
+def test_native_gemini_binding_covers_prepared_headers_without_exposing_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import httpx
+
+    from agent.gemini_native_adapter import GeminiNativeClient
+
+    def handler(_transport, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, request=request, json={"candidates": []})
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", handler)
+    final_request_digests = []
+    observed_projections = []
+    for index, billing_project in enumerate(("billing-a", "billing-b"), start=1):
+        receipts = []
+        handoff = RequestDispatchHandoff(
+            lambda binding, projection: receipts.append((binding, projection)),
+            interrupted=lambda: False,
+            interrupted_message="abandoned",
+            max_attempts=1,
+            callback_accepts_attempt_binding=True,
+            configured_provider="gemini",
+            configured_model="gemini-test",
+            allowed_provider_routes=(_route(
+                provider="gemini",
+                model="gemini-test",
+                endpoint_identity="https://generativelanguage.googleapis.com/v1beta",
+            ),),
+        )
+        handoff.bind_provider_call_identity(
+            f"00000000-0000-4000-8000-{index:012d}"
+        )
+        client = GeminiNativeClient(
+            api_key="fixture-secret-key",
+            http_client=httpx.Client(headers={"X-Goog-User-Project": billing_project}),
+        )
+        try:
+            client._create_chat_completion(
+                model="gemini-test",
+                messages=[{"role": "user", "content": "fixture"}],
+                _hermes_request_dispatch_handoff=handoff,
+            )
+        finally:
+            client.close()
+        binding, projection = receipts[0]
+        final_request_digests.append(binding["finalRequestKwargsDigest"])
+        observed_projections.append(projection)
+
+    assert final_request_digests[0] != final_request_digests[1]
+    assert all("preparedRequestSha256" in projection for projection in observed_projections)
+    assert "billing-a" not in repr(observed_projections)
+    assert "billing-b" not in repr(observed_projections)
+    assert "fixture-secret-key" not in repr(observed_projections)
+
+
 def test_native_gemini_streaming_rejects_before_receipt_or_sdk() -> None:
     import httpx
 
