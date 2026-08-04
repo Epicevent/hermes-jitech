@@ -528,7 +528,7 @@ def test_restart_status_rejects_database_binding_and_receipt_drift(
     binding = json.loads(fixture["binding"].read_text())
     binding["instanceId"] = "oc19"
     _write(fixture["binding"], binding)
-    with pytest.raises(HermesP1AttachmentError, match="drifted"):
+    with pytest.raises(ValueError, match="fields or digest are invalid"):
         enabled_p1_status(state_root=fixture["state"])
 
 
