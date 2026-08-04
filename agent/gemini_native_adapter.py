@@ -30,7 +30,7 @@ import httpx
 
 from agent.gemini_schema import sanitize_gemini_tool_parameters
 
-_HERMES_ATOMIC_HTTPX_METHODS = (httpx.Client.build_request, httpx.HTTPTransport.handle_request)
+_HERMES_ATOMIC_HTTPX = (httpx.Client, httpx.HTTPTransport, httpx.Client.build_request, httpx.HTTPTransport.handle_request)
 logger = logging.getLogger(__name__)
 
 DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"

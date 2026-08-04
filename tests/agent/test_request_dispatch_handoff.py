@@ -615,6 +615,32 @@ def test_exact_unhooked_native_gemini_has_authoritative_leaf_binding(
         client.close()
 
 
+def test_replaced_httpx_classes_are_not_authoritative_gemini_leaves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import httpx
+
+    from agent.gemini_native_adapter import GeminiNativeClient
+
+    class ReplacementTransport(httpx.HTTPTransport):
+        pass
+
+    class ReplacementClient(httpx.Client):
+        pass
+
+    monkeypatch.setattr(httpx, "HTTPTransport", ReplacementTransport)
+    monkeypatch.setattr(httpx, "Client", ReplacementClient)
+    client = GeminiNativeClient(
+        api_key="fixture-key",
+        http_client=ReplacementClient(transport=ReplacementTransport()),
+    )
+    try:
+        with pytest.raises(FinalProviderBindingUnsupported, match="unhooked atomic"):
+            require_authoritative_leaf_adapter(client)
+    finally:
+        client.close()
+
+
 def test_native_gemini_binding_covers_prepared_headers_without_exposing_them(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

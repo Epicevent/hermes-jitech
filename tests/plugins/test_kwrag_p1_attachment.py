@@ -33,10 +33,10 @@ ROOT = Path(__file__).parents[2]
 KWRAG_WHEEL = ROOT / "vendor" / "kwrag" / "kwrag_product_service-0.1.0-py3-none-any.whl"
 P1_WHEEL = ROOT / "vendor" / "kwrag_p1" / "kwrag_p1_attachment-0.1.2-py3-none-any.whl"
 P1_COMPONENT_WHEEL_DIGEST = (
-    "sha256:04d0b7e47a9f27c41c02a1dcf44ce44cb039e9f1d4f86b25357c34d81df0be40"
+    "sha256:f8c90245dabfce1edf840ef308f1d0969233e6adfa383a499ecf9632dea8284d"
 )
 P1_COMPONENT_MANIFEST_DIGEST = (
-    "sha256:a4e391cfde1d8f4840b3a083aa3a7e63ea82f73e44a83431821ac2f5756abce2"
+    "sha256:9df5ac053f40265bb864aa38d8dd00b0b1f05a32841e245a45d0f52cf8697be2"
 )
 P1_FACTORY_SOURCE_DIGEST = (
     "sha256:104276b46fa427d741fcf63db87b70d9a6d8a2ad32e63c4a43e87692041ed43e"
@@ -711,6 +711,8 @@ def test_semantically_corrupt_consumption_receipt_is_rejected(
         ("result", "result_characters", False),
         ("result", "result_characters", 0),
         ("result", "result_characters", 3),
+        ("result", "result_characters", 4),
+        ("result", "result_characters", 111),
         ("result", "result_characters", 20_001),
     ],
 )
