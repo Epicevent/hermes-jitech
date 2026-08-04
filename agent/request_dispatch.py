@@ -161,6 +161,28 @@ def require_authoritative_leaf_adapter(client: Any) -> str:
     """Require an atomic final-request adapter for retrieval evidence."""
 
     identity = provider_leaf_adapter_identity(client)
+    if identity == "agent.gemini_native_adapter.GeminiNativeClient":
+        from agent.gemini_native_adapter import GeminiNativeClient, _HERMES_ATOMIC_HTTPX
+
+        transport = getattr(client, "_http", None)
+        hooks = getattr(transport, "event_hooks", {})
+        if (
+            type(client) is GeminiNativeClient
+            and type(transport) is _HERMES_ATOMIC_HTTPX[0]
+            and type(getattr(transport, "_transport", None)) is _HERMES_ATOMIC_HTTPX[1]
+            and getattr(getattr(transport, "build_request", None), "__func__", None)
+            is _HERMES_ATOMIC_HTTPX[2]
+            and getattr(
+                getattr(transport._transport, "handle_request", None), "__func__", None
+            )
+            is _HERMES_ATOMIC_HTTPX[3]
+            and not getattr(client, "_default_headers", None)
+            and not any(hooks.values())
+        ):
+            return "agent.gemini_native_adapter.GeminiNativeAtomicHttpRequest/v1"
+        raise FinalProviderBindingUnsupported(
+            "Gemini retrieval evidence requires the exact unhooked atomic HTTP leaf"
+        )
     if identity in _SDK_LEAVES_WITHOUT_ATOMIC_REQUEST_BINDING:
         raise FinalProviderBindingUnsupported(
             "retrieval evidence dispatch requires an atomic final serialized "
@@ -171,12 +193,19 @@ def require_authoritative_leaf_adapter(client: Any) -> str:
     )
 
 
-def require_retrieval_evidence_dispatch_capability(_agent: Any) -> str:
-    """Fail before evidence projection until a production atomic adapter lands."""
+def require_retrieval_evidence_dispatch_capability(agent: Any) -> str:
+    """Admit only the configured native Gemini atomic request boundary."""
 
+    from agent.gemini_native_adapter import is_native_gemini_base_url
+
+    if (
+        str(getattr(agent, "provider", "") or "") == "gemini"
+        and str(getattr(agent, "api_mode", "") or "chat_completions") == "chat_completions"
+        and is_native_gemini_base_url(str(getattr(agent, "base_url", "") or ""))
+    ):
+        return "agent.gemini_native_adapter.GeminiNativeAtomicHttpRequest/v1"
     raise FinalProviderBindingUnsupported(
-        "this source revision has no production atomic serialized-request adapter "
-        "for retrieval evidence"
+        "retrieval evidence requires the configured native Gemini atomic request boundary"
     )
 
 

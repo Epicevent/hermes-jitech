@@ -804,6 +804,84 @@ def test_oneshot_wires_session_db_for_recall(monkeypatch):
     assert captured["prompt"] == "recall this"
 
 
+def test_oneshot_approved_retrieval_uses_existing_consumption_seam(monkeypatch):
+    """Caller-approved hits must not fall through to an ordinary clean turn."""
+    from hermes_cli.oneshot import _run_agent
+
+    captured = {}
+    approved = object()
+    sentinel_outcome = object()
+
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            captured["agent_kwargs"] = kwargs
+            captured["agent"] = self
+            self.suppress_status_output = False
+            self.stream_delta_callback = object()
+            self.tool_gen_callback = object()
+            self._disable_streaming = False
+
+        def chat(self, _prompt):
+            raise AssertionError("approved retrieval must not use an ordinary chat turn")
+
+    def run_existing_seam(agent, prompt, prepared):
+        captured.update(agent_for_seam=agent, prompt=prompt, prepared=prepared)
+        return sentinel_outcome
+
+    def mod(name, **attrs):
+        module = types.ModuleType(name)
+        for key, value in attrs.items():
+            setattr(module, key, value)
+        return module
+
+    monkeypatch.setitem(sys.modules, "run_agent", mod("run_agent", AIAgent=FakeAgent))
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.config",
+        mod("hermes_cli.config", load_config=lambda: {"model": {"default": "m"}}),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.models",
+        mod("hermes_cli.models", detect_provider_for_model=lambda *_args, **_kwargs: None),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.runtime_provider",
+        mod(
+            "hermes_cli.runtime_provider",
+            resolve_runtime_provider=lambda **_kwargs: {
+                "api_key": "k",
+                "base_url": "u",
+                "provider": "gemini",
+                "api_mode": "chat_completions",
+                "credential_pool": None,
+            },
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.tools_config",
+        mod("hermes_cli.tools_config", _get_platform_tools=lambda *_args, **_kwargs: set()),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "plugins.kwrag_slot.prompt_context",
+        mod(
+            "plugins.kwrag_slot.prompt_context",
+            run_conversation_with_approved_retrieval=run_existing_seam,
+        ),
+    )
+    monkeypatch.setattr("hermes_cli.oneshot._create_session_db_for_oneshot", lambda: None)
+
+    assert _run_agent("use these hits", approved_retrieval=approved) is sentinel_outcome
+    assert captured["agent_for_seam"] is captured["agent"]
+    assert captured["prompt"] == "use these hits"
+    assert captured["prepared"] is approved
+    assert captured["agent"]._disable_streaming is True
+    assert captured["agent_kwargs"]["skip_memory"] is True
+
+
 def test_launch_tui_exports_model_provider_and_toolsets(monkeypatch, main_mod):
     captured = {}
     active_path_during_call = None

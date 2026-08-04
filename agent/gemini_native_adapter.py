@@ -24,11 +24,13 @@ import time
 import uuid
 from types import SimpleNamespace
 from typing import Any, Dict, Iterator, List, Optional
+from urllib.parse import urlsplit
 
 import httpx
 
 from agent.gemini_schema import sanitize_gemini_tool_parameters
 
+_HERMES_ATOMIC_HTTPX = (httpx.Client, httpx.HTTPTransport, httpx.Client.build_request, httpx.HTTPTransport.handle_request)
 logger = logging.getLogger(__name__)
 
 DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
@@ -36,12 +38,12 @@ DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 
 def is_native_gemini_base_url(base_url: str) -> bool:
     """Return True when the endpoint speaks Gemini's native REST API."""
-    normalized = str(base_url or "").strip().rstrip("/").lower()
-    if not normalized:
+    try:
+        parsed = urlsplit(str(base_url or "").strip())
+        port = parsed.port
+    except ValueError:
         return False
-    if "generativelanguage.googleapis.com" not in normalized:
-        return False
-    return not normalized.endswith("/openai")
+    return parsed.scheme == "https" and parsed.hostname == "generativelanguage.googleapis.com" and port in (None, 443) and parsed.path.rstrip("/") == "/v1beta" and not (parsed.username or parsed.password or parsed.query or parsed.fragment)
 
 
 def probe_gemini_tier(
@@ -936,6 +938,8 @@ class GeminiNativeClient:
         stop: Any = None,
         extra_body: Optional[Dict[str, Any]] = None,
         timeout: Any = None,
+        _hermes_request_dispatch_handoff: Any = None,
+        _hermes_fallback_index: int = 0,
         **_: Any,
     ) -> Any:
         self.last_provider_receipt = None
@@ -954,11 +958,56 @@ class GeminiNativeClient:
             thinking_config=thinking_config,
         )
 
+        if stream and _hermes_request_dispatch_handoff is not None:
+            raise RuntimeError("retrieval evidence requires one non-streaming atomic Gemini request")
         if stream:
             return self._stream_completion(model=model, request=request, timeout=timeout)
 
         url = f"{self.base_url}/models/{model}:generateContent"
-        response = self._http.post(url, json=request, headers=self._headers(), timeout=timeout)
+        if _hermes_request_dispatch_handoff is None:
+            response = self._http.post(url, json=request, headers=self._headers(), timeout=timeout)
+        else:
+            import hashlib
+
+            from agent.request_dispatch import canonical_endpoint_identity, require_authoritative_leaf_adapter
+
+            leaf = require_authoritative_leaf_adapter(self)
+            prepared = self._http.build_request(
+                "POST", url, json=request, headers=self._headers(), timeout=timeout
+            )
+            def prepared_digest():
+                digest = hashlib.sha256()
+                chunks = [prepared.method.encode(), str(prepared.url).encode(), *[name + b":" + value for name, value in prepared.headers.raw], prepared.content]
+                for chunk in chunks:
+                    digest.update(len(chunk).to_bytes(8, "big") + chunk)
+                return "sha256:" + digest.hexdigest()
+
+            request_digest = prepared_digest()
+            send = self._http._transport.handle_request
+
+            def send_prepared(_bound):
+                if prepared_digest() != request_digest:
+                    raise RuntimeError("prepared Gemini request mutated before dispatch")
+                response = send(prepared)
+                response.read()
+                return response
+
+            response = _hermes_request_dispatch_handoff.commit_and_claim_dispatch(
+                send_prepared,
+                provider="gemini",
+                api_mode="chat_completions",
+                model=model,
+                sdk_method="httpx.HTTPTransport.handle_request:gemini.generateContent",
+                leaf_adapter=leaf,
+                endpoint_identity=canonical_endpoint_identity(self.base_url, provider="gemini"),
+                fallback_index=_hermes_fallback_index,
+                request_kwargs={
+                    "url": str(prepared.url),
+                    "json": request,
+                    "preparedRequestSha256": request_digest,
+                    "timeout": prepared.extensions.get("timeout"),
+                },
+            )
         if response.status_code != 200:
             raise gemini_http_error(response)
         try:
