@@ -32,10 +32,10 @@ ROOT = Path(__file__).parents[2]
 KWRAG_WHEEL = ROOT / "vendor" / "kwrag" / "kwrag_product_service-0.1.0-py3-none-any.whl"
 P1_WHEEL = ROOT / "vendor" / "kwrag_p1" / "kwrag_p1_attachment-0.1.2-py3-none-any.whl"
 P1_COMPONENT_WHEEL_DIGEST = (
-    "sha256:8d01690b5a8db806e6de049ccb1d095ad04f78764c94edf1a2a6363d12300080"
+    "sha256:3ef3ecaa93bf9f59685d2c24a9bab3384c453089cf491357eae6fe29bda15c2b"
 )
 P1_COMPONENT_MANIFEST_DIGEST = (
-    "sha256:68f1de94c471d5d3cf7e9758ac9af58ad282816b9ba7a780abb04befbb931a84"
+    "sha256:ae643ffdcabc3c67cf814c30d4bfdca94c8a473db0e8a543de5a052b2e35e084"
 )
 P1_FACTORY_SOURCE_DIGEST = (
     "sha256:104276b46fa427d741fcf63db87b70d9a6d8a2ad32e63c4a43e87692041ed43e"
@@ -202,6 +202,10 @@ def _fixture(
         lambda: (container_digest, cgroup_digest),
     )
     monkeypatch.setattr(
+        "plugins.kwrag_slot.p1_attachment._OPS_OBSERVATION_UID",
+        getattr(os, "geteuid", lambda: 0)(),
+    )
+    monkeypatch.setattr(
         "plugins.kwrag_slot.p1_attachment.os.statvfs",
         lambda _path: SimpleNamespace(f_flag=getattr(os, "ST_RDONLY", 1)),
         raising=False,
@@ -261,6 +265,53 @@ def test_component_wheel_is_reproducible_exact_research_source_with_streaming_ad
             _digest(wheel.read("kwrag_p1_attachment/factory.py"))
             == P1_FACTORY_SOURCE_DIGEST
         )
+
+
+@POSIX_RUNTIME
+def test_resource_observation_requires_read_only_ops_authority(tmp_path: Path) -> None:
+    from kwrag_p1_attachment import load_authoritative_canonical_mapping
+
+    path = tmp_path / "resource.json"
+    path.write_bytes(b"{}")
+    path.chmod(0o660)
+    with pytest.raises(ValueError, match="file identity"):
+        load_authoritative_canonical_mapping(
+            path, "resource observation", required_owner_uid=os.geteuid()
+        )
+    path.chmod(0o640)
+    with pytest.raises(ValueError, match="file identity"):
+        load_authoritative_canonical_mapping(
+            path, "resource observation", required_owner_uid=os.geteuid() + 1
+        )
+    assert (
+        load_authoritative_canonical_mapping(
+            path, "resource observation", required_owner_uid=os.geteuid()
+        )[0]
+        == {}
+    )
+
+
+def test_adapter_budgets_complete_mapped_result_payload() -> None:
+    from kwrag.jsonutil import canonical_json_bytes
+    from kwrag.operation import map_results
+    from kwrag_p1_attachment import KwragFtsPipeline
+
+    raw = [
+        {
+            "unitId": f"turn:{index}",
+            "text": str(index) * 7_900,
+            "score": float(index),
+            "sourceIds": [f"message-{index}"],
+        }
+        for index in range(1, 4)
+    ]
+    pipeline = KwragFtsPipeline.__new__(KwragFtsPipeline)
+    pipeline.room = "alpha"
+    pipeline.pipeline = SimpleNamespace(search=lambda _query: raw)
+    response = pipeline.search("marker", ["alpha"], 10)
+    mapped = map_results(response["hits"], 10, {"alpha"})
+    assert len(response["hits"]) == 2
+    assert len(canonical_json_bytes(mapped).decode("utf-8")) <= 20_000
 
 
 def test_component_streams_database_digest_without_path_read_bytes(

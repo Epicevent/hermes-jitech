@@ -34,6 +34,7 @@ P1_IDENTITY = {
 }
 
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
+_OPS_OBSERVATION_UID = 0
 
 
 HermesP1AttachmentError = HermesSlotRetrievalError
@@ -56,6 +57,14 @@ def _read_json(path: Path, label: str) -> tuple[dict[str, Any], str]:
     from kwrag_p1_attachment import load_canonical_mapping
 
     return load_canonical_mapping(path, label)
+
+
+def _read_resource_observation(path: Path) -> tuple[dict[str, Any], str]:
+    from kwrag_p1_attachment import load_authoritative_canonical_mapping
+
+    return load_authoritative_canonical_mapping(
+        path, "resource observation", required_owner_uid=_OPS_OBSERVATION_UID
+    )
 
 
 def _runtime_identity() -> tuple[str, str]:
@@ -210,7 +219,7 @@ def run_p1_attachment_probe(
         )
     binding, binding_digest = _read_json(p1_binding_path, "attachment binding")
     _validate_binding(binding, binding_digest, ops_digest, component, resource_digest)
-    observation, _ = _read_json(resource_observation_path, "resource observation")
+    observation, _ = _read_resource_observation(resource_observation_path)
     memory = _validate_resource(
         observation, profile=resource_digest, instance=binding["instanceId"]
     )
@@ -328,9 +337,7 @@ def enabled_p1_status(*, state_root: Path | None = None) -> dict[str, Any]:
         }
     binding, binding_digest = _read_json(root / "binding-v2.json", "attachment binding")
     _validate_binding(binding, binding_digest, ops_digest, component, resource_digest)
-    observation, _ = _read_json(
-        root / "resource-observation.json", "resource observation"
-    )
+    observation, _ = _read_resource_observation(root / "resource-observation.json")
     memory = _validate_resource(
         observation, profile=resource_digest, instance=binding["instanceId"]
     )
