@@ -314,6 +314,9 @@ def test_component_selects_latest_canonical_receipt(tmp_path: Path) -> None:
     ledger.write_bytes(first_raw + b"\n" + second_raw + b"\n")
     assert load_receipt(ledger, None, "receipt") == second
     assert load_receipt(ledger, _digest(first_raw), "receipt") == first
+    ledger.write_bytes(first_raw + b"\n" + b'{"attempt": 2}' + b"\n")
+    with pytest.raises(ValueError, match="ledger is invalid"):
+        load_receipt(ledger, None, "receipt")
 
 
 @pytest.mark.parametrize(
