@@ -3474,6 +3474,8 @@ def test_native_gemini_actual_conversation_binds_final_json_and_response(
     agent.base_url = "https://generativelanguage.googleapis.com/v1beta"
     agent.model = "gemini-test"
     agent._disable_streaming = True
+    agent._memory_manager = MagicMock()
+    agent._memory_manager.prefetch_all.return_value = "unapproved memory context"
     hook = MagicMock()
     dump = MagicMock()
     monkeypatch.setattr(
@@ -3502,6 +3504,8 @@ def test_native_gemini_actual_conversation_binds_final_json_and_response(
     assert observations[0]["receipt"] == "written"
     assert serialized.count("<kwrag_slot_evidence>") == 1
     assert not any(call.args and call.args[0] == "pre_api_request" for call in hook.mock_calls)
+    assert not any(call.args and call.args[0] == "pre_llm_call" for call in hook.mock_calls)
+    agent._memory_manager.prefetch_all.assert_not_called()
     dump.assert_not_called()
     assert prepared.consumption_receipt["sdk_method"] == (
         "httpx.HTTPTransport.handle_request:gemini.generateContent"

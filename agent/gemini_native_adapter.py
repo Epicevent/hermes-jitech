@@ -24,6 +24,7 @@ import time
 import uuid
 from types import SimpleNamespace
 from typing import Any, Dict, Iterator, List, Optional
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -37,12 +38,12 @@ DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 
 def is_native_gemini_base_url(base_url: str) -> bool:
     """Return True when the endpoint speaks Gemini's native REST API."""
-    normalized = str(base_url or "").strip().rstrip("/").lower()
-    if not normalized:
+    try:
+        parsed = urlsplit(str(base_url or "").strip())
+        port = parsed.port
+    except ValueError:
         return False
-    if "generativelanguage.googleapis.com" not in normalized:
-        return False
-    return not normalized.endswith("/openai")
+    return parsed.scheme == "https" and parsed.hostname == "generativelanguage.googleapis.com" and port in (None, 443) and parsed.path.rstrip("/") == "/v1beta" and not (parsed.username or parsed.password or parsed.query or parsed.fragment)
 
 
 def probe_gemini_tier(
@@ -974,7 +975,6 @@ class GeminiNativeClient:
             prepared = self._http.build_request(
                 "POST", url, json=request, headers=self._headers(), timeout=timeout
             )
-
             def prepared_digest():
                 digest = hashlib.sha256()
                 chunks = [prepared.method.encode(), str(prepared.url).encode(), *[name + b":" + value for name, value in prepared.headers.raw], prepared.content]

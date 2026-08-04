@@ -879,6 +879,7 @@ def test_oneshot_approved_retrieval_uses_existing_consumption_seam(monkeypatch):
     assert captured["prompt"] == "use these hits"
     assert captured["prepared"] is approved
     assert captured["agent"]._disable_streaming is True
+    assert captured["agent_kwargs"]["skip_memory"] is True
 
 
 def test_launch_tui_exports_model_provider_and_toolsets(monkeypatch, main_mod):

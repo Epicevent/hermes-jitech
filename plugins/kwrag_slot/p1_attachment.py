@@ -202,7 +202,8 @@ def run_p1_attachment_probe(
         raise HermesP1AttachmentError("caller-explicit P1 attachment is disabled")
     root = _root(state_root)
     if tuple(
-        map(Path, (p1_binding_path, runtime_binding_path, resource_observation_path))
+        path.parent.resolve(strict=True) / path.name
+        for path in map(Path, (p1_binding_path, runtime_binding_path, resource_observation_path))
     ) != (
         root / "binding-v2.json",
         root / "runtime-binding.json",

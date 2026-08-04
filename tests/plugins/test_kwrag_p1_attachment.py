@@ -33,10 +33,10 @@ ROOT = Path(__file__).parents[2]
 KWRAG_WHEEL = ROOT / "vendor" / "kwrag" / "kwrag_product_service-0.1.0-py3-none-any.whl"
 P1_WHEEL = ROOT / "vendor" / "kwrag_p1" / "kwrag_p1_attachment-0.1.2-py3-none-any.whl"
 P1_COMPONENT_WHEEL_DIGEST = (
-    "sha256:6b743d73e087b73f230c9512e940c48d4bd053b084f6f64fddd1a7b9f6fcd310"
+    "sha256:04d0b7e47a9f27c41c02a1dcf44ce44cb039e9f1d4f86b25357c34d81df0be40"
 )
 P1_COMPONENT_MANIFEST_DIGEST = (
-    "sha256:abede0a80a63a753833c694c9f5e6014f30fb35bb1b49bf0f6cfcd7641965f21"
+    "sha256:a4e391cfde1d8f4840b3a083aa3a7e63ea82f73e44a83431821ac2f5756abce2"
 )
 P1_FACTORY_SOURCE_DIGEST = (
     "sha256:104276b46fa427d741fcf63db87b70d9a6d8a2ad32e63c4a43e87692041ed43e"
@@ -710,6 +710,7 @@ def test_semantically_corrupt_consumption_receipt_is_rejected(
         ("result", "extra_field", "unexpected"),
         ("result", "result_characters", False),
         ("result", "result_characters", 0),
+        ("result", "result_characters", 3),
         ("result", "result_characters", 20_001),
     ],
 )
@@ -804,6 +805,26 @@ def test_default_state_root_accepts_a_resolved_home_symlink(
         "plugins.kwrag_slot.p1_attachment.get_hermes_home", lambda: linked_home
     )
     assert _root(None) == state.resolve()
+
+
+@POSIX_RUNTIME
+def test_probe_accepts_natural_inputs_below_a_resolved_home_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = _fixture(tmp_path / "fixture", monkeypatch)
+    linked_home = tmp_path / "linked-home"
+    linked_home.symlink_to(fixture["home"], target_is_directory=True)
+    linked_state = linked_home / "kwrag-p1-attachment"
+    monkeypatch.setattr(
+        "plugins.kwrag_slot.p1_attachment.get_hermes_home", lambda: linked_home
+    )
+    proof = run_p1_attachment_probe(
+        runtime_binding_path=linked_state / "runtime-binding.json",
+        p1_binding_path=linked_state / "binding-v2.json",
+        resource_observation_path=linked_state / "resource-observation.json",
+        request_path=fixture["request"],
+    )
+    assert proof["resultStatus"] == "hits"
 
 
 @POSIX_RUNTIME

@@ -1146,28 +1146,29 @@ def run_conversation(
     #
     # All injected context is ephemeral (not persisted to session DB).
     _plugin_user_context = ""
-    try:
-        from hermes_cli.plugins import invoke_hook as _invoke_hook
-        _pre_results = _invoke_hook(
-            "pre_llm_call",
-            session_id=agent.session_id,
-            user_message=original_user_message,
-            conversation_history=list(messages),
-            is_first_turn=(not bool(conversation_history)),
-            model=agent.model,
-            platform=getattr(agent, "platform", None) or "",
-            sender_id=getattr(agent, "_user_id", None) or "",
-        )
-        _ctx_parts: list[str] = []
-        for r in _pre_results:
-            if isinstance(r, dict) and r.get("context"):
-                _ctx_parts.append(str(r["context"]))
-            elif isinstance(r, str) and r.strip():
-                _ctx_parts.append(r)
-        if _ctx_parts:
-            _plugin_user_context = "\n\n".join(_ctx_parts)
-    except Exception as exc:
-        logger.warning("pre_llm_call hook failed: %s", exc)
+    if not ephemeral_user_context:
+        try:
+            from hermes_cli.plugins import invoke_hook as _invoke_hook
+            _pre_results = _invoke_hook(
+                "pre_llm_call",
+                session_id=agent.session_id,
+                user_message=original_user_message,
+                conversation_history=list(messages),
+                is_first_turn=(not bool(conversation_history)),
+                model=agent.model,
+                platform=getattr(agent, "platform", None) or "",
+                sender_id=getattr(agent, "_user_id", None) or "",
+            )
+            _ctx_parts: list[str] = []
+            for r in _pre_results:
+                if isinstance(r, dict) and r.get("context"):
+                    _ctx_parts.append(str(r["context"]))
+                elif isinstance(r, str) and r.strip():
+                    _ctx_parts.append(r)
+            if _ctx_parts:
+                _plugin_user_context = "\n\n".join(_ctx_parts)
+        except Exception as exc:
+            logger.warning("pre_llm_call hook failed: %s", exc)
 
     # Main conversation loop
     api_call_count = 0
@@ -1303,7 +1304,7 @@ def run_conversation(
     # Notify memory providers of the new turn so cadence tracking works.
     # Must happen BEFORE prefetch_all() so providers know which turn it is
     # and can gate context/dialectic refresh via contextCadence/dialecticCadence.
-    if agent._memory_manager:
+    if agent._memory_manager and not ephemeral_user_context:
         try:
             _turn_msg = original_user_message if isinstance(original_user_message, str) else ""
             agent._memory_manager.on_turn_start(agent._user_turn_count, _turn_msg)
@@ -1316,7 +1317,7 @@ def run_conversation(
     # Use original_user_message (clean input) — user_message may contain
     # injected skill content that bloats / breaks provider queries.
     _ext_prefetch_cache = ""
-    if agent._memory_manager:
+    if agent._memory_manager and not ephemeral_user_context:
         try:
             _query = original_user_message if isinstance(original_user_message, str) else ""
             _ext_prefetch_cache = agent._memory_manager.prefetch_all(_query) or ""

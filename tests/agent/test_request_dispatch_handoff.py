@@ -58,6 +58,23 @@ def test_retrieval_evidence_capability_is_native_gemini_only() -> None:
         require_retrieval_evidence_dispatch_capability(SimpleNamespace())
 
 
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "https://generativelanguage.googleapis.com.attacker.example/v1beta",
+        "https://attacker.example/generativelanguage.googleapis.com/v1beta",
+        "https://user@generativelanguage.googleapis.com/v1beta",
+        "http://generativelanguage.googleapis.com/v1beta",
+        "https://generativelanguage.googleapis.com/v1beta/openai",
+    ],
+)
+def test_deceptive_gemini_routes_are_rejected_before_projection(base_url) -> None:
+    with pytest.raises(FinalProviderBindingUnsupported):
+        require_retrieval_evidence_dispatch_capability(SimpleNamespace(
+            provider="gemini", api_mode="chat_completions", base_url=base_url
+        ))
+
+
 def test_ephemeral_context_requires_receipt_callbacks_before_conversation_entry() -> None:
     from agent.conversation_loop import run_conversation
 

@@ -95,11 +95,7 @@ def _dispatch_chat_completion(dispatch_handoff, agent, client, kwargs, *, stream
 
     leaf = _dispatch_leaf_identity(dispatch_handoff, client)
     if leaf == "agent.gemini_native_adapter.GeminiNativeAtomicHttpRequest/v1":
-        return client._create_chat_completion(
-            **kwargs,
-            _hermes_request_dispatch_handoff=dispatch_handoff,
-            _hermes_fallback_index=int(getattr(agent, "_fallback_index", 0) or 0),
-        )
+        return client._create_chat_completion(**kwargs, _hermes_request_dispatch_handoff=dispatch_handoff, _hermes_fallback_index=int(getattr(agent, "_fallback_index", 0) or 0))
     return dispatch_handoff.commit_and_claim_dispatch(
         lambda bound_kwargs: client.chat.completions.create(**bound_kwargs),
         provider=str(agent.provider or "unknown"),
