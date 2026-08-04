@@ -32,10 +32,10 @@ ROOT = Path(__file__).parents[2]
 KWRAG_WHEEL = ROOT / "vendor" / "kwrag" / "kwrag_product_service-0.1.0-py3-none-any.whl"
 P1_WHEEL = ROOT / "vendor" / "kwrag_p1" / "kwrag_p1_attachment-0.1.2-py3-none-any.whl"
 P1_COMPONENT_WHEEL_DIGEST = (
-    "sha256:4148155e03e64e7e3563050b63625b57afc5522e645777963ada2d0a20dc48cd"
+    "sha256:8bf4ba490a68091678c7cf3cea529457a93cd58d9c189ca566337fc9999f7790"
 )
 P1_COMPONENT_MANIFEST_DIGEST = (
-    "sha256:af35a9f0d166c68a7de0898a7708536ca821a2c1f2a0d45f6f470a5b2234bbf3"
+    "sha256:46376296597c08df1f85cd3d8de05dcdb543174bdee81116c3a5357c94de60ce"
 )
 P1_FACTORY_SOURCE_DIGEST = (
     "sha256:104276b46fa427d741fcf63db87b70d9a6d8a2ad32e63c4a43e87692041ed43e"
@@ -305,6 +305,17 @@ def test_component_stable_readers_normalize_missing_input(tmp_path: Path) -> Non
         load_receipt(missing, None, "receipt")
 
 
+def test_component_selects_latest_canonical_receipt(tmp_path: Path) -> None:
+    from kwrag_p1_attachment import load_receipt
+
+    first, second = {"attempt": 1}, {"attempt": 2}
+    first_raw, second_raw = canonical_json_bytes(first), canonical_json_bytes(second)
+    ledger = (tmp_path / "receipts.jsonl").resolve()
+    ledger.write_bytes(first_raw + b"\n" + second_raw + b"\n")
+    assert load_receipt(ledger, None, "receipt") == second
+    assert load_receipt(ledger, _digest(first_raw), "receipt") == first
+
+
 @pytest.mark.parametrize(
     "field,replacement,error",
     [
@@ -402,6 +413,26 @@ def test_actual_fts_probe_and_restart_status_are_content_free(
             ).read_text()
         )
     )
+
+
+@POSIX_RUNTIME
+def test_repeated_successful_probe_projects_latest_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = _fixture(tmp_path, monkeypatch)
+    first = _probe(fixture)
+    request = json.loads(fixture["request"].read_text())
+    request.update(
+        request_id="request-positive-2",
+        operation_id="operation-positive-2",
+        run_id="run-positive-2",
+    )
+    _write(fixture["request"], request)
+    second = _probe(fixture)
+    assert second["consumptionReceiptDigest"] != first["consumptionReceiptDigest"]
+    status = enabled_p1_status(state_root=fixture["state"])
+    assert status["consumptionReceiptDigest"] == second["consumptionReceiptDigest"]
+    assert status["attachmentHealth"] == "healthy"
 
 
 @POSIX_RUNTIME
