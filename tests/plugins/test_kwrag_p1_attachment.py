@@ -32,10 +32,10 @@ ROOT = Path(__file__).parents[2]
 KWRAG_WHEEL = ROOT / "vendor" / "kwrag" / "kwrag_product_service-0.1.0-py3-none-any.whl"
 P1_WHEEL = ROOT / "vendor" / "kwrag_p1" / "kwrag_p1_attachment-0.1.2-py3-none-any.whl"
 P1_COMPONENT_WHEEL_DIGEST = (
-    "sha256:8a1a32d341112c5b8492235f00fa578e9367c715082279c2b2ba08a765aff91b"
+    "sha256:d1ddb673a6dff6518b1be7222f40215a2051136d32703825b4df6e7630eebcd7"
 )
 P1_COMPONENT_MANIFEST_DIGEST = (
-    "sha256:aa0c8c6e069d9e4c89664a8c103b22a3756183bfa02f13f6db2becedebe2f866"
+    "sha256:2e104a98a0abf53e696a8a32625f7e81a32ffac1692bcd2da3d8606269adb12c"
 )
 P1_FACTORY_SOURCE_DIGEST = (
     "sha256:104276b46fa427d741fcf63db87b70d9a6d8a2ad32e63c4a43e87692041ed43e"
@@ -88,7 +88,11 @@ def _database(path: Path) -> None:
 
 
 def _fixture(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, enabled: bool = True
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    enabled: bool = True,
+    corpus: str = "alpha",
 ) -> dict[str, object]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     home = tmp_path / "home"
@@ -106,8 +110,8 @@ def _fixture(
         "corpus_snapshot": snapshot,
         "embedding_fingerprint": _digest(b"fts"),
         "rooms": {
-            "alpha": {
-                "conversation_id": "alpha",
+            corpus: {
+                "conversation_id": corpus,
                 "files": [{"path": "room.meta.sqlite", "sha256": database_digest}],
             }
         },
@@ -188,7 +192,7 @@ def _fixture(
             "run_id": "run-1",
             "attempt": 1,
             "max_results": 5,
-            "corpus": "alpha",
+            "corpus": corpus,
         },
     )
     monkeypatch.setattr(
@@ -614,6 +618,7 @@ def test_semantically_corrupt_consumption_receipt_is_rejected(
         ("operation", "pipeline_candidate_count", 11),
         ("operation", "pipeline_candidate_count", False),
         ("operation", "provider_billing", "charged"),
+        ("operation", "corpora", ["x" * 257]),
         ("operation", "extra_field", "unexpected"),
         ("result", "schema_version", "hermes-kwrag-result-receipt-v0"),
         ("result", "consumer_family", "openclaw"),
@@ -669,6 +674,17 @@ def test_self_consistent_semantic_receipt_corruption_is_rejected(
     consumption_path.write_bytes(canonical_json_bytes(consumption) + b"\n")
     with pytest.raises(ValueError, match="linkage"):
         enabled_p1_status(state_root=root)
+
+
+@POSIX_RUNTIME
+def test_restart_status_accepts_the_core_maximum_corpus_length(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = _fixture(tmp_path, monkeypatch, corpus="x" * 256)
+    _probe(fixture)
+    status = enabled_p1_status(state_root=fixture["state"])
+    assert status["attachmentHealth"] == "healthy"
+    assert status["linkageStatus"] == "complete"
 
 
 @POSIX_RUNTIME
