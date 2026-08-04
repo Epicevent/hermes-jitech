@@ -146,12 +146,14 @@ def _validate_resource(value: dict[str, Any], *, profile: str, instance: str) ->
 
 
 def _root(root: Path | None) -> Path:
-    target = root or Path(get_hermes_home()) / "kwrag-p1-attachment"
+    target = Path(root or Path(get_hermes_home()) / "kwrag-p1-attachment")
+    if target.is_symlink():
+        raise HermesP1AttachmentError("attachment state root is unsafe")
+    target = target.resolve(strict=True)
     home = Path(get_hermes_home()).resolve(strict=True)
-    target = Path(target)
     if not target.is_absolute() or not target.is_relative_to(home):
         raise HermesP1AttachmentError("attachment state root is outside HERMES_HOME")
-    if target.is_symlink() or not target.is_dir():
+    if not target.is_dir():
         raise HermesP1AttachmentError("attachment state root is unsafe")
     if os.name == "posix":
         info = target.stat()

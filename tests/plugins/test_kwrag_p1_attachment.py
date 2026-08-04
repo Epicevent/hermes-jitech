@@ -23,6 +23,7 @@ from plugins.kwrag_slot.p1_attachment import (
     P1_IDENTITY_DIGEST,
     P1_PIPELINE_FINGERPRINT,
     HermesP1AttachmentError,
+    _root,
     enabled_p1_status,
     run_p1_attachment_probe,
 )
@@ -32,10 +33,10 @@ ROOT = Path(__file__).parents[2]
 KWRAG_WHEEL = ROOT / "vendor" / "kwrag" / "kwrag_product_service-0.1.0-py3-none-any.whl"
 P1_WHEEL = ROOT / "vendor" / "kwrag_p1" / "kwrag_p1_attachment-0.1.2-py3-none-any.whl"
 P1_COMPONENT_WHEEL_DIGEST = (
-    "sha256:d1ddb673a6dff6518b1be7222f40215a2051136d32703825b4df6e7630eebcd7"
+    "sha256:6b743d73e087b73f230c9512e940c48d4bd053b084f6f64fddd1a7b9f6fcd310"
 )
 P1_COMPONENT_MANIFEST_DIGEST = (
-    "sha256:2e104a98a0abf53e696a8a32625f7e81a32ffac1692bcd2da3d8606269adb12c"
+    "sha256:abede0a80a63a753833c694c9f5e6014f30fb35bb1b49bf0f6cfcd7641965f21"
 )
 P1_FACTORY_SOURCE_DIGEST = (
     "sha256:104276b46fa427d741fcf63db87b70d9a6d8a2ad32e63c4a43e87692041ed43e"
@@ -568,6 +569,28 @@ def test_zero_hit_is_linked_without_provider_dispatch(
     assert proof["resultStatus"] == "zero_hits" and proof["resultCount"] == 0
 
 
+@POSIX_RUNTIME
+def test_zero_hit_restart_requires_the_canonical_empty_result_size(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = _fixture(tmp_path, monkeypatch)
+    request = json.loads(fixture["request"].read_text())
+    request["query"] = "quartz zephyr"
+    _write(fixture["request"], request)
+    _probe(fixture)
+    result_path = fixture["state"] / "result-receipts.jsonl"
+    consumption_path = fixture["state"] / "attachment-receipts.jsonl"
+    result = json.loads(result_path.read_text())
+    consumption = json.loads(consumption_path.read_text())
+    result["result_characters"] = 3
+    result_raw = canonical_json_bytes(result)
+    result_path.write_bytes(result_raw + b"\n")
+    consumption["result_receipt_digest"] = _digest(result_raw)
+    consumption_path.write_bytes(canonical_json_bytes(consumption) + b"\n")
+    with pytest.raises(ValueError, match="linkage"):
+        enabled_p1_status(state_root=fixture["state"])
+
+
 @pytest.mark.parametrize(
     "field,replacement,error",
     [
@@ -669,6 +692,7 @@ def test_semantically_corrupt_consumption_receipt_is_rejected(
     [
         ("operation", "schema_version", "kwrag-slot-search-operation-receipt-v0"),
         ("operation", "authorization_basis", "unbound"),
+        ("operation", "recorded_at", "garbage"),
         ("operation", "pipeline_backend", "different-backend"),
         ("operation", "pipeline_scope", "external"),
         ("operation", "pipeline_stage_id", "other-stage"),
@@ -685,6 +709,7 @@ def test_semantically_corrupt_consumption_receipt_is_rejected(
         ("result", "adapter_status", "unverified"),
         ("result", "extra_field", "unexpected"),
         ("result", "result_characters", False),
+        ("result", "result_characters", 0),
         ("result", "result_characters", 20_001),
     ],
 )
@@ -749,6 +774,36 @@ def test_restart_status_accepts_the_core_maximum_corpus_length(
     status = enabled_p1_status(state_root=fixture["state"])
     assert status["attachmentHealth"] == "healthy"
     assert status["linkageStatus"] == "complete"
+
+
+def test_state_root_resolves_before_profile_containment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    outside = tmp_path / "outside"
+    home.mkdir(mode=0o700)
+    outside.mkdir(mode=0o700)
+    monkeypatch.setattr(
+        "plugins.kwrag_slot.p1_attachment.get_hermes_home", lambda: home
+    )
+    with pytest.raises(HermesP1AttachmentError, match="outside HERMES_HOME"):
+        _root(home / ".." / "outside")
+
+
+@POSIX_RUNTIME
+def test_default_state_root_accepts_a_resolved_home_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_home = tmp_path / "real-home"
+    real_home.mkdir(mode=0o700)
+    state = real_home / "kwrag-p1-attachment"
+    state.mkdir(mode=0o700)
+    linked_home = tmp_path / "linked-home"
+    linked_home.symlink_to(real_home, target_is_directory=True)
+    monkeypatch.setattr(
+        "plugins.kwrag_slot.p1_attachment.get_hermes_home", lambda: linked_home
+    )
+    assert _root(None) == state.resolve()
 
 
 @POSIX_RUNTIME
