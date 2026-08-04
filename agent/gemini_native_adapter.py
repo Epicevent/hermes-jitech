@@ -993,7 +993,7 @@ class GeminiNativeClient:
                 endpoint_identity=canonical_endpoint_identity(self.base_url, provider="gemini"),
                 fallback_index=_hermes_fallback_index,
                 request_kwargs={
-                    "url": url,
+                    "url": str(prepared.url),
                     "json": request,
                     "bodySha256": body_digest,
                     "timeout": prepared.extensions.get("timeout"),
