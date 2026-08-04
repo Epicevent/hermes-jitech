@@ -32,10 +32,10 @@ ROOT = Path(__file__).parents[2]
 KWRAG_WHEEL = ROOT / "vendor" / "kwrag" / "kwrag_product_service-0.1.0-py3-none-any.whl"
 P1_WHEEL = ROOT / "vendor" / "kwrag_p1" / "kwrag_p1_attachment-0.1.2-py3-none-any.whl"
 P1_COMPONENT_WHEEL_DIGEST = (
-    "sha256:f0f603edc79d38bc4f6c174657c9a685d7b24496de3778194a653acac2dcf05e"
+    "sha256:4148155e03e64e7e3563050b63625b57afc5522e645777963ada2d0a20dc48cd"
 )
 P1_COMPONENT_MANIFEST_DIGEST = (
-    "sha256:ca2473aa503e2930c9413ae5107a558f36e7fc764d08169f8ab3915dacbff392"
+    "sha256:af35a9f0d166c68a7de0898a7708536ca821a2c1f2a0d45f6f470a5b2234bbf3"
 )
 P1_FACTORY_SOURCE_DIGEST = (
     "sha256:104276b46fa427d741fcf63db87b70d9a6d8a2ad32e63c4a43e87692041ed43e"
@@ -295,6 +295,16 @@ def test_component_streams_database_digest_without_path_read_bytes(
         pipeline.close()
 
 
+def test_component_stable_readers_normalize_missing_input(tmp_path: Path) -> None:
+    from kwrag_p1_attachment import load_canonical_mapping, load_receipt
+
+    missing = (tmp_path / "missing.json").resolve()
+    with pytest.raises(ValueError, match="unavailable"):
+        load_canonical_mapping(missing, "mapping")
+    with pytest.raises(ValueError, match="unavailable"):
+        load_receipt(missing, None, "receipt")
+
+
 @pytest.mark.parametrize(
     "field,replacement,error",
     [
@@ -465,7 +475,7 @@ def test_low_memory_and_database_tamper_fail_closed(
 
     fixture = _fixture(tmp_path / "tamper", monkeypatch)
     fixture["database"].write_bytes(fixture["database"].read_bytes() + b"tamper")
-    with pytest.raises(Exception, match="database digest mismatch"):
+    with pytest.raises(ValueError, match="mounted index manifest verification failed"):
         _probe(fixture)
 
 
@@ -476,7 +486,7 @@ def test_restart_status_rejects_database_binding_and_receipt_drift(
     fixture = _fixture(tmp_path, monkeypatch)
     _probe(fixture)
     fixture["database"].write_bytes(fixture["database"].read_bytes() + b"tamper")
-    with pytest.raises(Exception, match="database digest mismatch"):
+    with pytest.raises(ValueError, match="mounted index manifest verification failed"):
         enabled_p1_status(state_root=fixture["state"])
 
     fixture = _fixture(tmp_path / "receipt", monkeypatch)
@@ -499,7 +509,7 @@ def test_semantically_corrupt_consumption_receipt_is_rejected(
     receipt["consumer_family"] = "openclaw"
     raw = canonical_json_bytes(receipt)
     ledger.write_bytes(raw + b"\n")
-    with pytest.raises(HermesP1AttachmentError, match="linkage"):
+    with pytest.raises(ValueError, match="linkage"):
         enabled_p1_status(state_root=fixture["state"])
 
 
@@ -592,7 +602,7 @@ def test_disabled_v2_status_requires_exact_binding_and_read_only_mount(
         enabled_p1_status(state_root=fixture["state"])
 
     (fixture["state"] / "binding-v2.json").unlink()
-    with pytest.raises(HermesP1AttachmentError, match="unavailable"):
+    with pytest.raises(ValueError, match="unavailable"):
         enabled_p1_status(state_root=fixture["state"])
 
 
