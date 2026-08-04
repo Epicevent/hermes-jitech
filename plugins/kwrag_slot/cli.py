@@ -18,23 +18,18 @@ _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 def register_cli(parser: argparse.ArgumentParser) -> None:
     subparsers = parser.add_subparsers(dest="kwrag_slot_command", required=True)
-    status = subparsers.add_parser("status", help="Print content-free component status")
-    status.add_argument("--json", action="store_true", help="Emit canonical JSON")
-    attachment_status = subparsers.add_parser(
-        "p1-attachment-status",
-        help="Verify the current caller-explicit P1 attachment",
-    )
-    attachment_status.add_argument(
-        "--json", action="store_true", help="Emit canonical JSON"
-    )
+    for name, help_text in (
+        ("status", "Print content-free component status"),
+        ("p1-attachment-status", "Verify the caller-explicit P1 attachment"),
+    ):
+        command = subparsers.add_parser(name, help=help_text)
+        command.add_argument("--json", action="store_true")
     probe = subparsers.add_parser(
         "p1-attachment-probe",
         help="Run one caller-explicit, provider-free P1 attachment probe",
     )
-    probe.add_argument("--runtime-binding", type=Path, required=True)
-    probe.add_argument("--p1-binding", type=Path, required=True)
-    probe.add_argument("--resource-observation", type=Path, required=True)
-    probe.add_argument("--request", type=Path, required=True)
+    for option in ("runtime-binding", "p1-binding", "resource-observation", "request"):
+        probe.add_argument(f"--{option}", type=Path, required=True)
     probe.add_argument("--json", action="store_true", help="Emit canonical JSON")
 
 
@@ -64,15 +59,15 @@ def _status() -> dict[str, object]:
         raise RuntimeError("runtime NAS root is unavailable")
     nas_root = Path(workspace_root) / "nas_docs"
     try:
-        mount_read_only = bool(os.statvfs(nas_root).f_flag & getattr(os, "ST_RDONLY", 1))
+        mount_read_only = bool(
+            os.statvfs(nas_root).f_flag & getattr(os, "ST_RDONLY", 1)
+        )
     except (AttributeError, OSError) as exc:
         raise RuntimeError("runtime NAS mount cannot be verified") from exc
     if not mount_read_only:
         raise RuntimeError("runtime NAS mount is not read-only")
     if enabled:
-        raise RuntimeError(
-            "enabled attachment status requires p1-attachment-status"
-        )
+        raise RuntimeError("enabled attachment status requires p1-attachment-status")
     return {
         "bindingDigest": binding_digest,
         "componentDigest": component_digest,
@@ -92,11 +87,8 @@ def _status() -> dict[str, object]:
 
 
 def kwrag_slot_command(args: argparse.Namespace) -> int:
-    if args.kwrag_slot_command == "status":
-        result = _status()
-    elif args.kwrag_slot_command == "p1-attachment-status":
-        result = enabled_p1_status()
-    elif args.kwrag_slot_command == "p1-attachment-probe":
+    command = args.kwrag_slot_command
+    if command == "p1-attachment-probe":
         result = run_p1_attachment_probe(
             runtime_binding_path=args.runtime_binding,
             p1_binding_path=args.p1_binding,
@@ -104,9 +96,19 @@ def kwrag_slot_command(args: argparse.Namespace) -> int:
             request_path=args.request,
         )
     else:
-        raise RuntimeError("unsupported KWRAG slot command")
+        result = {"status": _status, "p1-attachment-status": enabled_p1_status}[
+            command
+        ]()
     if args.json:
-        print(json.dumps(result, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")))
+        print(
+            json.dumps(
+                result,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
     else:
         for key in sorted(result):
             print(f"{key}={result[key]}")

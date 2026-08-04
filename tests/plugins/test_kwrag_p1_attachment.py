@@ -6,16 +6,19 @@ import json
 import os
 import sqlite3
 import sys
+import zipfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from plugins.kwrag_slot.manifest import canonical_json_bytes, load_component_manifest, load_resource_profile
+from plugins.kwrag_slot.manifest import (
+    canonical_json_bytes,
+    load_component_manifest,
+    load_resource_profile,
+)
 from plugins.kwrag_slot.p1_attachment import (
-    KWRAG_SOURCE_COMMIT,
-    KWRAG_WHEEL_DIGEST,
-    P1_FACTORY_SOURCE_DIGEST,
     P1_IDENTITY,
     P1_IDENTITY_DIGEST,
     P1_PIPELINE_FINGERPRINT,
@@ -26,76 +29,92 @@ from plugins.kwrag_slot.p1_attachment import (
 
 
 ROOT = Path(__file__).parents[2]
-WHEEL = ROOT / "vendor" / "kwrag" / "kwrag_product_service-0.1.0-py3-none-any.whl"
-POSIX_RUNTIME = pytest.mark.skipif(
-    os.name != "posix",
-    reason="KWRAG slot runtime requires canonical POSIX paths; Linux CI is authoritative",
+KWRAG_WHEEL = ROOT / "vendor" / "kwrag" / "kwrag_product_service-0.1.0-py3-none-any.whl"
+P1_WHEEL = ROOT / "vendor" / "kwrag_p1" / "kwrag_p1_attachment-0.1.2-py3-none-any.whl"
+P1_COMPONENT_WHEEL_DIGEST = (
+    "sha256:f0f603edc79d38bc4f6c174657c9a685d7b24496de3778194a653acac2dcf05e"
 )
-
-
-@pytest.fixture(autouse=True)
-def _embedded_component_on_path(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.syspath_prepend(str(WHEEL))
-    importlib.invalidate_caches()
-    for name in tuple(sys.modules):
-        if name == "kwrag" or name.startswith("kwrag."):
-            sys.modules.pop(name, None)
+P1_COMPONENT_MANIFEST_DIGEST = (
+    "sha256:ca2473aa503e2930c9413ae5107a558f36e7fc764d08169f8ab3915dacbff392"
+)
+P1_FACTORY_SOURCE_DIGEST = (
+    "sha256:104276b46fa427d741fcf63db87b70d9a6d8a2ad32e63c4a43e87692041ed43e"
+)
+KWRAG_SOURCE_COMMIT = "49c10212ff12433941cfbe43d95013d1d2f0aebe"
+KWRAG_WHEEL_DIGEST = (
+    "sha256:f8dd900d0d00775853ee95dfbf15960c9ea7de2711ea5635fe229b06a550fa6f"
+)
+POSIX_RUNTIME = pytest.mark.skipif(
+    os.name != "posix", reason="Linux slot runtime is authoritative"
+)
 
 
 def _digest(payload: bytes) -> str:
     return "sha256:" + hashlib.sha256(payload).hexdigest()
 
 
-def _write_canonical(path: Path, value: object) -> str:
+def _write(path: Path, value: object) -> str:
     raw = canonical_json_bytes(value)
     path.write_bytes(raw)
     return _digest(raw)
 
 
-def _make_database(path: Path) -> None:
-    connection = sqlite3.connect(path)
-    connection.execute("CREATE TABLE turns(turn_id INTEGER PRIMARY KEY, text TEXT NOT NULL)")
-    connection.execute("CREATE TABLE turn_mids(turn_id INTEGER NOT NULL, mid TEXT NOT NULL)")
-    connection.execute(
+@pytest.fixture(autouse=True)
+def _components(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.syspath_prepend(str(P1_WHEEL))
+    monkeypatch.syspath_prepend(str(KWRAG_WHEEL))
+    importlib.invalidate_caches()
+    for name in tuple(sys.modules):
+        if name == "kwrag" or name.startswith(("kwrag.", "kwrag_p1_attachment")):
+            sys.modules.pop(name, None)
+
+
+def _database(path: Path) -> None:
+    db = sqlite3.connect(path)
+    db.execute("CREATE TABLE turns(turn_id INTEGER PRIMARY KEY, text TEXT NOT NULL)")
+    db.execute("CREATE TABLE turn_mids(turn_id INTEGER NOT NULL, mid TEXT NOT NULL)")
+    db.execute(
         "CREATE VIRTUAL TABLE turns_fts USING fts5(turn_id UNINDEXED, text, tokenize='trigram')"
     )
-    rows = [
-        (1, "parcel marker alpha arrived through the blue loading gate", "marker-positive"),
-        (2, "sibling room evidence must remain outside the selected room", "sibling-negative"),
-    ]
-    for turn_id, text, source_id in rows:
-        connection.execute("INSERT INTO turns(turn_id,text) VALUES (?,?)", (turn_id, text))
-        connection.execute("INSERT INTO turn_mids(turn_id,mid) VALUES (?,?)", (turn_id, source_id))
-        connection.execute("INSERT INTO turns_fts(turn_id,text) VALUES (?,?)", (turn_id, text))
-    connection.commit()
-    connection.close()
+    db.execute(
+        "INSERT INTO turns VALUES (1, 'parcel marker alpha arrived through the blue gate')"
+    )
+    db.execute("INSERT INTO turn_mids VALUES (1, 'marker-positive')")
+    db.execute(
+        "INSERT INTO turns_fts VALUES (1, 'parcel marker alpha arrived through the blue gate')"
+    )
+    db.commit()
+    db.close()
 
 
-def _fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path | str]:
+def _fixture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, enabled: bool = True
+) -> dict[str, object]:
+    tmp_path.mkdir(parents=True, exist_ok=True)
     home = tmp_path / "home"
     home.mkdir(mode=0o700)
     mount = tmp_path / "workspace" / "nas_docs"
     index = mount / "index"
     index.mkdir(parents=True)
     database = index / "room.meta.sqlite"
-    _make_database(database)
+    _database(database)
     database_digest = _digest(database.read_bytes())
-    source_snapshot_digest = _digest(b"hermes-p1-two-record-snapshot")
+    snapshot = _digest(b"snapshot")
     manifest = {
         "version": 1,
-        "release_id": "hermes-p1-fixture-v1",
-        "corpus_snapshot": source_snapshot_digest,
-        "embedding_fingerprint": _digest(b"model-free-sqlite-fts5"),
+        "release_id": "fixture",
+        "corpus_snapshot": snapshot,
+        "embedding_fingerprint": _digest(b"fts"),
         "rooms": {
             "alpha": {
-                "conversation_id": "conversation-alpha",
+                "conversation_id": "alpha",
                 "files": [{"path": "room.meta.sqlite", "sha256": database_digest}],
             }
         },
     }
-    manifest_path = index / "manifest.json"
-    manifest_digest = _write_canonical(manifest_path, manifest)
+    manifest_digest = _write(index / "manifest.json", manifest)
     state_root = home / "kwrag-p1-attachment"
+    state_root.mkdir(mode=0o700)
     runtime = {
         "schema_version": "kwrag-slot-runtime-binding-v1",
         "mount_root": mount.as_posix(),
@@ -105,184 +124,274 @@ def _fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path 
         "pipeline_fingerprint": P1_PIPELINE_FINGERPRINT,
         "max_concurrent": 1,
     }
-    runtime_path = tmp_path / "runtime.json"
-    runtime_digest = _write_canonical(runtime_path, runtime)
+    runtime_path = state_root / "runtime-binding.json"
+    runtime_digest = _write(runtime_path, runtime)
+    component = load_component_manifest()
     resource = load_resource_profile()
-    resource_observation = {
-        "containerCpuUsedMillicores": 25,
-        "containerMemoryUsedBytes": 64 * 1024 * 1024,
-        "containerPidsUsed": 8,
-        "hostCpuAvailableMillicores": 2_000,
-        "hostMemoryAvailableBytes": 4 * 1024 * 1024 * 1024,
-        "hostPidsAvailable": 1_024,
+    attachment_data = {
+        "databaseSha256": database_digest,
+        "indexManifestDigest": manifest_digest,
+        "sourceSnapshotDigest": snapshot,
+        "readOnlyAuthorityReceiptDigest": _digest(b"authority"),
+        "slotRuntimeBindingDigest": runtime_digest,
+    }
+    binding = {
+        "schema": "agent-runtime-retrieval-binding/v2",
+        "proofMode": "attachment_only",
+        "enabled": enabled,
+        "family": "hermes",
+        "instanceId": "oc20-fixture",
+        "runtimeProfileDigest": _digest(b"runtime-profile"),
+        "containerNasRoot": "/workspace/nas_docs",
+        "transport": "in_process",
+        "hostPortCount": 0,
+        "mountReadOnly": True,
+        "componentDigest": component["component_wheel"]["sha256"],
+        "contractDigest": component["contract_collection_digest"],
+        "resourceProfileDigest": resource["profileDigest"],
+        "p1Identity": dict(P1_IDENTITY),
+        "attachmentData": attachment_data if enabled else None,
+    }
+    binding_path = state_root / "binding-v2.json"
+    binding_digest = _write(binding_path, binding)
+    container_digest, cgroup_digest = _digest(b"container"), _digest(b"cgroup")
+    observation = {
+        "schema": "agent-runtime-retrieval-headroom/v1",
+        "status": "within_required_headroom",
+        "observedAt": datetime.now(timezone.utc).isoformat(),
+        "ttlSeconds": 300,
+        "targetInstanceId": "oc20-fixture",
+        "containerIdentityDigest": container_digest,
+        "cgroupIdentityDigest": cgroup_digest,
         "profileDigest": resource["profileDigest"],
         "requiredCpuMillicores": resource["cpuReservationMillicores"],
         "requiredMemoryBytes": resource["memoryReservationBytes"],
         "requiredPids": resource["pidsReservation"],
-        "schema": "agent-runtime-retrieval-headroom/v1",
-        "status": "within_required_headroom",
+        "containerCpuUsedMillicores": 25,
+        "containerMemoryUsedBytes": 64 * 1024 * 1024,
+        "containerPidsUsed": 8,
+        "hostCpuAvailableMillicores": 2000,
+        "hostMemoryAvailableBytes": 4 * 1024**3,
+        "hostPidsAvailable": 1024,
     }
-    resource_observation["observationDigest"] = _digest(
-        canonical_json_bytes(resource_observation)
-    )
-    resource_observation_path = tmp_path / "resource-observation.json"
-    _write_canonical(resource_observation_path, resource_observation)
-    p1 = {
-        "schema_version": "hermes-kwrag-p1-attachment-binding-v1",
-        "slot_instance_id": "oc20-fixture",
-        "mount_authority_digest": _digest(b"mount-authority"),
-        "slot_runtime_binding_digest": runtime_digest,
-        "resource_observation_digest": resource_observation["observationDigest"],
-        "room": "alpha",
-        "database_relative": "room.meta.sqlite",
-        "database_sha256": database_digest,
-        "source_snapshot_digest": source_snapshot_digest,
-        "authority_receipt_digest": _digest(b"read-only-authority-receipt"),
-        "p1_identity": dict(P1_IDENTITY),
-        "max_result_characters": 20_000,
-        "provider_dispatch_required": False,
-    }
-    p1_path = tmp_path / "p1.json"
-    _write_canonical(p1_path, p1)
-    request = {
-        "schema_version": "kwrag-slot-search-request-v1",
-        "query": "parcel marker alpha",
-        "request_id": "request-positive-1",
-        "operation_id": "operation-positive-1",
-        "run_id": "run-positive-1",
-        "attempt": 1,
-        "max_results": 5,
-        "corpus": "alpha",
-    }
+    observation["observationDigest"] = _digest(canonical_json_bytes(observation))
+    observation_path = state_root / "resource-observation.json"
+    _write(observation_path, observation)
     request_path = tmp_path / "request.json"
-    _write_canonical(request_path, request)
-
-    manifest_info = load_component_manifest()
-    monkeypatch.setenv("JITECH_RETRIEVAL_ENABLED", "true")
-    monkeypatch.setenv(
-        "JITECH_RETRIEVAL_COMPONENT_DIGEST",
-        manifest_info["component_wheel"]["sha256"],
+    _write(
+        request_path,
+        {
+            "schema_version": "kwrag-slot-search-request-v1",
+            "query": "parcel marker alpha",
+            "request_id": "request-1",
+            "operation_id": "operation-1",
+            "run_id": "run-1",
+            "attempt": 1,
+            "max_results": 5,
+            "corpus": "alpha",
+        },
     )
-    monkeypatch.setenv("JITECH_RETRIEVAL_BINDING_DIGEST", _digest(b"ops-binding"))
-    monkeypatch.setenv(
-        "JITECH_RETRIEVAL_RESOURCE_PROFILE_DIGEST", resource["profileDigest"]
-    )
-    monkeypatch.setenv("HERMES_WORKSPACE_DIR", (tmp_path / "workspace").as_posix())
     monkeypatch.setattr(
         "plugins.kwrag_slot.p1_attachment.get_hermes_home", lambda: home
     )
-    monkeypatch.setattr("kwrag.slot_mount._require_readonly_mount", lambda _path: None)
+    monkeypatch.setattr(
+        "plugins.kwrag_slot.p1_attachment._workspace_mount", lambda: mount
+    )
+    monkeypatch.setattr(
+        "plugins.kwrag_slot.p1_attachment._runtime_identity",
+        lambda: (container_digest, cgroup_digest),
+    )
     monkeypatch.setattr(
         "plugins.kwrag_slot.p1_attachment.os.statvfs",
         lambda _path: SimpleNamespace(f_flag=getattr(os, "ST_RDONLY", 1)),
         raising=False,
     )
+    monkeypatch.setattr("kwrag.slot_mount._require_readonly_mount", lambda _path: None)
+    monkeypatch.setenv("JITECH_RETRIEVAL_ENABLED", "true" if enabled else "false")
+    monkeypatch.setenv(
+        "JITECH_RETRIEVAL_COMPONENT_DIGEST", component["component_wheel"]["sha256"]
+    )
+    monkeypatch.setenv("JITECH_RETRIEVAL_BINDING_DIGEST", binding_digest)
+    monkeypatch.setenv(
+        "JITECH_RETRIEVAL_RESOURCE_PROFILE_DIGEST", resource["profileDigest"]
+    )
     return {
         "home": home,
         "mount": mount,
         "database": database,
-        "state_root": state_root,
-        "runtime_path": runtime_path,
-        "p1_path": p1_path,
-        "resource_observation_path": resource_observation_path,
-        "request_path": request_path,
-        "ops_binding_digest": _digest(b"ops-binding"),
+        "state": state_root,
+        "runtime": runtime_path,
+        "binding": binding_path,
+        "resource": observation_path,
+        "request": request_path,
+        "binding_value": binding,
     }
 
 
-def test_vendored_factory_is_the_exact_research_source_modulo_packaging_lf() -> None:
-    from plugins.kwrag_slot import p1_attachment_fts_factory
+def _probe(fixture: dict[str, object]) -> dict[str, object]:
+    return run_p1_attachment_probe(
+        runtime_binding_path=fixture["runtime"],
+        p1_binding_path=fixture["binding"],
+        resource_observation_path=fixture["resource"],
+        request_path=fixture["request"],
+        state_root=fixture["state"],
+    )
 
-    raw = Path(p1_attachment_fts_factory.__file__).read_bytes()
-    assert raw.endswith(b"\n") and not raw.endswith(b"\n\n")
-    assert _digest(raw + b"\n") == P1_FACTORY_SOURCE_DIGEST
+
+def test_component_wheel_is_reproducible_exact_research_source_with_streaming_adapter() -> (
+    None
+):
+    assert _digest(P1_WHEEL.read_bytes()) == P1_COMPONENT_WHEEL_DIGEST
+    manifest = json.loads(
+        (ROOT / "vendor" / "kwrag_p1" / "component-manifest.json").read_text()
+    )
+    assert (
+        _digest((ROOT / "vendor" / "kwrag_p1" / "component-manifest.json").read_bytes())
+        == P1_COMPONENT_MANIFEST_DIGEST
+    )
+    assert manifest["researchFactorySourceSha256"] == P1_FACTORY_SOURCE_DIGEST
+    assert manifest["databaseHashMode"] == "streaming"
+    assert manifest["wholeDatabaseRead"] is False
+    with zipfile.ZipFile(P1_WHEEL) as wheel:
+        assert (
+            _digest(wheel.read("kwrag_p1_attachment/adapter.py"))
+            == manifest["adapterSourceSha256"]
+        )
+        assert (
+            _digest(wheel.read("kwrag_p1_attachment/factory.py"))
+            == P1_FACTORY_SOURCE_DIGEST
+        )
 
 
-@POSIX_RUNTIME
-def test_caller_explicit_probe_runs_actual_fts_and_survives_reload(
+def test_component_streams_database_digest_without_path_read_bytes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    fixture = _fixture(tmp_path, monkeypatch)
-    before_database = Path(fixture["database"]).read_bytes()
-    proof = run_p1_attachment_probe(
-        runtime_binding_path=Path(fixture["runtime_path"]),
-        p1_binding_path=Path(fixture["p1_path"]),
-        resource_observation_path=Path(fixture["resource_observation_path"]),
-        request_path=Path(fixture["request_path"]),
-        state_root=Path(fixture["state_root"]),
+    database = tmp_path / "fixture.sqlite"
+    _database(database)
+    original = Path.read_bytes
+    monkeypatch.setattr(
+        Path,
+        "read_bytes",
+        lambda self: (
+            (_ for _ in ()).throw(AssertionError("whole DB read"))
+            if self == database
+            else original(self)
+        ),
     )
-    assert proof["schema"] == "jitech-hermes-kwrag-p1-attachment-proof/v1"
-    assert proof["resultStatus"] == "hits"
-    assert proof["resultCount"] == 1
-    assert proof["consumptionStatus"] == "not_consumed"
-    assert proof["providerDispatchRequired"] is False
-    assert proof["providerDispatchAttempted"] is False
-    assert proof["p1Identity"] == P1_IDENTITY
-    assert Path(fixture["database"]).read_bytes() == before_database
-    serialized = json.dumps(proof, ensure_ascii=False)
-    assert "parcel marker" not in serialized
-    assert "marker-positive" not in serialized
+    from kwrag_p1_attachment.adapter import _open_verified
 
-    # A fresh status read uses only the durable content-free ledgers.
-    status = enabled_p1_status(state_root=Path(fixture["state_root"]))
-    assert status["consumerHealth"] == "healthy"
-    assert status["linkageStatus"] == "complete"
-    assert status["schema"] == "jitech-embedded-retrieval-attachment-status/v1"
-    assert status["proofMode"] == "attachment_only"
-    assert status["bindingDigest"] == fixture["ops_binding_digest"]
-    assert status["consumptionReceiptDigest"] == proof["consumptionReceiptDigest"]
-    assert status["consumptionStatus"] == "not_consumed"
-    assert status["resourceStatus"] == "within_declared_reservation"
-    assert status["p1IdentityDigest"] == P1_IDENTITY_DIGEST
-    assert status["operationReceiptDigest"] == proof["operationReceiptDigest"]
-    assert status["resultReceiptDigest"] == proof["resultReceiptDigest"]
-    fixture_status = json.loads(
-        (ROOT / "tests" / "fixtures" / "jitech-embedded-retrieval-attachment-status-v1.valid.json").read_text(
-            encoding="utf-8"
-        )
+    pipeline = _open_verified(
+        database,
+        {
+            "databaseSha256": _digest(original(database)),
+            "readOnlyAuthorityReceiptDigest": _digest(b"authority"),
+            "sourceSnapshotDigest": _digest(b"snapshot"),
+        },
+        database.stat().st_size,
     )
-    assert set(status) == set(fixture_status)
+    try:
+        assert pipeline.search("parcel marker")[0]["sourceIds"] == ["marker-positive"]
+    finally:
+        pipeline.close()
 
 
 @pytest.mark.parametrize(
-    "active_name,field,replacement",
+    "field,replacement,error",
     [
-        ("active-runtime-binding.json", "max_concurrent", 2),
-        (
-            "active-p1-binding.json",
-            "database_sha256",
-            "sha256:" + "0" * 64,
-        ),
-        (
-            "active-resource-observation.json",
-            "hostMemoryAvailableBytes",
-            536_870_911,
-        ),
+        ("observedAt", datetime.now().isoformat(), "time is invalid"),
+        ("ttlSeconds", "300", "time is invalid"),
+        ("containerPidsUsed", True, "measurements are invalid"),
     ],
 )
-@POSIX_RUNTIME
-def test_enabled_status_fails_closed_on_active_binding_drift(
+def test_component_rejects_untyped_or_unzoned_resource_observation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    active_name: str,
     field: str,
     replacement: object,
+    error: str,
 ) -> None:
     fixture = _fixture(tmp_path, monkeypatch)
-    run_p1_attachment_probe(
-        runtime_binding_path=Path(fixture["runtime_path"]),
-        p1_binding_path=Path(fixture["p1_path"]),
-        resource_observation_path=Path(fixture["resource_observation_path"]),
-        request_path=Path(fixture["request_path"]),
-        state_root=Path(fixture["state_root"]),
+    observation = json.loads(fixture["resource"].read_text())
+    observation[field] = replacement
+    observation.pop("observationDigest")
+    observation["observationDigest"] = _digest(canonical_json_bytes(observation))
+    resource = load_resource_profile()
+    from kwrag_p1_attachment import validate_resource_observation
+
+    with pytest.raises(ValueError, match=error):
+        validate_resource_observation(
+            observation,
+            profile_digest=resource["profileDigest"],
+            instance_id="oc20-fixture",
+            container_identity_digest=_digest(b"container"),
+            cgroup_identity_digest=_digest(b"cgroup"),
+            cpu_reservation=resource["cpuReservationMillicores"],
+            memory_reservation=resource["memoryReservationBytes"],
+            pids_reservation=resource["pidsReservation"],
+        )
+
+
+@pytest.mark.parametrize(
+    "field,replacement,error",
+    [
+        ("hostPortCount", False, "approved Hermes P1 profile"),
+        ("hostPortCount", 0.0, "approved Hermes P1 profile"),
+        ("instanceId", 20, "target identity is invalid"),
+    ],
+)
+def test_component_rejects_inexact_binding_types(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    replacement: object,
+    error: str,
+) -> None:
+    fixture = _fixture(tmp_path, monkeypatch)
+    binding = json.loads(json.dumps(fixture["binding_value"]))
+    binding[field] = replacement
+    digest = _digest(canonical_json_bytes(binding))
+    component = load_component_manifest()
+    resource = load_resource_profile()
+    from kwrag_p1_attachment import validate_attachment_binding
+
+    with pytest.raises(ValueError, match=error):
+        validate_attachment_binding(
+            binding,
+            digest=digest,
+            expected_digest=digest,
+            component_digest=component["component_wheel"]["sha256"],
+            contract_digest=component["contract_collection_digest"],
+            resource_profile_digest=resource["profileDigest"],
+            p1_identity=P1_IDENTITY,
+        )
+
+
+@POSIX_RUNTIME
+def test_actual_fts_probe_and_restart_status_are_content_free(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = _fixture(tmp_path, monkeypatch)
+    before = fixture["database"].read_bytes()
+    proof = _probe(fixture)
+    assert proof["resultStatus"] == "hits" and proof["resultCount"] == 1
+    assert proof["consumptionStatus"] == "not_consumed"
+    assert proof["providerDispatchAttempted"] is False
+    assert fixture["database"].read_bytes() == before
+    assert "parcel marker" not in json.dumps(proof)
+    status = enabled_p1_status(state_root=fixture["state"])
+    assert status["attachmentHealth"] == "healthy"
+    assert status["consumptionStatus"] == "not_consumed"
+    assert status["p1IdentityDigest"] == P1_IDENTITY_DIGEST
+    assert set(status) == set(
+        json.loads(
+            (
+                ROOT
+                / "tests"
+                / "fixtures"
+                / "jitech-embedded-retrieval-attachment-status-v1.valid.json"
+            ).read_text()
+        )
     )
-    assert enabled_p1_status(state_root=Path(fixture["state_root"]))["consumerHealth"] == "healthy"
-    active_path = Path(fixture["state_root"]) / active_name
-    changed = json.loads(active_path.read_text(encoding="utf-8"))
-    changed[field] = replacement
-    _write_canonical(active_path, changed)
-    with pytest.raises(HermesP1AttachmentError, match="drift"):
-        enabled_p1_status(state_root=Path(fixture["state_root"]))
 
 
 @POSIX_RUNTIME
@@ -290,215 +399,238 @@ def test_zero_hit_is_linked_without_provider_dispatch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fixture = _fixture(tmp_path, monkeypatch)
-    request = {
-        "schema_version": "kwrag-slot-search-request-v1",
-        "query": "nonexistent marker zulu",
-        "request_id": "request-zero-1",
-        "operation_id": "operation-zero-1",
-        "run_id": "run-zero-1",
-        "attempt": 1,
-        "max_results": 5,
-        "corpus": "alpha",
-    }
-    _write_canonical(Path(fixture["request_path"]), request)
-    proof = run_p1_attachment_probe(
-        runtime_binding_path=Path(fixture["runtime_path"]),
-        p1_binding_path=Path(fixture["p1_path"]),
-        resource_observation_path=Path(fixture["resource_observation_path"]),
-        request_path=Path(fixture["request_path"]),
-        state_root=Path(fixture["state_root"]),
-    )
-    assert proof["resultStatus"] == "zero_hits"
-    assert proof["resultCount"] == 0
+    request = json.loads(fixture["request"].read_text())
+    request["query"] = "quartz zephyr"
+    _write(fixture["request"], request)
+    proof = _probe(fixture)
+    assert proof["resultStatus"] == "zero_hits" and proof["resultCount"] == 0
     assert proof["providerDispatchAttempted"] is False
 
 
+@pytest.mark.parametrize(
+    "field,replacement,error",
+    [
+        (
+            "observedAt",
+            (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(),
+            "stale, foreign, or mismatched",
+        ),
+        ("observedAt", datetime.now().isoformat(), "time is invalid"),
+        ("ttlSeconds", "300", "time is invalid"),
+        ("containerPidsUsed", True, "measurements are invalid"),
+        ("targetInstanceId", "oc19", "stale, foreign, or mismatched"),
+        (
+            "containerIdentityDigest",
+            "sha256:" + "9" * 64,
+            "stale, foreign, or mismatched",
+        ),
+        (
+            "cgroupIdentityDigest",
+            "sha256:" + "9" * 64,
+            "stale, foreign, or mismatched",
+        ),
+    ],
+)
 @POSIX_RUNTIME
-def test_sibling_room_and_tampered_database_fail_without_attachment_receipt(
+def test_stale_or_foreign_resource_observation_fails_before_backend(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    replacement: object,
+    error: str,
+) -> None:
+    fixture = _fixture(tmp_path, monkeypatch)
+    observation = json.loads(fixture["resource"].read_text())
+    observation[field] = replacement
+    observation.pop("observationDigest")
+    observation["observationDigest"] = _digest(canonical_json_bytes(observation))
+    _write(fixture["resource"], observation)
+    with pytest.raises(ValueError, match=error):
+        _probe(fixture)
+    assert not list(fixture["state"].glob("*-receipts.jsonl"))
+
+
+@POSIX_RUNTIME
+def test_low_memory_and_database_tamper_fail_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fixture = _fixture(tmp_path, monkeypatch)
-    request_path = Path(fixture["request_path"])
-    request = json.loads(request_path.read_text(encoding="utf-8"))
-    request["corpus"] = "sibling"
-    _write_canonical(request_path, request)
-    with pytest.raises(Exception, match="outside the slot-mounted index"):
-        run_p1_attachment_probe(
-            runtime_binding_path=Path(fixture["runtime_path"]),
-            p1_binding_path=Path(fixture["p1_path"]),
-            resource_observation_path=Path(fixture["resource_observation_path"]),
-            request_path=request_path,
-            state_root=Path(fixture["state_root"]),
-        )
-    assert not (Path(fixture["state_root"]) / "attachment-receipts.jsonl").exists()
+    observation = json.loads(fixture["resource"].read_text())
+    observation["containerMemoryUsedBytes"] = observation["requiredMemoryBytes"] - 1
+    observation.pop("observationDigest")
+    observation["observationDigest"] = _digest(canonical_json_bytes(observation))
+    _write(fixture["resource"], observation)
+    with pytest.raises(Exception, match="memory headroom"):
+        _probe(fixture)
 
-    p1_path = Path(fixture["p1_path"])
-    p1 = json.loads(p1_path.read_text(encoding="utf-8"))
-    p1["database_sha256"] = "sha256:" + "0" * 64
-    _write_canonical(p1_path, p1)
-    request["corpus"] = "alpha"
-    _write_canonical(request_path, request)
+    fixture = _fixture(tmp_path / "tamper", monkeypatch)
+    fixture["database"].write_bytes(fixture["database"].read_bytes() + b"tamper")
     with pytest.raises(Exception, match="database digest mismatch"):
-        run_p1_attachment_probe(
-            runtime_binding_path=Path(fixture["runtime_path"]),
-            p1_binding_path=p1_path,
-            resource_observation_path=Path(fixture["resource_observation_path"]),
-            request_path=request_path,
-            state_root=Path(fixture["state_root"]),
-        )
-    assert not (Path(fixture["state_root"]) / "attachment-receipts.jsonl").exists()
+        _probe(fixture)
 
 
 @POSIX_RUNTIME
-def test_disabled_probe_stops_before_runtime_or_backend(
+def test_restart_status_rejects_database_binding_and_receipt_drift(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fixture = _fixture(tmp_path, monkeypatch)
-    monkeypatch.setenv("JITECH_RETRIEVAL_ENABLED", "false")
-    with pytest.raises(HermesP1AttachmentError, match="disabled"):
-        run_p1_attachment_probe(
-            runtime_binding_path=Path(fixture["runtime_path"]),
-            p1_binding_path=Path(fixture["p1_path"]),
-            resource_observation_path=Path(fixture["resource_observation_path"]),
-            request_path=Path(fixture["request_path"]),
-            state_root=Path(fixture["state_root"]),
-        )
-    assert not Path(fixture["state_root"]).exists()
+    _probe(fixture)
+    fixture["database"].write_bytes(fixture["database"].read_bytes() + b"tamper")
+    with pytest.raises(Exception, match="database digest mismatch"):
+        enabled_p1_status(state_root=fixture["state"])
+
+    fixture = _fixture(tmp_path / "receipt", monkeypatch)
+    _probe(fixture)
+    binding = json.loads(fixture["binding"].read_text())
+    binding["instanceId"] = "oc19"
+    _write(fixture["binding"], binding)
+    with pytest.raises(HermesP1AttachmentError, match="drifted"):
+        enabled_p1_status(state_root=fixture["state"])
 
 
 @POSIX_RUNTIME
-def test_budget_and_resource_claims_are_exactly_bound_before_backend(
+def test_semantically_corrupt_consumption_receipt_is_rejected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fixture = _fixture(tmp_path, monkeypatch)
-    p1_path = Path(fixture["p1_path"])
-    p1 = json.loads(p1_path.read_text(encoding="utf-8"))
-    p1["max_result_characters"] = 20_001
-    _write_canonical(p1_path, p1)
-    with pytest.raises(HermesP1AttachmentError, match="selected factory"):
-        run_p1_attachment_probe(
-            runtime_binding_path=Path(fixture["runtime_path"]),
-            p1_binding_path=p1_path,
-            resource_observation_path=Path(fixture["resource_observation_path"]),
-            request_path=Path(fixture["request_path"]),
-            state_root=Path(fixture["state_root"]),
-        )
-    assert not Path(fixture["state_root"]).exists()
-
-    resource_root = tmp_path / "resource-catch"
-    resource_root.mkdir()
-    fixture = _fixture(resource_root, monkeypatch)
-    observation_path = Path(fixture["resource_observation_path"])
-    observation = json.loads(observation_path.read_text(encoding="utf-8"))
-    observation["containerMemoryUsedBytes"] = observation["requiredMemoryBytes"] + 1
-    body = dict(observation)
-    body.pop("observationDigest")
-    observation["observationDigest"] = _digest(canonical_json_bytes(body))
-    _write_canonical(observation_path, observation)
-    p1_path = Path(fixture["p1_path"])
-    p1 = json.loads(p1_path.read_text(encoding="utf-8"))
-    p1["resource_observation_digest"] = observation["observationDigest"]
-    _write_canonical(p1_path, p1)
-    with pytest.raises(HermesP1AttachmentError, match="exceeds"):
-        run_p1_attachment_probe(
-            runtime_binding_path=Path(fixture["runtime_path"]),
-            p1_binding_path=p1_path,
-            resource_observation_path=observation_path,
-            request_path=Path(fixture["request_path"]),
-            state_root=Path(fixture["state_root"]),
-        )
-    assert not Path(fixture["state_root"]).exists()
+    _probe(fixture)
+    ledger = fixture["state"] / "attachment-receipts.jsonl"
+    receipt = json.loads(ledger.read_text())
+    receipt["consumer_family"] = "openclaw"
+    raw = canonical_json_bytes(receipt)
+    ledger.write_bytes(raw + b"\n")
+    with pytest.raises(HermesP1AttachmentError, match="linkage"):
+        enabled_p1_status(state_root=fixture["state"])
 
 
+@pytest.mark.parametrize(
+    "target,field,replacement",
+    [
+        ("operation", "schema_version", "kwrag-slot-search-operation-receipt-v0"),
+        ("operation", "authorization_basis", "unbound"),
+        ("operation", "pipeline_backend", "different-backend"),
+        ("result", "schema_version", "hermes-kwrag-result-receipt-v0"),
+        ("result", "consumer_family", "openclaw"),
+        ("result", "adapter_status", "unverified"),
+    ],
+)
 @POSIX_RUNTIME
-def test_enabled_status_uses_persisted_attachment_and_exact_mount_boundary(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_self_consistent_semantic_receipt_corruption_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+    field: str,
+    replacement: str,
 ) -> None:
     fixture = _fixture(tmp_path, monkeypatch)
-    run_p1_attachment_probe(
-        runtime_binding_path=Path(fixture["runtime_path"]),
-        p1_binding_path=Path(fixture["p1_path"]),
-        resource_observation_path=Path(fixture["resource_observation_path"]),
-        request_path=Path(fixture["request_path"]),
-        state_root=Path(fixture["state_root"]),
-    )
-    assert enabled_p1_status(state_root=Path(fixture["state_root"]))["consumerHealth"] == "healthy"
-
-
-@POSIX_RUNTIME
-def test_enabled_status_fails_closed_after_database_changes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    fixture = _fixture(tmp_path, monkeypatch)
-    run_p1_attachment_probe(
-        runtime_binding_path=Path(fixture["runtime_path"]),
-        p1_binding_path=Path(fixture["p1_path"]),
-        resource_observation_path=Path(fixture["resource_observation_path"]),
-        request_path=Path(fixture["request_path"]),
-        state_root=Path(fixture["state_root"]),
-    )
-    database = Path(fixture["database"])
-    database.write_bytes(database.read_bytes() + b"tamper")
-    with pytest.raises(HermesP1AttachmentError, match="database digest mismatch"):
-        enabled_p1_status(state_root=Path(fixture["state_root"]))
-
-
-def test_image_labels_bind_p1_candidate_without_selecting_product_policy() -> None:
-    dockerfile = (Path(__file__).parents[2] / "Dockerfile").read_text(encoding="utf-8")
-    expected = {
-        "status": P1_IDENTITY["status"],
-        "backend-id": P1_IDENTITY["backendId"],
-        "factory-source-digest": P1_FACTORY_SOURCE_DIGEST,
-        "pipeline-factory-digest": P1_IDENTITY["pipelineFactoryDigest"],
-        "pipeline-fingerprint": P1_IDENTITY["pipelineFingerprint"],
-        "research-decision-digest": P1_IDENTITY["researchDecisionDigest"],
-        "default-enabled": "false",
-        "caller-explicit": "true",
-        "provider-dispatch-required": "false",
-        "status-schema": "jitech-embedded-retrieval-attachment-status/v1",
-        "verify-command.json": '["hermes","kwrag-slot","p1-attachment-status","--json"]',
-    }
-    for suffix, value in expected.items():
-        if suffix == "verify-command.json":
-            assert f"com.epicevent.hermes.kwrag.p1.{suffix}='{value}'" in dockerfile
+    _probe(fixture)
+    root = fixture["state"]
+    operation_path = root / "operation-receipts.jsonl"
+    result_path = root / "result-receipts.jsonl"
+    consumption_path = root / "attachment-receipts.jsonl"
+    operation = json.loads(operation_path.read_text())
+    result = json.loads(result_path.read_text())
+    consumption = json.loads(consumption_path.read_text())
+    if target == "operation":
+        if field == "pipeline_backend":
+            operation["pipeline_evidence"]["backend_id"] = replacement
         else:
-            assert f'com.epicevent.hermes.kwrag.p1.{suffix}="{value}"' in dockerfile
-    assert KWRAG_SOURCE_COMMIT == load_component_manifest()["component_source_revision"]
-    assert KWRAG_WHEEL_DIGEST == load_component_manifest()["component_wheel"]["sha256"]
+            operation[field] = replacement
+        operation_raw = canonical_json_bytes(operation)
+        operation_path.write_bytes(operation_raw + b"\n")
+        operation_digest = _digest(operation_raw)
+        result["operation_receipt_digest"] = operation_digest
+        consumption["operation_receipt_digest"] = operation_digest
+    else:
+        result[field] = replacement
+    result_raw = canonical_json_bytes(result)
+    result_path.write_bytes(result_raw + b"\n")
+    consumption["result_receipt_digest"] = _digest(result_raw)
+    consumption_path.write_bytes(canonical_json_bytes(consumption) + b"\n")
+    with pytest.raises(ValueError, match="linkage"):
+        enabled_p1_status(state_root=root)
 
 
-def test_attachment_status_fixture_is_canonical_strict_and_content_free() -> None:
-    path = ROOT / "tests" / "fixtures" / "jitech-embedded-retrieval-attachment-status-v1.valid.json"
-    raw = path.read_bytes()
-    assert raw.endswith(b"\n") and raw.count(b"\n") == 1
-    fixture = json.loads(raw)
-    assert raw == canonical_json_bytes(fixture) + b"\n"
-    assert set(fixture) == {
-        "schema",
-        "proofMode",
-        "enabled",
-        "componentDigest",
-        "bindingDigest",
-        "resourceProfileDigest",
-        "p1IdentityDigest",
-        "attachmentDataDigest",
-        "hostPortCount",
-        "mountReadOnly",
-        "attachmentHealth",
-        "resourceStatus",
-        "gpuAccessStatus",
-        "operationReceiptDigest",
-        "resultReceiptDigest",
-        "consumptionReceiptDigest",
-        "consumptionStatus",
-        "linkageStatus",
-        "revocationStatus",
-    }
+@POSIX_RUNTIME
+def test_disabled_v2_status_requires_exact_binding_and_read_only_mount(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = _fixture(tmp_path, monkeypatch, enabled=False)
+    _write(fixture["state"] / "binding-v2.json", fixture["binding_value"])
+    status = enabled_p1_status(state_root=fixture["state"])
+    assert status["enabled"] is False and status["mountReadOnly"] is True
+    assert status["p1IdentityDigest"] == P1_IDENTITY_DIGEST
+    assert status["attachmentDataDigest"] is None
+
+    monkeypatch.setattr(
+        "plugins.kwrag_slot.p1_attachment.os.statvfs",
+        lambda _path: SimpleNamespace(f_flag=0),
+    )
+    with pytest.raises(HermesP1AttachmentError, match="not read-only"):
+        enabled_p1_status(state_root=fixture["state"])
+
+    monkeypatch.setattr(
+        "plugins.kwrag_slot.p1_attachment.os.statvfs",
+        lambda _path: SimpleNamespace(f_flag=getattr(os, "ST_RDONLY", 1)),
+    )
+    invalid = json.loads(json.dumps(fixture["binding_value"]))
+    invalid["componentDigest"] = None
+    monkeypatch.setenv(
+        "JITECH_RETRIEVAL_BINDING_DIGEST",
+        _write(fixture["state"] / "binding-v2.json", invalid),
+    )
+    with pytest.raises(ValueError, match="approved Hermes P1 profile"):
+        enabled_p1_status(state_root=fixture["state"])
+
+    invalid = json.loads(json.dumps(fixture["binding_value"]))
+    invalid["schema"] = "agent-runtime-retrieval-binding/v1"
+    monkeypatch.setenv(
+        "JITECH_RETRIEVAL_BINDING_DIGEST",
+        _write(fixture["state"] / "binding-v2.json", invalid),
+    )
+    with pytest.raises(ValueError, match="approved Hermes P1 profile"):
+        enabled_p1_status(state_root=fixture["state"])
+
+    (fixture["state"] / "binding-v2.json").unlink()
+    with pytest.raises(HermesP1AttachmentError, match="unavailable"):
+        enabled_p1_status(state_root=fixture["state"])
+
+
+@POSIX_RUNTIME
+def test_disabled_probe_has_no_backend_or_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = _fixture(tmp_path, monkeypatch, enabled=False)
+    with pytest.raises(HermesP1AttachmentError, match="disabled"):
+        _probe(fixture)
+    assert not list(fixture["state"].glob("*-receipts.jsonl"))
+
+
+def test_image_labels_and_status_fixture_bind_exact_product_contract() -> None:
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    for value in (P1_COMPONENT_WHEEL_DIGEST, P1_COMPONENT_MANIFEST_DIGEST):
+        assert value in dockerfile
+    manifest = json.loads(
+        (ROOT / "vendor/kwrag_p1/component-manifest.json").read_text()
+    )
+    assert manifest["researchFactorySourceSha256"] == P1_FACTORY_SOURCE_DIGEST
+    assert manifest["pipelineFingerprint"] == P1_PIPELINE_FINGERPRINT
+    assert manifest["databaseHashMode"] == "streaming"
+    assert manifest["wholeDatabaseRead"] is False
+    assert (
+        'com.epicevent.hermes.kwrag.p1.verify-command.json=\'["hermes","kwrag-slot","p1-attachment-status","--json"]\''
+        in dockerfile
+    )
+    fixture_path = (
+        ROOT
+        / "tests"
+        / "fixtures"
+        / "jitech-embedded-retrieval-attachment-status-v1.valid.json"
+    )
+    fixture = json.loads(fixture_path.read_text())
+    assert fixture_path.read_bytes() == canonical_json_bytes(fixture) + b"\n"
     assert fixture["schema"] == "jitech-embedded-retrieval-attachment-status/v1"
     assert fixture["proofMode"] == "attachment_only"
     assert fixture["consumptionStatus"] == "not_consumed"
-    assert fixture["p1IdentityDigest"] == P1_IDENTITY_DIGEST
-    assert fixture["resourceStatus"] == "within_declared_reservation"
-    serialized = raw.decode("utf-8")
-    for forbidden in ("query", "resultText", "nasName", "credential", "providerResponse"):
-        assert forbidden not in serialized
+    assert KWRAG_SOURCE_COMMIT == load_component_manifest()["component_source_revision"]
+    assert KWRAG_WHEEL_DIGEST == load_component_manifest()["component_wheel"]["sha256"]
