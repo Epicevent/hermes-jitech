@@ -170,7 +170,7 @@ RUN printf '%s  %s\n' \
 
 COPY vendor/kwrag_p1/kwrag_p1_attachment-0.1.2-py3-none-any.whl /tmp/kwrag_p1_attachment-0.1.2-py3-none-any.whl
 RUN printf '%s  %s\n' \
-        'ddad82d3b7cd6a8c617ad26c1217d04083fb3af4e3f3662426525d5afe33a24b' \
+        'd52ef1371f4d5ecddd1f51243187adb65b5c5eb4438cfe368895fe0520eb0a69' \
         '/tmp/kwrag_p1_attachment-0.1.2-py3-none-any.whl' \
         > /tmp/kwrag_p1_attachment.sha256 && \
     sha256sum -c /tmp/kwrag_p1_attachment.sha256 && \
@@ -190,8 +190,8 @@ LABEL com.epicevent.agent-runtime.retrieval.schema="jitech-embedded-retrieval/v1
       com.epicevent.agent-runtime.retrieval.nas-read-only="true" \
       com.epicevent.agent-runtime.retrieval.resource.json='{"cpuReservationMillicores":500,"gpuAccess":"none","memoryReservationBytes":536870912,"pidsReservation":64,"profileDigest":"sha256:2d4ff46a2d76e712421a9758ecb0ae1d262e2d42ea00cee888c103477e6709ed"}' \
       com.epicevent.agent-runtime.retrieval.verify-command.json='["hermes","kwrag-slot","status","--json"]' \
-      com.epicevent.hermes.kwrag.p1.component-wheel-digest="sha256:ddad82d3b7cd6a8c617ad26c1217d04083fb3af4e3f3662426525d5afe33a24b" \
-      com.epicevent.hermes.kwrag.p1.component-manifest-digest="sha256:b765437014c51e8a6054a1d744964c9352fa12d275892a7e910941206242a498" \
+      com.epicevent.hermes.kwrag.p1.component-wheel-digest="sha256:d52ef1371f4d5ecddd1f51243187adb65b5c5eb4438cfe368895fe0520eb0a69" \
+      com.epicevent.hermes.kwrag.p1.component-manifest-digest="sha256:15df10f1195242afa94d99e33129a19efbc8e34807aa18b31217e27560da2418" \
       com.epicevent.hermes.kwrag.p1.attachment-decision-digest="sha256:fd4d1068407d0b28d41e7813f8cef7b193a5fe43f39db166588911e6fde3bbb5" \
       com.epicevent.hermes.kwrag.p1.default-enabled="false" \
       com.epicevent.hermes.kwrag.p1.caller-explicit="true" \

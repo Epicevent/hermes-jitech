@@ -32,10 +32,10 @@ ROOT = Path(__file__).parents[2]
 KWRAG_WHEEL = ROOT / "vendor" / "kwrag" / "kwrag_product_service-0.1.0-py3-none-any.whl"
 P1_WHEEL = ROOT / "vendor" / "kwrag_p1" / "kwrag_p1_attachment-0.1.2-py3-none-any.whl"
 P1_COMPONENT_WHEEL_DIGEST = (
-    "sha256:ddad82d3b7cd6a8c617ad26c1217d04083fb3af4e3f3662426525d5afe33a24b"
+    "sha256:d52ef1371f4d5ecddd1f51243187adb65b5c5eb4438cfe368895fe0520eb0a69"
 )
 P1_COMPONENT_MANIFEST_DIGEST = (
-    "sha256:b765437014c51e8a6054a1d744964c9352fa12d275892a7e910941206242a498"
+    "sha256:15df10f1195242afa94d99e33129a19efbc8e34807aa18b31217e27560da2418"
 )
 P1_FACTORY_SOURCE_DIGEST = (
     "sha256:104276b46fa427d741fcf63db87b70d9a6d8a2ad32e63c4a43e87692041ed43e"
@@ -562,6 +562,8 @@ def test_semantically_corrupt_consumption_receipt_is_rejected(
         ("result", "consumer_family", "openclaw"),
         ("result", "adapter_status", "unverified"),
         ("result", "extra_field", "unexpected"),
+        ("result", "result_characters", False),
+        ("result", "result_characters", 20_001),
     ],
 )
 @POSIX_RUNTIME
@@ -570,7 +572,7 @@ def test_self_consistent_semantic_receipt_corruption_is_rejected(
     monkeypatch: pytest.MonkeyPatch,
     target: str,
     field: str,
-    replacement: str,
+    replacement: object,
 ) -> None:
     fixture = _fixture(tmp_path, monkeypatch)
     _probe(fixture)
