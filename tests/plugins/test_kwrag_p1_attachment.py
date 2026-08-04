@@ -32,10 +32,10 @@ ROOT = Path(__file__).parents[2]
 KWRAG_WHEEL = ROOT / "vendor" / "kwrag" / "kwrag_product_service-0.1.0-py3-none-any.whl"
 P1_WHEEL = ROOT / "vendor" / "kwrag_p1" / "kwrag_p1_attachment-0.1.2-py3-none-any.whl"
 P1_COMPONENT_WHEEL_DIGEST = (
-    "sha256:e0d71a0278d7f20603c82d8050f7516ae8e4d5d8dbaed5e34541a9998422dc4a"
+    "sha256:7ecbb2faf12a712ca7604533b7800bccc8bf3ef8e233af5e7bbfe526c7eed5d4"
 )
 P1_COMPONENT_MANIFEST_DIGEST = (
-    "sha256:b391d632b264104bfe5d5fdcb25d18d411dc5ddcf7302215342ac58dcef8e956"
+    "sha256:92aeeb4ec0588c7159344a327575d3f4e01a0edc2014dfb879ee2b1b5bd8d772"
 )
 P1_FACTORY_SOURCE_DIGEST = (
     "sha256:104276b46fa427d741fcf63db87b70d9a6d8a2ad32e63c4a43e87692041ed43e"
@@ -624,6 +624,39 @@ def test_self_consistent_invalid_result_semantics_are_rejected(
     consumption = json.loads(consumption_path.read_text())
     for receipt in (operation, result, consumption):
         receipt[field] = replacement
+    operation_raw = canonical_json_bytes(operation)
+    operation_path.write_bytes(operation_raw + b"\n")
+    operation_digest = _digest(operation_raw)
+    result["operation_receipt_digest"] = operation_digest
+    consumption["operation_receipt_digest"] = operation_digest
+    result_raw = canonical_json_bytes(result)
+    result_path.write_bytes(result_raw + b"\n")
+    consumption["result_receipt_digest"] = _digest(result_raw)
+    consumption_path.write_bytes(canonical_json_bytes(consumption) + b"\n")
+    with pytest.raises(ValueError, match="linkage"):
+        enabled_p1_status(state_root=root)
+
+
+@pytest.mark.parametrize("target", ["operation", "result"])
+@pytest.mark.parametrize("replacement", [True, 1.0])
+@POSIX_RUNTIME
+def test_each_linked_receipt_requires_an_exact_integer_result_count(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+    replacement: object,
+) -> None:
+    fixture = _fixture(tmp_path, monkeypatch)
+    _probe(fixture)
+    root = fixture["state"]
+    operation_path = root / "operation-receipts.jsonl"
+    result_path = root / "result-receipts.jsonl"
+    consumption_path = root / "attachment-receipts.jsonl"
+    operation = json.loads(operation_path.read_text())
+    result = json.loads(result_path.read_text())
+    consumption = json.loads(consumption_path.read_text())
+    receipt = operation if target == "operation" else result
+    receipt["result_count"] = replacement
     operation_raw = canonical_json_bytes(operation)
     operation_path.write_bytes(operation_raw + b"\n")
     operation_digest = _digest(operation_raw)
