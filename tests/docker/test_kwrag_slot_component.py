@@ -26,10 +26,10 @@ BINDING_DIGEST = "sha256:" + "d" * 64
 LABEL_PREFIX = "com.epicevent.agent-runtime.retrieval."
 P1_LABEL_PREFIX = "com.epicevent.hermes.kwrag.p1."
 P1_COMPONENT_DIGEST = (
-    "sha256:3ef3ecaa93bf9f59685d2c24a9bab3384c453089cf491357eae6fe29bda15c2b"
+    "sha256:8a1a32d341112c5b8492235f00fa578e9367c715082279c2b2ba08a765aff91b"
 )
 P1_COMPONENT_MANIFEST_DIGEST = (
-    "sha256:ae643ffdcabc3c67cf814c30d4bfdca94c8a473db0e8a543de5a052b2e35e084"
+    "sha256:aa0c8c6e069d9e4c89664a8c103b22a3756183bfa02f13f6db2becedebe2f866"
 )
 
 
