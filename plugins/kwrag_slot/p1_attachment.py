@@ -288,6 +288,7 @@ def run_p1_attachment_probe(
             "operation_id": receipt["operation_id"],
             "run_id": receipt["run_id"],
             "attempt": receipt["attempt"],
+            "source_generation": source_generation,
             "result_status": receipt["result_status"],
             "result_count": receipt["result_count"],
             "result_digest": receipt["result_digest"],
