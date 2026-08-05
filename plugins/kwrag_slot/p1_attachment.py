@@ -187,14 +187,12 @@ def _runtime(
     room: str,
     maximum_bytes: int,
 ):
-    # The generation identity belongs to the Hermes admission boundary.  The
-    # historical P1 factory does not know that field; it receives only the
-    # exact legacy runtime projection after Hermes has validated and bound the
-    # generation above it.  A missing/invalid generation never reaches here.
-    legacy_runtime = dict(runtime)
-    legacy_runtime.pop("source_generation", None)
+    # The generation identity is part of the KWRAG runtime binding as well as
+    # Hermes admission.  Pass the exact validated mapping through so the
+    # generation-aware wheel can bind it into the producer exchange; older
+    # adapter code ignores the field while the current wheel requires it.
     return _component().build_p1_runtime(
-        legacy_runtime,
+        runtime,
         runtime_digest,
         binding,
         mount,
