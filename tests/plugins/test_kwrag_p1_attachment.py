@@ -45,6 +45,7 @@ KWRAG_SOURCE_COMMIT = "49c10212ff12433941cfbe43d95013d1d2f0aebe"
 KWRAG_WHEEL_DIGEST = (
     "sha256:f8dd900d0d00775853ee95dfbf15960c9ea7de2711ea5635fe229b06a550fa6f"
 )
+FIXTURE_SOURCE_GENERATION = "kakao-fts-fixture-generation-1"
 POSIX_RUNTIME = pytest.mark.skipif(
     os.name != "posix", reason="Linux slot runtime is authoritative"
 )
@@ -122,6 +123,7 @@ def _fixture(
     state_root.mkdir(mode=0o700)
     runtime = {
         "schema_version": "kwrag-slot-runtime-binding-v1",
+        "source_generation": FIXTURE_SOURCE_GENERATION,
         "mount_root": mount.as_posix(),
         "index_manifest_relative": "index/manifest.json",
         "index_manifest_digest": manifest_digest,
@@ -194,6 +196,7 @@ def _fixture(
             "attempt": 1,
             "max_results": 5,
             "corpus": corpus,
+            "source_generation": FIXTURE_SOURCE_GENERATION,
         },
     )
     monkeypatch.setattr(
@@ -223,6 +226,9 @@ def _fixture(
     monkeypatch.setenv("JITECH_RETRIEVAL_BINDING_DIGEST", binding_digest)
     monkeypatch.setenv(
         "JITECH_RETRIEVAL_RESOURCE_PROFILE_DIGEST", resource["profileDigest"]
+    )
+    monkeypatch.setenv(
+        "JITECH_RETRIEVAL_SOURCE_GENERATION", FIXTURE_SOURCE_GENERATION
     )
     return {
         "home": home,
