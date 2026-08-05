@@ -33,10 +33,10 @@ ROOT = Path(__file__).parents[2]
 KWRAG_WHEEL = ROOT / "vendor" / "kwrag" / "kwrag_product_service-0.2.0-py3-none-any.whl"
 P1_WHEEL = ROOT / "vendor" / "kwrag_p1" / "kwrag_p1_attachment-0.1.2-py3-none-any.whl"
 P1_COMPONENT_WHEEL_DIGEST = (
-    "sha256:f8c90245dabfce1edf840ef308f1d0969233e6adfa383a499ecf9632dea8284d"
+    "sha256:fad6b60b9e81a91c85e521cf0838f8c99b01f14fba6e9724ce3884d721d1de7d"
 )
 P1_COMPONENT_MANIFEST_DIGEST = (
-    "sha256:9df5ac053f40265bb864aa38d8dd00b0b1f05a32841e245a45d0f52cf8697be2"
+    "sha256:da96fbe86c8658a9f1ee3a194e244bb6c398572f4741b241717a6333314415e6"
 )
 P1_FACTORY_SOURCE_DIGEST = (
     "sha256:104276b46fa427d741fcf63db87b70d9a6d8a2ad32e63c4a43e87692041ed43e"
