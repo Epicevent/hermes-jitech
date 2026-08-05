@@ -158,7 +158,20 @@ def _root(root: Path | None) -> Path:
     if os.name == "posix":
         info = target.stat()
         effective_uid = getattr(os, "geteuid", lambda: None)()
-        if info.st_uid != effective_uid or stat.S_IMODE(info.st_mode) != 0o700:
+        effective_gid = getattr(os, "getegid", lambda: None)()
+        supplementary_groups = set(getattr(os, "getgroups", lambda: [])())
+        mode = stat.S_IMODE(info.st_mode)
+        user_private = info.st_uid == effective_uid and mode == 0o700
+        root_managed = (
+            info.st_uid == 0
+            and mode == 0o750
+            and (
+                effective_uid == 0
+                or info.st_gid == effective_gid
+                or info.st_gid in supplementary_groups
+            )
+        )
+        if not (user_private or root_managed):
             raise HermesP1AttachmentError("attachment state root is unsafe")
     return target
 
