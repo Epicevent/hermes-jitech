@@ -2085,6 +2085,22 @@ def test_generation_bound_exchange_and_receipt_preserve_source_identity(
     assert prepared.result_receipt["source_generation"] == generation
     assert prepared.content_free_attestation()["sourceGeneration"] == generation
 
+    legacy_binding = HermesSlotRetrievalBinding.from_mapping({
+        "schema_version": "hermes-kwrag-slot-binding-v1",
+        "enabled": True,
+        "component_digest": load_component_manifest()["component_wheel"]["sha256"],
+        "runtime_binding_digest": "sha256:" + "c" * 64,
+        "expected_index_manifest": "sha256:" + "a" * 64,
+        "expected_pipeline_fingerprint": "sha256:" + "b" * 64,
+        "max_result_characters": _fixture_result_character_budget(),
+    })
+    legacy_prepared = HermesSlotRetrievalConsumer(
+        legacy_binding,
+        SimpleNamespace(search_exchange=MagicMock(return_value=_exchange())),
+        _test_receipt_sink(tmp_path / "legacy-generation-bound.jsonl"),
+    ).search(request)
+    assert legacy_prepared.result_receipt["source_generation"] == generation
+
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX platform admission contract")
 def test_non_linux_posix_receipt_preflight_fails_before_retrieval(

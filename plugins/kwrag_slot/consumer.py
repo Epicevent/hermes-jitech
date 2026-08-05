@@ -1485,9 +1485,12 @@ class HermesSlotRetrievalConsumer:
             "expected_pipeline_fingerprint": self._binding.expected_pipeline_fingerprint,
             "max_result_characters": self._binding.max_result_characters,
         }
-        if self._binding.expected_source_generation is not None:
-            request_generation = request.get("source_generation")
-            if request_generation != self._binding.expected_source_generation:
+        expected_source_generation = self._binding.expected_source_generation
+        request_generation = request.get("source_generation")
+        if expected_source_generation is None and request_generation is not None:
+            expected_source_generation = _source_generation(request_generation)
+        if expected_source_generation is not None:
+            if request_generation != expected_source_generation:
                 raise HermesSlotRetrievalError(
                     "slot request source generation does not match its binding"
                 )
@@ -1508,9 +1511,7 @@ class HermesSlotRetrievalConsumer:
                 raise HermesSlotRetrievalError(
                     "embedded KWRAG verifier lacks source-generation binding"
                 )
-            verification_kwargs["expected_source_generation"] = (
-                self._binding.expected_source_generation
-            )
+            verification_kwargs["expected_source_generation"] = expected_source_generation
         exchange = self._runtime.search_exchange(dict(request))
         try:
             verified = verify_slot_search_exchange(
@@ -1520,14 +1521,14 @@ class HermesSlotRetrievalConsumer:
                 **verification_kwargs,
             )
         except TypeError as exc:
-            if self._binding.expected_source_generation is not None:
+            if expected_source_generation is not None:
                 raise HermesSlotRetrievalError(
                     "generation-bound KWRAG verifier rejected its source identity"
                 ) from exc
             raise
-        if self._binding.expected_source_generation is not None:
+        if expected_source_generation is not None:
             verified_generation = getattr(verified, "source_generation", None)
-            if verified_generation != self._binding.expected_source_generation:
+            if verified_generation != expected_source_generation:
                 raise HermesSlotRetrievalError(
                     "verified exchange source generation is not bound"
                 )
@@ -1549,8 +1550,8 @@ class HermesSlotRetrievalConsumer:
             "result_count": verified.result_count,
             "result_characters": verified.result_characters,
         }
-        if self._binding.expected_source_generation is not None:
-            receipt["source_generation"] = self._binding.expected_source_generation
+        if expected_source_generation is not None:
+            receipt["source_generation"] = expected_source_generation
         receipt_bytes = canonical_json_bytes(receipt)
         receipt_digest = "sha256:" + hashlib.sha256(receipt_bytes).hexdigest()
         written_digest = self._receipt_sink.write(receipt)
