@@ -794,6 +794,67 @@ def test_state_root_resolves_before_profile_containment(
 
 
 @POSIX_RUNTIME
+def test_state_root_accepts_root_managed_runtime_group_projection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    state = home / "kwrag-p1-attachment"
+    home.mkdir(mode=0o700)
+    state.mkdir(mode=0o750)
+    real_stat = Path.stat
+
+    def projected_stat(path: Path, *args, **kwargs):
+        info = real_stat(path, *args, **kwargs)
+        if path != state:
+            return info
+        return SimpleNamespace(
+            st_uid=0,
+            st_gid=960,
+            st_mode=(info.st_mode & ~0o777) | 0o750,
+        )
+
+    monkeypatch.setattr(Path, "stat", projected_stat)
+    monkeypatch.setattr(
+        "plugins.kwrag_slot.p1_attachment.get_hermes_home", lambda: home
+    )
+    monkeypatch.setattr("plugins.kwrag_slot.p1_attachment.os.geteuid", lambda: 969)
+    monkeypatch.setattr("plugins.kwrag_slot.p1_attachment.os.getegid", lambda: 969)
+    monkeypatch.setattr("plugins.kwrag_slot.p1_attachment.os.getgroups", lambda: [960])
+    assert _root(state) == state.resolve()
+
+
+@POSIX_RUNTIME
+def test_state_root_rejects_root_managed_projection_without_runtime_group(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    state = home / "kwrag-p1-attachment"
+    home.mkdir(mode=0o700)
+    state.mkdir(mode=0o750)
+    real_stat = Path.stat
+
+    def projected_stat(path: Path, *args, **kwargs):
+        info = real_stat(path, *args, **kwargs)
+        if path != state:
+            return info
+        return SimpleNamespace(
+            st_uid=0,
+            st_gid=960,
+            st_mode=(info.st_mode & ~0o777) | 0o750,
+        )
+
+    monkeypatch.setattr(Path, "stat", projected_stat)
+    monkeypatch.setattr(
+        "plugins.kwrag_slot.p1_attachment.get_hermes_home", lambda: home
+    )
+    monkeypatch.setattr("plugins.kwrag_slot.p1_attachment.os.geteuid", lambda: 969)
+    monkeypatch.setattr("plugins.kwrag_slot.p1_attachment.os.getegid", lambda: 969)
+    monkeypatch.setattr("plugins.kwrag_slot.p1_attachment.os.getgroups", lambda: [])
+    with pytest.raises(HermesP1AttachmentError, match="state root is unsafe"):
+        _root(state)
+
+
+@POSIX_RUNTIME
 def test_default_state_root_accepts_a_resolved_home_symlink(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
