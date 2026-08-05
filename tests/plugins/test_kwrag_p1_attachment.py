@@ -30,21 +30,22 @@ from plugins.kwrag_slot.p1_attachment import (
 
 
 ROOT = Path(__file__).parents[2]
-KWRAG_WHEEL = ROOT / "vendor" / "kwrag" / "kwrag_product_service-0.1.0-py3-none-any.whl"
+KWRAG_WHEEL = ROOT / "vendor" / "kwrag" / "kwrag_product_service-0.2.0-py3-none-any.whl"
 P1_WHEEL = ROOT / "vendor" / "kwrag_p1" / "kwrag_p1_attachment-0.1.2-py3-none-any.whl"
 P1_COMPONENT_WHEEL_DIGEST = (
-    "sha256:f8c90245dabfce1edf840ef308f1d0969233e6adfa383a499ecf9632dea8284d"
+    "sha256:242cafa5a73d2b54b63a60ad6e71c73d671d99db371d7c0904cfce2ae2c9e4b6"
 )
 P1_COMPONENT_MANIFEST_DIGEST = (
-    "sha256:9df5ac053f40265bb864aa38d8dd00b0b1f05a32841e245a45d0f52cf8697be2"
+    "sha256:3c866b053eae82280753beb2b6f03e643c1f93c3dbd7011ef34aece1dc7fdd0e"
 )
 P1_FACTORY_SOURCE_DIGEST = (
     "sha256:104276b46fa427d741fcf63db87b70d9a6d8a2ad32e63c4a43e87692041ed43e"
 )
-KWRAG_SOURCE_COMMIT = "49c10212ff12433941cfbe43d95013d1d2f0aebe"
+KWRAG_SOURCE_COMMIT = "b41349bc1215514a872f31ccc24c47b0f7621e6d"
 KWRAG_WHEEL_DIGEST = (
-    "sha256:f8dd900d0d00775853ee95dfbf15960c9ea7de2711ea5635fe229b06a550fa6f"
+    "sha256:7c793623aa74d5a953a187cf7c962314474c6b00367c574dd477f4f781e07300"
 )
+FIXTURE_SOURCE_GENERATION = "kakao-fts-fixture-generation-1"
 POSIX_RUNTIME = pytest.mark.skipif(
     os.name != "posix", reason="Linux slot runtime is authoritative"
 )
@@ -122,6 +123,7 @@ def _fixture(
     state_root.mkdir(mode=0o700)
     runtime = {
         "schema_version": "kwrag-slot-runtime-binding-v1",
+        "source_generation": FIXTURE_SOURCE_GENERATION,
         "mount_root": mount.as_posix(),
         "index_manifest_relative": "index/manifest.json",
         "index_manifest_digest": manifest_digest,
@@ -194,6 +196,7 @@ def _fixture(
             "attempt": 1,
             "max_results": 5,
             "corpus": corpus,
+            "source_generation": FIXTURE_SOURCE_GENERATION,
         },
     )
     monkeypatch.setattr(
@@ -223,6 +226,9 @@ def _fixture(
     monkeypatch.setenv("JITECH_RETRIEVAL_BINDING_DIGEST", binding_digest)
     monkeypatch.setenv(
         "JITECH_RETRIEVAL_RESOURCE_PROFILE_DIGEST", resource["profileDigest"]
+    )
+    monkeypatch.setenv(
+        "JITECH_RETRIEVAL_SOURCE_GENERATION", FIXTURE_SOURCE_GENERATION
     )
     return {
         "home": home,
@@ -555,6 +561,61 @@ def test_repeated_successful_probe_projects_latest_receipt(
     status = enabled_p1_status(state_root=fixture["state"])
     assert status["consumptionReceiptDigest"] == second["consumptionReceiptDigest"]
     assert status["attachmentHealth"] == "healthy"
+
+
+@POSIX_RUNTIME
+def test_receipt_linkage_rejects_generation_from_a_different_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = _fixture(tmp_path, monkeypatch)
+    _probe(fixture)
+    from kwrag_p1_attachment import load_receipt, validate_receipt_linkage
+
+    binding = json.loads(fixture["binding"].read_text())
+    observation = json.loads(fixture["resource"].read_text())
+    runtime = json.loads(fixture["runtime"].read_text())
+    component = load_component_manifest()
+    resource = load_resource_profile()
+    consumption = load_receipt(
+        fixture["state"] / "attachment-receipts.jsonl", None, "attachment"
+    )
+    operation = load_receipt(
+        fixture["state"] / "operation-receipts.jsonl",
+        consumption["operation_receipt_digest"],
+        "operation",
+    )
+    result = load_receipt(
+        fixture["state"] / "result-receipts.jsonl",
+        consumption["result_receipt_digest"],
+        "result",
+    )
+    kwargs = {
+        "binding": binding,
+        "observation_digest": observation["observationDigest"],
+        "component_digest": component["component_wheel"]["sha256"],
+        "runtime_binding_digest": _digest(fixture["runtime"].read_bytes()),
+        "index_manifest_digest": runtime["index_manifest_digest"],
+        "binding_digest": _digest(fixture["binding"].read_bytes()),
+        "p1_identity_digest": P1_IDENTITY_DIGEST,
+        "attachment_data_digest": _digest(
+            canonical_json_bytes(binding["attachmentData"])
+        ),
+    }
+    validate_receipt_linkage(
+        consumption,
+        operation,
+        result,
+        **kwargs,
+        expected_source_generation=FIXTURE_SOURCE_GENERATION,
+    )
+    with pytest.raises(ValueError, match="current"):
+        validate_receipt_linkage(
+            consumption,
+            operation,
+            result,
+            **kwargs,
+            expected_source_generation=FIXTURE_SOURCE_GENERATION + "-drift",
+        )
 
 
 @POSIX_RUNTIME
