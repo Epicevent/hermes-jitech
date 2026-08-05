@@ -34,6 +34,7 @@ P1_IDENTITY = {
 }
 
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
+_SOURCE_GENERATION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$")
 _OPS_OBSERVATION_UID = 0
 
 
@@ -57,6 +58,16 @@ def _digest(value: object, label: str) -> str:
     if not _SHA256.fullmatch(text := str(value or "")):
         raise HermesP1AttachmentError(f"{label} is invalid")
     return text
+
+
+def _source_generation(value: object, label: str = "source generation") -> str:
+    if (
+        not isinstance(value, str)
+        or not _SOURCE_GENERATION.fullmatch(value)
+        or value.lower() in {"unknown", "latest", "current"}
+    ):
+        raise HermesP1AttachmentError(f"{label} is invalid")
+    return value
 
 
 def _read_json(path: Path, label: str) -> tuple[dict[str, Any], str]:
@@ -176,8 +187,14 @@ def _runtime(
     room: str,
     maximum_bytes: int,
 ):
+    # The generation identity belongs to the Hermes admission boundary.  The
+    # historical P1 factory does not know that field; it receives only the
+    # exact legacy runtime projection after Hermes has validated and bound the
+    # generation above it.  A missing/invalid generation never reaches here.
+    legacy_runtime = dict(runtime)
+    legacy_runtime.pop("source_generation", None)
     return _component().build_p1_runtime(
-        runtime,
+        legacy_runtime,
         runtime_digest,
         binding,
         mount,
@@ -221,7 +238,12 @@ def run_p1_attachment_probe(
     runtime_raw, runtime_digest = _read_json(
         runtime_binding_path, "slot runtime binding"
     )
+    source_generation = _source_generation(runtime_raw.get("source_generation"))
+    if os.environ.get("JITECH_RETRIEVAL_SOURCE_GENERATION") != source_generation:
+        raise HermesP1AttachmentError("runtime source generation is not image-bound")
     request, _ = _read_json(request_path, "slot search request")
+    if request.get("source_generation") != source_generation:
+        raise HermesP1AttachmentError("request source generation does not match runtime")
     if binding["enabled"] is not True:
         raise HermesP1AttachmentError(
             "caller-explicit P1 attachment binding is disabled"
@@ -238,10 +260,11 @@ def run_p1_attachment_probe(
     try:
         consumer = HermesSlotRetrievalConsumer(
             HermesSlotRetrievalBinding.from_mapping({
-                "schema_version": "hermes-kwrag-slot-binding-v1",
+                "schema_version": "hermes-kwrag-slot-binding-v2",
                 "enabled": True,
                 "component_digest": component,
                 "runtime_binding_digest": runtime_digest,
+                "expected_source_generation": source_generation,
                 "expected_index_manifest": spec.index_manifest_digest,
                 "expected_pipeline_fingerprint": P1_PIPELINE_FINGERPRINT,
                 "max_result_characters": 20_000,
@@ -352,6 +375,9 @@ def enabled_p1_status(*, state_root: Path | None = None) -> dict[str, Any]:
     runtime_raw, runtime_digest = _read_json(
         root / "runtime-binding.json", "slot runtime binding"
     )
+    source_generation = _source_generation(runtime_raw.get("source_generation"))
+    if os.environ.get("JITECH_RETRIEVAL_SOURCE_GENERATION") != source_generation:
+        raise HermesP1AttachmentError("runtime source generation is not image-bound")
     consumption = _receipt(root / "attachment-receipts.jsonl", None, "attachment")
     consumption_digest = _hash(consumption)
     operation = _receipt(
