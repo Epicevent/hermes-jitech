@@ -27,7 +27,7 @@ from plugins.kwrag_slot.manifest import (
 
 
 ROOT = Path(__file__).resolve().parents[2]
-WHEEL = ROOT / "vendor" / "kwrag" / "kwrag_product_service-0.1.0-py3-none-any.whl"
+WHEEL = ROOT / "vendor" / "kwrag" / "kwrag_product_service-0.2.0-py3-none-any.whl"
 STATUS_FIXTURES = ROOT / "tests" / "fixtures" / "kwrag_slot"
 
 _SupportedAnthropicLeaf = type("Anthropic", (), {"__module__": "anthropic"})
@@ -1979,7 +1979,17 @@ def test_generation_bound_binding_requires_generation_aware_request_and_verifier
         "expected_pipeline_fingerprint": "sha256:" + "b" * 64,
         "max_result_characters": _fixture_result_character_budget(),
     })
-    runtime = SimpleNamespace(search_exchange=MagicMock(return_value=_exchange()))
+    generation_exchange = _exchange()
+    generation_exchange.response["source_generation"] = generation
+    generation_exchange.operation_receipt["source_generation"] = generation
+    receipt_digest = "sha256:" + hashlib.sha256(
+        canonical_json_bytes(generation_exchange.operation_receipt)
+    ).hexdigest()
+    generation_exchange.response["operation_receipt"] = {
+        "status": "written",
+        "digest": receipt_digest,
+    }
+    runtime = SimpleNamespace(search_exchange=MagicMock(return_value=generation_exchange))
     sink = _test_receipt_sink(tmp_path / "generation-bound.jsonl")
 
     with pytest.raises(HermesSlotRetrievalError, match="source generation"):
@@ -1987,9 +1997,9 @@ def test_generation_bound_binding_requires_generation_aware_request_and_verifier
     runtime.search_exchange.assert_not_called()
 
     request = {**_request(), "source_generation": generation}
-    with pytest.raises(HermesSlotRetrievalError, match="verifier lacks source-generation"):
-        HermesSlotRetrievalConsumer(binding, runtime, sink).search(request)
-    runtime.search_exchange.assert_not_called()
+    prepared = HermesSlotRetrievalConsumer(binding, runtime, sink).search(request)
+    assert prepared.result_receipt["source_generation"] == generation
+    runtime.search_exchange.assert_called_once()
 
 
 def test_generation_bound_binding_rejects_ambiguous_generation_values() -> None:

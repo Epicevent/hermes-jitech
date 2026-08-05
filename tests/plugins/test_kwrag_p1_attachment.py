@@ -30,7 +30,7 @@ from plugins.kwrag_slot.p1_attachment import (
 
 
 ROOT = Path(__file__).parents[2]
-KWRAG_WHEEL = ROOT / "vendor" / "kwrag" / "kwrag_product_service-0.1.0-py3-none-any.whl"
+KWRAG_WHEEL = ROOT / "vendor" / "kwrag" / "kwrag_product_service-0.2.0-py3-none-any.whl"
 P1_WHEEL = ROOT / "vendor" / "kwrag_p1" / "kwrag_p1_attachment-0.1.2-py3-none-any.whl"
 P1_COMPONENT_WHEEL_DIGEST = (
     "sha256:f8c90245dabfce1edf840ef308f1d0969233e6adfa383a499ecf9632dea8284d"
@@ -41,9 +41,9 @@ P1_COMPONENT_MANIFEST_DIGEST = (
 P1_FACTORY_SOURCE_DIGEST = (
     "sha256:104276b46fa427d741fcf63db87b70d9a6d8a2ad32e63c4a43e87692041ed43e"
 )
-KWRAG_SOURCE_COMMIT = "49c10212ff12433941cfbe43d95013d1d2f0aebe"
+KWRAG_SOURCE_COMMIT = "b41349bc1215514a872f31ccc24c47b0f7621e6d"
 KWRAG_WHEEL_DIGEST = (
-    "sha256:f8dd900d0d00775853ee95dfbf15960c9ea7de2711ea5635fe229b06a550fa6f"
+    "sha256:7c793623aa74d5a953a187cf7c962314474c6b00367c574dd477f4f781e07300"
 )
 FIXTURE_SOURCE_GENERATION = "kakao-fts-fixture-generation-1"
 POSIX_RUNTIME = pytest.mark.skipif(
