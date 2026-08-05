@@ -408,6 +408,7 @@ def enabled_p1_status(*, state_root: Path | None = None) -> dict[str, Any]:
         binding_digest=ops_digest,
         p1_identity_digest=P1_IDENTITY_DIGEST,
         attachment_data_digest=_hash(binding["attachmentData"]),
+        expected_source_generation=source_generation,
     )
     return base | {
         "attachmentDataDigest": _hash(binding["attachmentData"]),
