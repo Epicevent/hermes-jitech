@@ -181,6 +181,39 @@ async def test_session_chat_loads_history_and_preserves_session_headers(auth_ada
 
 
 @pytest.mark.asyncio
+async def test_session_chat_passes_only_explicit_kwrag_to_terminal_join(
+    auth_adapter, session_db, monkeypatch
+):
+    session_id = session_db.create_session("kwrag-session", "api_server")
+    approved = object()
+    context = b'{"schema_version":"hermes-kwrag-current-turn-context-v1"}'
+    monkeypatch.setattr(
+        "plugins.kwrag_slot.terminal.prepare_approved_retrieval",
+        lambda request: (approved, context),
+    )
+    mock_run = AsyncMock(
+        return_value=({"final_response": "retrieved answer", "session_id": session_id}, {})
+    )
+    app = _create_session_app(auth_adapter)
+    with patch.object(auth_adapter, "_run_agent", mock_run):
+        async with TestClient(TestServer(app)) as cli:
+            response = await cli.post(
+                f"/api/sessions/{session_id}/chat",
+                json={"message": "question", "kwrag": {
+                    "query": "question",
+                    "corpus": "kakao",
+                    "expected_source_generation": "sha256:" + "1" * 64,
+                    "expected_index_manifest": "sha256:" + "2" * 64,
+                }},
+                headers={"Authorization": "Bearer sk-test"},
+            )
+    assert response.status == 200, await response.text()
+    _, kwargs = mock_run.call_args
+    assert kwargs["approved_retrieval"] is approved
+    assert kwargs["kwrag_current_turn_context"] == context
+
+
+@pytest.mark.asyncio
 async def test_session_chat_accepts_multimodal_message(auth_adapter, session_db):
     session_id = session_db.create_session("image-session", "api_server")
     image_payload = [

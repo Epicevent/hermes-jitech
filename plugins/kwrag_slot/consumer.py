@@ -1486,7 +1486,13 @@ class HermesSlotRetrievalConsumer:
             "max_result_characters": self._binding.max_result_characters,
         }
         expected_source_generation = self._binding.expected_source_generation
-        request_generation = request.get("source_generation")
+        # The current Kakao producer names the caller pin
+        # ``expected_source_generation``.  Keep reading the historical field
+        # for already-published non-generation fixtures, but never infer a
+        # generation when neither field is present.
+        request_generation = request.get("expected_source_generation")
+        if request_generation is None:
+            request_generation = request.get("source_generation")
         if expected_source_generation is None and request_generation is not None:
             expected_source_generation = _source_generation(request_generation)
         if expected_source_generation is not None:
