@@ -1,5 +1,8 @@
 """Tests for the caller-explicit Kakao -> Hermes terminal seam."""
 
+import json
+import sys
+import types
 from types import SimpleNamespace
 
 import pytest
@@ -68,6 +71,83 @@ def test_runtime_handoff_binds_source_index_and_receipt_lineage() -> None:
     value, digest = terminal._validate_runtime_handoff(_runtime_handoff())
     assert value["source_generation"] == value["index_manifest_sha256"]
     assert digest.startswith("sha256:")
+
+
+def test_fixed_producer_execute_receives_both_runtime_pins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handoff = _runtime_handoff()
+    generation = handoff["source_generation"]
+    index_manifest = handoff["index_manifest_sha256"]
+    pipeline = handoff["pipeline_fingerprint"]
+    binding = SimpleNamespace(enabled=True, index_manifest_digest=index_manifest)
+    captured: dict[str, object] = {}
+    operation_receipt = {
+        "source_generation": generation,
+        "index_manifest": index_manifest,
+        "pipeline_fingerprint": pipeline,
+        "read_only_required": True,
+        "duration_ms": 7,
+    }
+    operation_receipt_digest = "sha256:" + terminal.hashlib.sha256(
+        terminal.canonical_json_bytes(operation_receipt)
+    ).hexdigest()
+
+    def execute(payload: bytes, *, binding_path: object) -> SimpleNamespace:
+        captured["request"] = json.loads(payload.decode("utf-8"))
+        captured["binding_path"] = binding_path
+        request = captured["request"]
+        output = {
+            "consumable": {
+                "request_id": request["request_id"],
+                "operation_id": request["operation_id"],
+                "run_id": request["run_id"],
+                "attempt": request["attempt"],
+                "source_generation": generation,
+                "index_manifest": index_manifest,
+                "pipeline_fingerprint": pipeline,
+                "result_digest": "sha256:" + "4" * 64,
+                "result_status": "zero_hits",
+                "results": [],
+            },
+            "linkage": {"operation_receipt_digest": operation_receipt_digest},
+        }
+        return SimpleNamespace(
+            output_bytes=terminal.canonical_json_bytes(output),
+            producer_receipt={},
+            binding_digest="sha256:" + "5" * 64,
+            operation_receipt=operation_receipt,
+        )
+
+    fixed_producer = SimpleNamespace(
+        load_fixed_producer_binding=lambda path: binding,
+        load_runtime_handoff=lambda path: handoff,
+        execute_fixed_producer=execute,
+        verify_fixed_producer_output=lambda *args, **kwargs: None,
+    )
+    kwrag = types.ModuleType("kwrag")
+    kwrag.fixed_producer = fixed_producer
+    monkeypatch.setitem(sys.modules, "kwrag", kwrag)
+    monkeypatch.setattr(
+        terminal, "_producer_binding_path", lambda: terminal.Path("/run/binding.json")
+    )
+
+    terminal._fixed_producer_exchange(
+        {
+            "schema_version": "kwrag-slot-search-request-v1",
+            "query": "who owns the slot?",
+            "request_id": "request-1",
+            "operation_id": "operation-1",
+            "run_id": "run-1",
+            "attempt": 1,
+            "max_results": 10,
+            "corpus": "kakao",
+        }
+    )
+
+    request = captured["request"]
+    assert request["expected_source_generation"] == generation
+    assert request["expected_index_manifest"] == index_manifest
 
 
 @pytest.mark.parametrize(

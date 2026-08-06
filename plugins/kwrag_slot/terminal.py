@@ -268,7 +268,6 @@ def _fixed_producer_exchange(request: Mapping[str, Any]) -> tuple[_FixedProducer
         raise KakaoTerminalRetrievalError("index manifest hint drifted")
     request_fields["expected_source_generation"] = expected_source_generation
     request_fields["expected_index_manifest"] = expected_index_manifest
-    request_fields.pop("expected_index_manifest")
     if getattr(binding, "index_manifest_digest", None) != expected_index_manifest:
         raise KakaoTerminalRetrievalError("index manifest drifted before retrieval")
     producer_request = request_fields
