@@ -388,6 +388,33 @@ def _session_chat_client_message_id(
     return value, None
 
 
+def _session_chat_kwrag(
+    body: Dict[str, Any],
+) -> tuple[Optional[Dict[str, str]], Optional["web.Response"]]:
+    """Read the caller-explicit Kakao retrieval request, if present.
+
+    Absence is the normal path and performs no retrieval.  The adapter owns
+    the generation/index and producer validation after this shape check.
+    """
+    value = body.get("kwrag")
+    if value is None:
+        return None, None
+    if not isinstance(value, dict):
+        return None, web.json_response(
+            _openai_error("kwrag must be an object", code="invalid_kwrag"),
+            status=400,
+        )
+    try:
+        from plugins.kwrag_slot.terminal import validate_explicit_request
+
+        return validate_explicit_request(value), None
+    except Exception as exc:
+        return None, web.json_response(
+            _openai_error(str(exc), code="invalid_kwrag"),
+            status=400,
+        )
+
+
 def _session_chat_visible_user_text(user_message: Any) -> str:
     """Return only visible text from a normalized multimodal user message."""
     if isinstance(user_message, str):
@@ -1585,6 +1612,26 @@ class APIServerAdapter(BasePlatformAdapter):
         system_prompt = body.get("system_message") or body.get("instructions")
         if system_prompt is not None and not isinstance(system_prompt, str):
             return web.json_response(_openai_error("system_message must be a string", code="invalid_system_message"), status=400)
+        kwrag_request, err = _session_chat_kwrag(body)
+        if err is not None:
+            return err
+        approved_retrieval = None
+        kwrag_current_turn_context = None
+        if kwrag_request is not None:
+            loop = asyncio.get_running_loop()
+            try:
+                from plugins.kwrag_slot.terminal import prepare_approved_retrieval
+
+                approved_retrieval, kwrag_current_turn_context = await loop.run_in_executor(
+                    None,
+                    lambda: prepare_approved_retrieval(kwrag_request),
+                )
+            except Exception as exc:
+                logger.warning("explicit Kakao retrieval was rejected: %s", exc)
+                return web.json_response(
+                    _openai_error("explicit Kakao retrieval was not verified", code="kwrag_unavailable"),
+                    status=503,
+                )
         history = self._conversation_history_for_session(session_id)
         result, usage = await self._run_agent(
             user_message=user_message,
@@ -1593,6 +1640,8 @@ class APIServerAdapter(BasePlatformAdapter):
             session_id=session_id,
             gateway_session_key=gateway_session_key,
             persist_user_message=persist_user_message,
+            approved_retrieval=approved_retrieval,
+            kwrag_current_turn_context=kwrag_current_turn_context,
         )
         effective_session_id = result.get("session_id") if isinstance(result, dict) else session_id
         final_response = result.get("final_response", "") if isinstance(result, dict) else ""
@@ -1630,6 +1679,17 @@ class APIServerAdapter(BasePlatformAdapter):
         persist_user_message, err = _session_chat_persist_user_message(body)
         if err is not None:
             return err
+        kwrag_request, err = _session_chat_kwrag(body)
+        if err is not None:
+            return err
+        if kwrag_request is not None:
+            return web.json_response(
+                _openai_error(
+                    "caller-explicit Kakao retrieval is supported only on the terminal chat endpoint",
+                    code="kwrag_stream_unsupported",
+                ),
+                status=400,
+            )
         client_message_id, err = _session_chat_client_message_id(body)
         if err is not None:
             return err
@@ -3493,6 +3553,8 @@ class APIServerAdapter(BasePlatformAdapter):
         agent_ref: Optional[list] = None,
         gateway_session_key: Optional[str] = None,
         persist_user_message: Optional[str] = None,
+        approved_retrieval: object = None,
+        kwrag_current_turn_context: Optional[bytes] = None,
     ) -> tuple:
         """
         Create an agent and run a conversation in a thread executor.
@@ -3527,7 +3589,21 @@ class APIServerAdapter(BasePlatformAdapter):
             }
             if persist_user_message is not None:
                 run_kwargs["persist_user_message"] = persist_user_message
-            result = agent.run_conversation(**run_kwargs)
+            if approved_retrieval is not None:
+                if not isinstance(kwrag_current_turn_context, bytes):
+                    raise ValueError("verified Kakao turn context is unavailable")
+                from plugins.kwrag_slot.terminal import dispatch_current_terminal_turn
+
+                result = dispatch_current_terminal_turn(
+                    agent,
+                    user_message,
+                    kwrag_current_turn_context=kwrag_current_turn_context,
+                    approved_retrieval=approved_retrieval,
+                    task_id=effective_task_id,
+                    conversation_history=conversation_history,
+                )
+            else:
+                result = agent.run_conversation(**run_kwargs)
             usage = {
                 "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
                 "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
