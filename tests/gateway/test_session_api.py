@@ -187,9 +187,10 @@ async def test_session_chat_passes_only_explicit_kwrag_to_terminal_join(
     session_id = session_db.create_session("kwrag-session", "api_server")
     approved = object()
     context = b'{"schema_version":"hermes-kwrag-current-turn-context-v1"}'
+    captured = {}
     monkeypatch.setattr(
         "plugins.kwrag_slot.terminal.prepare_approved_retrieval",
-        lambda request: (approved, context),
+        lambda request: captured.update(request) or (approved, context),
     )
     mock_run = AsyncMock(
         return_value=({"final_response": "retrieved answer", "session_id": session_id}, {})
@@ -202,8 +203,6 @@ async def test_session_chat_passes_only_explicit_kwrag_to_terminal_join(
                 json={"message": "question", "kwrag": {
                     "query": "question",
                     "corpus": "kakao",
-                    "expected_source_generation": "sha256:" + "1" * 64,
-                    "expected_index_manifest": "sha256:" + "2" * 64,
                 }},
                 headers={"Authorization": "Bearer sk-test"},
             )
@@ -211,6 +210,7 @@ async def test_session_chat_passes_only_explicit_kwrag_to_terminal_join(
     _, kwargs = mock_run.call_args
     assert kwargs["approved_retrieval"] is approved
     assert kwargs["kwrag_current_turn_context"] == context
+    assert captured == {"query": "question", "corpus": "kakao"}
 
 
 @pytest.mark.asyncio
