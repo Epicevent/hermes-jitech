@@ -47,6 +47,14 @@ _REQUEST_FIELDS = {
     "corpus",
     "source_generation",
 }
+_RUNTIME_HANDOFF_RECEIPT_FIELDS = {
+    "embedding_operation",
+    "activation",
+    "operation",
+    "result",
+    "consumption",
+    "provider",
+}
 
 
 class KakaoTerminalRetrievalError(HermesSlotRetrievalError):
@@ -79,28 +87,119 @@ def _query(value: Any) -> str:
     return value
 
 
-def validate_explicit_request(value: Mapping[str, Any]) -> dict[str, str]:
-    """Validate the API's explicit request without creating a query policy."""
+def validate_explicit_request(
+    value: Mapping[str, Any], *, require_pins: bool = True
+) -> dict[str, str | None]:
+    """Validate the API's explicit request without creating a query policy.
 
-    if not isinstance(value, Mapping) or set(value) != {
+    Source/index identities may be supplied as caller hints, but the runtime
+    handoff is authoritative when the request is admitted by the terminal.
+    The default keeps the historical direct helper contract strict; the API
+    path opts into runtime-owned pins.
+    """
+
+    allowed = {
         "query",
         "corpus",
         "expected_source_generation",
         "expected_index_manifest",
+    }
+    if not isinstance(value, Mapping) or not set(value) <= allowed or set(value) < {
+        "query",
+        "corpus",
     }:
+        raise KakaoTerminalRetrievalError("kwrag request fields are invalid")
+    if require_pins and set(value) != allowed:
         raise KakaoTerminalRetrievalError("kwrag request fields are invalid")
     query = _query(value["query"])
     corpus = value["corpus"]
     if not isinstance(corpus, str) or not corpus or corpus != corpus.strip():
         raise KakaoTerminalRetrievalError("corpus is invalid")
-    return {
+    expected_generation = value.get("expected_source_generation")
+    expected_manifest = value.get("expected_index_manifest")
+    if expected_generation is not None:
+        expected_generation = _digest(expected_generation, "source generation")
+    if expected_manifest is not None:
+        expected_manifest = _digest(expected_manifest, "index manifest")
+    if (expected_generation is None) != (expected_manifest is None):
+        raise KakaoTerminalRetrievalError(
+            "source generation and index manifest hints must be paired"
+        )
+    result: dict[str, str | None] = {
         "query": query,
         "corpus": corpus,
-        "expected_source_generation": _generation(value["expected_source_generation"]),
-        "expected_index_manifest": _digest(
-            value["expected_index_manifest"], "index manifest"
-        ),
     }
+    if expected_generation is not None:
+        result["expected_source_generation"] = expected_generation
+        result["expected_index_manifest"] = expected_manifest
+    return result
+
+
+def _validate_runtime_handoff(value: Any) -> tuple[dict[str, Any], str]:
+    """Validate one content-free server runtime handoff.
+
+    The producer owns source observation and derived-release construction.  The
+    Hermes adapter only accepts the immutable identity/receipt projection and
+    never treats research or provider fields as admission inputs.
+    """
+
+    if not isinstance(value, Mapping) or value.get("schema_version") != (
+        "kwrag-dense-runtime-handoff-v1"
+    ):
+        raise KakaoTerminalRetrievalError("runtime handoff schema is invalid")
+    if value.get("status") != "active":
+        raise KakaoTerminalRetrievalError("runtime handoff is not active")
+    if value.get("read_only_required") is not True:
+        raise KakaoTerminalRetrievalError("runtime handoff is not read-only")
+    if value.get("raw_content_present") is not False:
+        raise KakaoTerminalRetrievalError("runtime handoff contains raw content")
+    for field in (
+        "source_generation",
+        "source_snapshot_sha256",
+        "source_database_sha256",
+        "source_membership_sha256",
+        "source_profile_sha256",
+        "index_manifest_sha256",
+        "pipeline_fingerprint",
+        "embedding_fingerprint",
+    ):
+        _digest(value.get(field), field)
+    for field in ("slot_namespace", "release_id", "release_relative", "read_view_relative"):
+        raw = value.get(field)
+        if not isinstance(raw, str) or not raw or raw != raw.strip():
+            raise KakaoTerminalRetrievalError(f"runtime handoff {field} is invalid")
+    if value["release_relative"] != (
+        f"{value['slot_namespace']}/releases/{value['release_id']}"
+    ):
+        raise KakaoTerminalRetrievalError("runtime handoff release is invalid")
+    if any(part in str(value["read_view_relative"]).replace("\\", "/").split("/") for part in ("..", "")):
+        raise KakaoTerminalRetrievalError("runtime handoff read view is invalid")
+    receipts = value.get("receipt_digests")
+    if not isinstance(receipts, Mapping) or set(receipts) != _RUNTIME_HANDOFF_RECEIPT_FIELDS:
+        raise KakaoTerminalRetrievalError("runtime handoff receipts are invalid")
+    for field, digest in receipts.items():
+        if field == "embedding_operation" or field == "activation":
+            _digest(digest, f"runtime handoff {field} receipt")
+        elif digest is not None:
+            _digest(digest, f"runtime handoff {field} receipt")
+    # Operation/result/consumption/provider receipts belong to later stages;
+    # accepting an already-populated value here would allow stale evidence.
+    if any(receipts[field] is not None for field in ("operation", "result", "consumption", "provider")):
+        raise KakaoTerminalRetrievalError("runtime handoff contains stale turn receipts")
+    canonical = canonical_json_bytes(dict(value))
+    return dict(value), "sha256:" + hashlib.sha256(canonical).hexdigest()
+
+
+def _load_runtime_handoff(fixed_producer: Any, binding_path: Path) -> tuple[dict[str, Any], str]:
+    loader = getattr(fixed_producer, "load_runtime_handoff", None)
+    if not callable(loader):
+        raise KakaoTerminalRetrievalError("runtime handoff loader is unavailable")
+    try:
+        return _validate_runtime_handoff(loader(binding_path))
+    except KakaoTerminalRetrievalError:
+        raise
+    except Exception as exc:
+        raise KakaoTerminalRetrievalError("runtime handoff is unavailable") from exc
 
 
 def _producer_binding_path() -> Path:
@@ -155,9 +254,20 @@ def _fixed_producer_exchange(request: Mapping[str, Any]) -> tuple[_FixedProducer
         raise KakaoTerminalRetrievalError("fixed producer binding is unavailable") from exc
     if getattr(binding, "enabled", None) is not True:
         raise KakaoTerminalRetrievalError("caller-explicit Kakao retrieval is disabled")
+    runtime_handoff, runtime_handoff_digest = _load_runtime_handoff(
+        fixed_producer, binding_path
+    )
     request_fields = dict(request)
-    expected_source_generation = request_fields["expected_source_generation"]
-    expected_index_manifest = request_fields.pop("expected_index_manifest")
+    expected_source_generation = runtime_handoff["source_generation"]
+    expected_index_manifest = runtime_handoff["index_manifest_sha256"]
+    request_generation = request_fields.get("expected_source_generation")
+    request_manifest = request_fields.get("expected_index_manifest")
+    if request_generation is not None and request_generation != expected_source_generation:
+        raise KakaoTerminalRetrievalError("source generation hint drifted")
+    if request_manifest is not None and request_manifest != expected_index_manifest:
+        raise KakaoTerminalRetrievalError("index manifest hint drifted")
+    request_fields["expected_source_generation"] = expected_source_generation
+    request_fields["expected_index_manifest"] = expected_index_manifest
     if getattr(binding, "index_manifest_digest", None) != expected_index_manifest:
         raise KakaoTerminalRetrievalError("index manifest drifted before retrieval")
     producer_request = request_fields
@@ -174,6 +284,8 @@ def _fixed_producer_exchange(request: Mapping[str, Any]) -> tuple[_FixedProducer
         )
     except Exception as exc:
         raise KakaoTerminalRetrievalError("Kakao source exchange was not verified") from exc
+    if not isinstance(output, Mapping):
+        raise KakaoTerminalRetrievalError("Kakao producer output is invalid")
     consumable = output.get("consumable")
     linkage = output.get("linkage")
     operation_receipt = dict(execution.operation_receipt)
@@ -183,6 +295,26 @@ def _fixed_producer_exchange(request: Mapping[str, Any]) -> tuple[_FixedProducer
         raise KakaoTerminalRetrievalError("producer source generation is not bound")
     if consumable.get("index_manifest") != expected_index_manifest:
         raise KakaoTerminalRetrievalError("producer index manifest is not bound")
+    if consumable.get("pipeline_fingerprint") != runtime_handoff["pipeline_fingerprint"]:
+        raise KakaoTerminalRetrievalError("producer pipeline is not bound")
+    for field, expected in (
+        ("source_generation", expected_source_generation),
+        ("index_manifest", expected_index_manifest),
+        ("pipeline_fingerprint", runtime_handoff["pipeline_fingerprint"]),
+    ):
+        observed = operation_receipt.get(field)
+        if observed is not None and observed != expected:
+            raise KakaoTerminalRetrievalError(
+                f"producer operation receipt {field} drifted"
+            )
+    if (
+        "read_only_required" in operation_receipt
+        and operation_receipt["read_only_required"] is not True
+    ):
+        raise KakaoTerminalRetrievalError("producer operation receipt is not read-only")
+    _, post_handoff_digest = _load_runtime_handoff(fixed_producer, binding_path)
+    if post_handoff_digest != runtime_handoff_digest:
+        raise KakaoTerminalRetrievalError("runtime handoff drifted during retrieval")
     receipt_digest = "sha256:" + hashlib.sha256(
         canonical_json_bytes(operation_receipt)
     ).hexdigest()
@@ -204,15 +336,16 @@ def _fixed_producer_exchange(request: Mapping[str, Any]) -> tuple[_FixedProducer
         "results": consumable.get("results"),
         "duration_ms": operation_receipt.get("duration_ms", 0),
     }
-    return _FixedProducerRuntime(producer_request, response, operation_receipt), execution.binding_digest
+    response["runtime_handoff_digest"] = runtime_handoff_digest
+    return _FixedProducerRuntime(producer_request, response, operation_receipt), runtime_handoff_digest
 
 
 def prepare_approved_retrieval(
     request: Mapping[str, Any],
 ) -> tuple[HermesSlotRetrievalResult, bytes]:
-    """Run one explicit source-pinned exchange and return verified evidence."""
+    """Run one explicit runtime-handoff-bound exchange and return evidence."""
 
-    validated = validate_explicit_request(request)
+    validated = validate_explicit_request(request, require_pins=False)
     producer_request: dict[str, Any] = {
         "schema_version": "kwrag-slot-search-request-v1",
         "query": validated["query"],
@@ -228,15 +361,17 @@ def prepare_approved_retrieval(
     runtime, runtime_binding_digest = _fixed_producer_exchange(producer_request)
     manifest = load_component_manifest()
     root = _receipt_root()
+    source_generation = runtime.response["source_generation"]
+    index_manifest = runtime.response["index_manifest"]
     binding = HermesSlotRetrievalBinding.from_mapping(
         {
             "schema_version": "hermes-kwrag-slot-binding-v2",
             "enabled": True,
             "component_digest": manifest["component_wheel"]["sha256"],
             "runtime_binding_digest": runtime_binding_digest,
-            "expected_index_manifest": validated["expected_index_manifest"],
+            "expected_index_manifest": index_manifest,
             "expected_pipeline_fingerprint": runtime.response["pipeline_fingerprint"],
-            "expected_source_generation": validated["expected_source_generation"],
+            "expected_source_generation": source_generation,
             "max_result_characters": _MAX_RESULT_CHARACTERS,
         }
     )
@@ -247,8 +382,9 @@ def prepare_approved_retrieval(
     ).search(runtime.request)
     context = {
         "schema_version": "hermes-kwrag-current-turn-context-v1",
-        "source_generation": validated["expected_source_generation"],
-        "index_manifest": validated["expected_index_manifest"],
+        "source_generation": source_generation,
+        "index_manifest": index_manifest,
+        "runtime_binding_digest": result.result_receipt["runtime_binding_digest"],
         "operation_receipt_digest": result.result_receipt["operation_receipt_digest"],
         "result_receipt_digest": result.result_receipt_digest,
         "result_digest": result.result_receipt["result_digest"],
@@ -278,6 +414,7 @@ def dispatch_current_terminal_turn(
         "schema_version",
         "source_generation",
         "index_manifest",
+        "runtime_binding_digest",
         "operation_receipt_digest",
         "result_receipt_digest",
         "result_digest",
@@ -288,6 +425,7 @@ def dispatch_current_terminal_turn(
     for field, key in (
         ("source_generation", "source_generation"),
         ("index_manifest", "index_manifest"),
+        ("runtime_binding_digest", "runtime_binding_digest"),
         ("operation_receipt_digest", "operation_receipt_digest"),
         ("result_receipt_digest", None),
         ("result_digest", "result_digest"),

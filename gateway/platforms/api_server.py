@@ -407,7 +407,7 @@ def _session_chat_kwrag(
     try:
         from plugins.kwrag_slot.terminal import validate_explicit_request
 
-        return validate_explicit_request(value), None
+        return validate_explicit_request(value, require_pins=False), None
     except Exception as exc:
         return None, web.json_response(
             _openai_error(str(exc), code="invalid_kwrag"),

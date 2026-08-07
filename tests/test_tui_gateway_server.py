@@ -2174,6 +2174,147 @@ def test_prompt_submit_sets_approval_session_key(monkeypatch):
     assert captured["session_key"] == "session-key"
 
 
+def test_prompt_submit_forwards_only_explicit_kwrag_request(monkeypatch):
+    captured = {}
+
+    class _ImmediateThread:
+        def __init__(self, target=None, daemon=None, **_kwargs):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    normalized = {"query": "who owns the slot?", "corpus": "kakao"}
+
+    def validate(value, require_pins=False):
+        captured["validation"] = (value, require_pins)
+        return normalized
+
+    monkeypatch.setattr(
+        "plugins.kwrag_slot.terminal.validate_explicit_request",
+        validate,
+    )
+    monkeypatch.setattr(server, "_start_agent_build", lambda _sid, _session: None)
+    monkeypatch.setattr(server, "_wait_agent", lambda _session, _rid: None)
+    monkeypatch.setattr(
+        server,
+        "_run_prompt_submit",
+        lambda rid, sid, session, text, *, kwrag_request=None: captured.update(
+            run=(rid, sid, text, kwrag_request)
+        ),
+    )
+    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+
+    server._sessions["sid"] = _session()
+    try:
+        response = server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": "sid",
+                    "text": "question",
+                    "kwrag": normalized,
+                },
+            }
+        )
+        assert response["result"]["status"] == "streaming"
+        assert captured["validation"] == (normalized, False)
+        assert captured["run"][3] == normalized
+    finally:
+        server._sessions.pop("sid", None)
+
+
+def test_prompt_submit_rejects_non_object_kwrag_before_agent_start(monkeypatch):
+    started = []
+    monkeypatch.setattr(
+        server, "_start_agent_build", lambda *_args: started.append(True)
+    )
+    server._sessions["sid"] = _session()
+    try:
+        response = server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": "sid",
+                    "text": "question",
+                    "kwrag": ["query", "kakao"],
+                },
+            }
+        )
+        assert response["error"]["code"] == 4002
+        assert started == []
+    finally:
+        server._sessions.pop("sid", None)
+
+
+def test_prompt_submit_uses_existing_kwrag_dispatch_seam(monkeypatch):
+    captured = {}
+
+    class _Agent:
+        def run_conversation(self, *_args, **_kwargs):
+            raise AssertionError("plain conversation path used")
+
+    class _ImmediateThread:
+        def __init__(self, target=None, daemon=None, **_kwargs):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    approved = object()
+    context = b"verified-context"
+
+    def prepare(request):
+        captured["prepared"] = request
+        return approved, context
+
+    monkeypatch.setattr(
+        "plugins.kwrag_slot.terminal.prepare_approved_retrieval",
+        prepare,
+    )
+    monkeypatch.setattr(
+        "plugins.kwrag_slot.terminal.dispatch_current_terminal_turn",
+        lambda agent, message, **kwargs: captured.update(
+            dispatch=(agent, message, kwargs)
+        )
+        or {"final_response": "answer", "messages": [{"role": "assistant", "content": "answer"}]},
+    )
+    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(server, "_emit", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(server, "make_stream_renderer", lambda _cols: None)
+    monkeypatch.setattr(server, "render_message", lambda *_args: None)
+    monkeypatch.setattr(
+        server, "_sync_session_key_after_compress", lambda *_args, **_kwargs: None
+    )
+
+    request = {"query": "who owns the slot?", "corpus": "kakao"}
+    server._sessions["sid"] = _session(agent=_Agent())
+    try:
+        response = server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": "sid",
+                    "text": "question",
+                    "kwrag": request,
+                },
+            }
+        )
+        assert response["result"]["status"] == "streaming"
+        assert captured["prepared"] == request
+        agent, message, kwargs = captured["dispatch"]
+        assert isinstance(agent, _Agent)
+        assert message == "question"
+        assert kwargs["approved_retrieval"] is approved
+        assert kwargs["kwrag_current_turn_context"] == context
+        assert kwargs["task_id"] == "session-key"
+    finally:
+        server._sessions.pop("sid", None)
+
+
 def test_prompt_submit_expands_context_refs(monkeypatch):
     captured = {}
 
