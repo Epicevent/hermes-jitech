@@ -337,6 +337,44 @@ async def test_session_chat_stream_accepts_multimodal_message(adapter, session_d
 
 
 @pytest.mark.asyncio
+async def test_session_chat_stream_passes_only_explicit_kwrag_to_terminal_join(
+    adapter, session_db, monkeypatch
+):
+    session_id = session_db.create_session("kwrag-stream-session", "api_server")
+    approved = object()
+    context = b'{"schema_version":"hermes-kwrag-current-turn-context-v1"}'
+    captured_request = {}
+    monkeypatch.setattr(
+        "plugins.kwrag_slot.terminal.prepare_approved_retrieval",
+        lambda request: captured_request.update(request) or (approved, context),
+    )
+    captured_kwargs = {}
+
+    async def fake_run(**kwargs):
+        captured_kwargs.update(kwargs)
+        kwargs["stream_delta_callback"]("retrieved")
+        return {"final_response": "retrieved", "session_id": session_id}, {}
+
+    app = _create_session_app(adapter)
+    with patch.object(adapter, "_run_agent", side_effect=fake_run):
+        async with TestClient(TestServer(app)) as cli:
+            response = await cli.post(
+                f"/api/sessions/{session_id}/chat/stream",
+                json={
+                    "message": "question",
+                    "kwrag": {"query": "question", "corpus": "kakao"},
+                },
+            )
+            body = await response.text()
+
+    assert response.status == 200, body
+    assert "event: assistant.completed" in body
+    assert captured_kwargs["approved_retrieval"] is approved
+    assert captured_kwargs["kwrag_current_turn_context"] == context
+    assert captured_request == {"query": "question", "corpus": "kakao"}
+
+
+@pytest.mark.asyncio
 async def test_session_chat_stream_rejects_invalid_client_message_id(adapter, session_db):
     session_id = session_db.create_session("invalid-client-id-session", "api_server")
     app = _create_session_app(adapter)

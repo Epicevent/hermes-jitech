@@ -1682,14 +1682,23 @@ class APIServerAdapter(BasePlatformAdapter):
         kwrag_request, err = _session_chat_kwrag(body)
         if err is not None:
             return err
+        loop = asyncio.get_running_loop()
+        approved_retrieval = None
+        kwrag_current_turn_context = None
         if kwrag_request is not None:
-            return web.json_response(
-                _openai_error(
-                    "caller-explicit Kakao retrieval is supported only on the terminal chat endpoint",
-                    code="kwrag_stream_unsupported",
-                ),
-                status=400,
-            )
+            try:
+                from plugins.kwrag_slot.terminal import prepare_approved_retrieval
+
+                approved_retrieval, kwrag_current_turn_context = await loop.run_in_executor(
+                    None,
+                    lambda: prepare_approved_retrieval(kwrag_request),
+                )
+            except Exception as exc:
+                logger.warning("explicit Kakao retrieval was rejected for stream: %s", exc)
+                return web.json_response(
+                    _openai_error("explicit Kakao retrieval was not verified", code="kwrag_unavailable"),
+                    status=503,
+                )
         client_message_id, err = _session_chat_client_message_id(body)
         if err is not None:
             return err
@@ -1697,7 +1706,6 @@ class APIServerAdapter(BasePlatformAdapter):
         if system_prompt is not None and not isinstance(system_prompt, str):
             return web.json_response(_openai_error("system_message must be a string", code="invalid_system_message"), status=400)
 
-        loop = asyncio.get_running_loop()
         queue: "asyncio.Queue[Optional[tuple[str, Dict[str, Any]]]]" = asyncio.Queue()
         message_id = f"msg_{uuid.uuid4().hex}"
         run_id = f"run_{uuid.uuid4().hex}"
@@ -1757,6 +1765,8 @@ class APIServerAdapter(BasePlatformAdapter):
                     tool_progress_callback=_tool_progress,
                     gateway_session_key=gateway_session_key,
                     persist_user_message=persist_user_message,
+                    approved_retrieval=approved_retrieval,
+                    kwrag_current_turn_context=kwrag_current_turn_context,
                 )
                 final_response = result.get("final_response", "") if isinstance(result, dict) else ""
                 effective_session_id = result.get("session_id", session_id) if isinstance(result, dict) else session_id
