@@ -3339,6 +3339,18 @@ def _(rid, params: dict) -> dict:
 @method("prompt.submit")
 def _(rid, params: dict) -> dict:
     sid, text = params.get("session_id", ""), params.get("text", "")
+    kwrag_request = params.get("kwrag")
+    if kwrag_request is not None:
+        if not isinstance(kwrag_request, dict):
+            return _err(rid, 4002, "kwrag must be an object")
+        try:
+            from plugins.kwrag_slot.terminal import validate_explicit_request
+
+            kwrag_request = validate_explicit_request(
+                kwrag_request, require_pins=False
+            )
+        except Exception as exc:
+            return _err(rid, 4002, f"invalid kwrag request: {exc}")
     session, err = _sess_nowait(params, rid)
     if err:
         return err
@@ -3367,7 +3379,7 @@ def _(rid, params: dict) -> dict:
                 session["running"] = False
                 _clear_inflight_turn(session)
             return
-        _run_prompt_submit(rid, sid, session, text)
+        _run_prompt_submit(rid, sid, session, text, kwrag_request=kwrag_request)
 
     threading.Thread(target=run_after_agent_ready, daemon=True).start()
     return _ok(rid, {"status": "streaming"})
@@ -3472,7 +3484,9 @@ def _start_notification_poller(sid: str, session: dict) -> threading.Event:
     return stop
 
 
-def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
+def _run_prompt_submit(
+    rid, sid: str, session: dict, text: Any, *, kwrag_request: dict | None = None
+) -> None:
     with session["history_lock"]:
         history = list(session["history"])
         history_version = int(session.get("history_version", 0))
@@ -3595,11 +3609,30 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
                     payload["rendered"] = r
                 _emit("message.delta", sid, payload)
 
-            result = agent.run_conversation(
-                run_message,
-                conversation_history=list(history),
-                stream_callback=_stream,
-            )
+            if kwrag_request is not None:
+                from plugins.kwrag_slot.terminal import (
+                    dispatch_current_terminal_turn,
+                    prepare_approved_retrieval,
+                )
+
+                approved_retrieval, kwrag_current_turn_context = (
+                    prepare_approved_retrieval(kwrag_request)
+                )
+                result = dispatch_current_terminal_turn(
+                    agent,
+                    run_message,
+                    kwrag_current_turn_context=kwrag_current_turn_context,
+                    approved_retrieval=approved_retrieval,
+                    conversation_history=list(history),
+                    stream_callback=_stream,
+                    task_id=session.get("session_key") or sid,
+                )
+            else:
+                result = agent.run_conversation(
+                    run_message,
+                    conversation_history=list(history),
+                    stream_callback=_stream,
+                )
 
             last_reasoning = None
             status_note = None
