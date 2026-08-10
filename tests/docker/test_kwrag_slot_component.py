@@ -1,4 +1,4 @@
-"""Image-level contract for the default-off embedded KWRAG component."""
+"""Image-level provenance for the product-native KWRAG caller."""
 
 from __future__ import annotations
 
@@ -7,30 +7,19 @@ import subprocess
 
 
 COMPONENT_DIGEST = (
-    "sha256:7c793623aa74d5a953a187cf7c962314474c6b00367c574dd477f4f781e07300"
+    "sha256:6ec4457ea3ca6229990280e1bdf8ef086f9047f107d7e636a2526aaffd10f49f"
 )
 MANIFEST_DIGEST = (
-    "sha256:89520b45d4df550708ba3eb4bd48fb5f5f03d118adcddb80d09b9a00e4b1bb75"
+    "sha256:675a87393737f97c5e2163f80d0a2ffaddb40772f05e33e31e1ca8f31581e51e"
 )
 CONTRACT_DIGEST = (
     "sha256:ccf826f0fe6f7edc36b6d5eacdee87277859d2f6dae3a4ea4cab5f51cba183db"
 )
 SOURCE_ARCHIVE_DIGEST = (
-    "sha256:36b16db0d73d6c29d20bdafa937150a7056ccf314ad83b880f08ea82f4929655"
+    "sha256:11d37c619d58e5a50894b56bd1d9091e6f862b160363155a98af07d59d381d16"
 )
-SOURCE_REVISION = "b41349bc1215514a872f31ccc24c47b0f7621e6d"
-RESOURCE_PROFILE_DIGEST = (
-    "sha256:2d4ff46a2d76e712421a9758ecb0ae1d262e2d42ea00cee888c103477e6709ed"
-)
-BINDING_DIGEST = "sha256:" + "d" * 64
-LABEL_PREFIX = "com.epicevent.agent-runtime.retrieval."
-P1_LABEL_PREFIX = "com.epicevent.hermes.kwrag.p1."
-P1_COMPONENT_DIGEST = (
-    "sha256:242cafa5a73d2b54b63a60ad6e71c73d671d99db371d7c0904cfce2ae2c9e4b6"
-)
-P1_COMPONENT_MANIFEST_DIGEST = (
-    "sha256:3c866b053eae82280753beb2b6f03e643c1f93c3dbd7011ef34aece1dc7fdd0e"
-)
+SOURCE_REVISION = "abae51d79ab04de12e5ab242b92425923551ec6a"
+LABEL_PREFIX = "com.epicevent.hermes.kwrag."
 
 
 def _inspect_labels(image: str) -> dict[str, str]:
@@ -46,12 +35,12 @@ def _inspect_labels(image: str) -> dict[str, str]:
     return labels
 
 
-def test_image_binds_embedded_component_and_default_off_status(
-    built_image, tmp_path
+def test_image_binds_product_component_without_ops_runtime_contract(
+    built_image,
 ) -> None:
     labels = _inspect_labels(built_image)
     expected = {
-        "schema": "jitech-embedded-retrieval/v1",
+        "schema": "hermes-kwrag-product-component/v1",
         "component-digest": COMPONENT_DIGEST,
         "component-manifest-digest": MANIFEST_DIGEST,
         "contract-digest": CONTRACT_DIGEST,
@@ -60,47 +49,20 @@ def test_image_binds_embedded_component_and_default_off_status(
         "transport": "in_process",
         "default-enabled": "false",
         "host-port-count": "0",
-        "nas-read-only": "true",
         "verify-command.json": '["hermes","kwrag-slot","status","--json"]',
     }
     for suffix, value in expected.items():
         assert labels[f"{LABEL_PREFIX}{suffix}"] == value
-    assert labels[f"{P1_LABEL_PREFIX}default-enabled"] == "false"
-    assert labels[f"{P1_LABEL_PREFIX}caller-explicit"] == "true"
-    assert labels[f"{P1_LABEL_PREFIX}component-wheel-digest"] == P1_COMPONENT_DIGEST
-    assert (
-        labels[f"{P1_LABEL_PREFIX}component-manifest-digest"]
-        == P1_COMPONENT_MANIFEST_DIGEST
+    assert not any(
+        key.startswith("com.epicevent.agent-runtime.retrieval.") for key in labels
     )
-    assert (
-        labels[f"{P1_LABEL_PREFIX}status-schema"]
-        == "jitech-embedded-retrieval-attachment-status/v1"
-    )
-    assert (
-        labels[f"{P1_LABEL_PREFIX}verify-command.json"]
-        == '["hermes","kwrag-slot","p1-attachment-status","--json"]'
-    )
+    assert not any(key.startswith("com.epicevent.hermes.kwrag.p1.") for key in labels)
 
     result = subprocess.run(
         [
             "docker",
             "run",
             "--rm",
-            "--read-only",
-            "--tmpfs",
-            "/run:rw,exec,nosuid,nodev,size=64m,mode=755",
-            "--mount",
-            f"type=bind,src={tmp_path},dst=/workspace/nas_docs,readonly",
-            "-e",
-            "HERMES_WORKSPACE_DIR=/workspace",
-            "-e",
-            "JITECH_RETRIEVAL_ENABLED=false",
-            "-e",
-            f"JITECH_RETRIEVAL_COMPONENT_DIGEST={COMPONENT_DIGEST}",
-            "-e",
-            f"JITECH_RETRIEVAL_BINDING_DIGEST={BINDING_DIGEST}",
-            "-e",
-            f"JITECH_RETRIEVAL_RESOURCE_PROFILE_DIGEST={RESOURCE_PROFILE_DIGEST}",
             "--entrypoint",
             "hermes",
             built_image,
@@ -113,22 +75,14 @@ def test_image_binds_embedded_component_and_default_off_status(
         timeout=60,
     )
     assert result.returncode == 0, result.stderr
-    status = json.loads(result.stdout)
-    assert status == {
-        "bindingDigest": BINDING_DIGEST,
+    assert json.loads(result.stdout) == {
         "componentDigest": COMPONENT_DIGEST,
-        "consumerHealth": "disabled",
-        "consumptionReceiptDigest": None,
-        "gpuAccessStatus": "none",
+        "componentManifestDigest": MANIFEST_DIGEST,
+        "componentSourceRevision": SOURCE_REVISION,
+        "defaultEnabled": False,
         "hostPortCount": 0,
-        "linkageStatus": "not_applicable",
-        "mountReadOnly": True,
-        "operationReceiptDigest": None,
-        "resourceProfileDigest": RESOURCE_PROFILE_DIGEST,
-        "resourceStatus": "unavailable",
-        "resultReceiptDigest": None,
-        "revocationStatus": "complete",
-        "schema": "jitech-embedded-retrieval-status/v1",
+        "schema": "hermes-kwrag-product-component-status/v1",
+        "transport": "in_process",
     }
 
     component = subprocess.run(
@@ -140,11 +94,11 @@ def test_image_binds_embedded_component_and_default_off_status(
             "python",
             built_image,
             "-c",
-            "import kwrag_p1_attachment; print(kwrag_p1_attachment.TEXT_CHARACTER_MAXIMUM)",
+            "from kwrag.product_runtime import open_kakao_product_runtime; print('ok')",
         ],
         capture_output=True,
         text=True,
         timeout=60,
     )
     assert component.returncode == 0, component.stderr
-    assert component.stdout.strip() == "20000"
+    assert component.stdout.strip() == "ok"

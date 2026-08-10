@@ -186,11 +186,10 @@ async def test_session_chat_passes_only_explicit_kwrag_to_terminal_join(
 ):
     session_id = session_db.create_session("kwrag-session", "api_server")
     approved = object()
-    context = b'{"schema_version":"hermes-kwrag-current-turn-context-v1"}'
     captured = {}
     monkeypatch.setattr(
         "plugins.kwrag_slot.terminal.prepare_approved_retrieval",
-        lambda request: captured.update(request) or (approved, context),
+        lambda request: captured.update(request) or approved,
     )
     mock_run = AsyncMock(
         return_value=({"final_response": "retrieved answer", "session_id": session_id}, {})
@@ -209,7 +208,7 @@ async def test_session_chat_passes_only_explicit_kwrag_to_terminal_join(
     assert response.status == 200, await response.text()
     _, kwargs = mock_run.call_args
     assert kwargs["approved_retrieval"] is approved
-    assert kwargs["kwrag_current_turn_context"] == context
+    assert "kwrag_current_turn_context" not in kwargs
     assert captured == {"query": "question", "corpus": "kakao"}
 
 
@@ -342,11 +341,10 @@ async def test_session_chat_stream_passes_only_explicit_kwrag_to_terminal_join(
 ):
     session_id = session_db.create_session("kwrag-stream-session", "api_server")
     approved = object()
-    context = b'{"schema_version":"hermes-kwrag-current-turn-context-v1"}'
     captured_request = {}
     monkeypatch.setattr(
         "plugins.kwrag_slot.terminal.prepare_approved_retrieval",
-        lambda request: captured_request.update(request) or (approved, context),
+        lambda request: captured_request.update(request) or approved,
     )
     captured_kwargs = {}
 
@@ -370,7 +368,7 @@ async def test_session_chat_stream_passes_only_explicit_kwrag_to_terminal_join(
     assert response.status == 200, body
     assert "event: assistant.completed" in body
     assert captured_kwargs["approved_retrieval"] is approved
-    assert captured_kwargs["kwrag_current_turn_context"] == context
+    assert "kwrag_current_turn_context" not in captured_kwargs
     assert captured_request == {"query": "question", "corpus": "kakao"}
 
 

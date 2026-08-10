@@ -4,3 +4,4 @@ web/package-lock.json linguist-generated=true
 .gitattributes text eol=lf
 *.sh text eol=lf
 docker/cont-init.d/* text eol=lf
+plugins/kwrag_slot/component-manifest.json text eol=lf

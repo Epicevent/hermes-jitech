@@ -103,6 +103,10 @@ voice = [
   "sounddevice==0.5.5",
   "numpy==2.4.3",
 ]
+# The embedded product-native KWRAG dense indexer imports NumPy at build and
+# search time. Keep it out of ordinary sessions, but include the component
+# dependency in the production ``all`` profile and CI.
+kwrag = ["numpy==2.4.3"]
 pty = [
   "ptyprocess==0.7.0; sys_platform != 'win32'",
   "pywinpty==2.0.15; sys_platform == 'win32'",
@@ -201,6 +205,7 @@ all = [
   "hermes-agent[cron]",
   "hermes-agent[cli]",
   "hermes-agent[dev]",
+  "hermes-agent[kwrag]",
   "hermes-agent[pty]",
   "hermes-agent[mcp]",
   "hermes-agent[homeassistant]",

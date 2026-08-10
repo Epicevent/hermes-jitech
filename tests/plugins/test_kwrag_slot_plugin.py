@@ -22,13 +22,11 @@ from plugins.kwrag_slot.cli import _status
 from plugins.kwrag_slot.manifest import (
     canonical_json_bytes,
     load_component_manifest,
-    load_resource_profile,
 )
 
 
 ROOT = Path(__file__).resolve().parents[2]
-WHEEL = ROOT / "vendor" / "kwrag" / "kwrag_product_service-0.2.0-py3-none-any.whl"
-STATUS_FIXTURES = ROOT / "tests" / "fixtures" / "kwrag_slot"
+WHEEL = ROOT / "vendor" / "kwrag" / "kwrag_product_service-0.5.0-py3-none-any.whl"
 
 _SupportedAnthropicLeaf = type("Anthropic", (), {"__module__": "anthropic"})
 _SupportedAnthropicBedrockLeaf = type(
@@ -322,8 +320,8 @@ def _prepared_hits(
         "enabled": True,
         "component_digest": load_component_manifest()["component_wheel"]["sha256"],
         "runtime_binding_digest": "sha256:" + "c" * 64,
-        "expected_index_manifest": "sha256:" + "a" * 64,
-        "expected_pipeline_fingerprint": "sha256:" + "b" * 64,
+        "current_index_manifest": "sha256:" + "a" * 64,
+        "current_pipeline_fingerprint": "sha256:" + "b" * 64,
         "max_result_characters": result_character_budget,
     })
 
@@ -474,70 +472,53 @@ def test_bundled_status_cli_is_available_without_enabling_retrieval() -> None:
     assert manifest.kind == "backend"
 
 
-def test_embedded_wheel_and_disabled_status_bind_exact_component(monkeypatch) -> None:
+def test_embedded_wheel_and_product_status_bind_exact_component() -> None:
     manifest = load_component_manifest()
-    resource = load_resource_profile()
     payload = WHEEL.read_bytes()
     assert len(payload) == manifest["component_wheel"]["bytes"]
     assert "sha256:" + hashlib.sha256(payload).hexdigest() == manifest["component_wheel"]["sha256"]
-    monkeypatch.setenv("JITECH_RETRIEVAL_ENABLED", "false")
-    monkeypatch.setenv("JITECH_RETRIEVAL_COMPONENT_DIGEST", manifest["component_wheel"]["sha256"])
-    monkeypatch.setenv("JITECH_RETRIEVAL_BINDING_DIGEST", "sha256:" + "d" * 64)
-    monkeypatch.setenv("JITECH_RETRIEVAL_RESOURCE_PROFILE_DIGEST", resource["profileDigest"])
-    monkeypatch.setenv("HERMES_WORKSPACE_DIR", "/workspace")
-    monkeypatch.setattr("plugins.kwrag_slot.p1_attachment.os.statvfs", lambda _path: SimpleNamespace(f_flag=1), raising=False)
     status = _status()
     assert set(status) == {
-        "bindingDigest",
         "componentDigest",
-        "consumerHealth",
-        "consumptionReceiptDigest",
-        "gpuAccessStatus",
+        "componentManifestDigest",
+        "componentSourceRevision",
+        "defaultEnabled",
         "hostPortCount",
-        "linkageStatus",
-        "mountReadOnly",
-        "operationReceiptDigest",
-        "resourceProfileDigest",
-        "resourceStatus",
-        "resultReceiptDigest",
-        "revocationStatus",
         "schema",
+        "transport",
     }
-    assert status["schema"] == "jitech-embedded-retrieval-status/v1"
-    assert status["consumerHealth"] == "disabled"
+    assert status["schema"] == "hermes-kwrag-product-component-status/v1"
     assert status["componentDigest"] == manifest["component_wheel"]["sha256"]
-    assert status["bindingDigest"] == "sha256:" + "d" * 64
-    assert status["resourceProfileDigest"] == resource["profileDigest"]
+    assert status["componentManifestDigest"] == manifest["manifest_digest"]
+    assert status["componentSourceRevision"] == manifest["component_source_revision"]
+    assert status["defaultEnabled"] is False
     assert status["hostPortCount"] == 0
-    assert status["mountReadOnly"] is True
-    assert status["resourceStatus"] == "unavailable"
-    assert status["gpuAccessStatus"] == "none"
-    assert status["linkageStatus"] == "not_applicable"
-    assert status["revocationStatus"] == "complete"
-    assert status["operationReceiptDigest"] is None
-    assert status["resultReceiptDigest"] is None
-    assert status["consumptionReceiptDigest"] is None
+    assert status["transport"] == "in_process"
 
 
-def test_status_fails_closed_before_caller_explicit_attachment_proof(monkeypatch) -> None:
-    manifest = load_component_manifest()
-    resource = load_resource_profile()
-    monkeypatch.setenv("JITECH_RETRIEVAL_ENABLED", "true")
-    monkeypatch.setenv("JITECH_RETRIEVAL_COMPONENT_DIGEST", manifest["component_wheel"]["sha256"])
-    monkeypatch.setenv("JITECH_RETRIEVAL_BINDING_DIGEST", "sha256:" + "d" * 64)
-    monkeypatch.setenv("JITECH_RETRIEVAL_RESOURCE_PROFILE_DIGEST", resource["profileDigest"])
-    monkeypatch.setenv("HERMES_WORKSPACE_DIR", "/workspace")
-    monkeypatch.setattr("plugins.kwrag_slot.p1_attachment.os.statvfs", lambda _path: SimpleNamespace(f_flag=1), raising=False)
-    with pytest.raises(RuntimeError, match="p1-attachment-status"):
-        _status()
+def test_product_caller_has_no_ops_generated_runtime_contract() -> None:
+    source = "\n".join(
+        (ROOT / path).read_text(encoding="utf-8")
+        for path in (
+            "plugins/kwrag_slot/terminal.py",
+            "plugins/kwrag_slot/cli.py",
+            "gateway/platforms/api_server.py",
+        )
+    )
+    for forbidden in (
+        "JITECH_RETRIEVAL_",
+        "fixed-producer-binding",
+        "_fixed_producer_exchange",
+        "expected_source_generation",
+    ):
+        assert forbidden not in source
 
 
-def test_docker_labels_match_embedded_retrieval_ops_contract() -> None:
+def test_docker_labels_are_product_provenance_not_ops_admission() -> None:
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
     manifest = load_component_manifest()
-    resource = load_resource_profile()
     expected = {
-        "schema": "jitech-embedded-retrieval/v1",
+        "schema": "hermes-kwrag-product-component/v1",
         "component-digest": manifest["component_wheel"]["sha256"],
         "contract-digest": manifest["contract_collection_digest"],
         "component-manifest-digest": manifest["manifest_digest"],
@@ -546,42 +527,13 @@ def test_docker_labels_match_embedded_retrieval_ops_contract() -> None:
         "transport": "in_process",
         "default-enabled": "false",
         "host-port-count": "0",
-        "nas-read-only": "true",
     }
-    prefix = "com.epicevent.agent-runtime.retrieval."
+    prefix = "com.epicevent.hermes.kwrag."
     for suffix, value in expected.items():
         assert f'{prefix}{suffix}="{value}"' in dockerfile
-    resource_json = json.dumps(resource, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    assert f"{prefix}resource.json='{resource_json}'" in dockerfile
     assert f"{prefix}verify-command.json='[\"hermes\",\"kwrag-slot\",\"status\",\"--json\"]'" in dockerfile
-    assert "com.epicevent.hermes.kwrag.p1.verify-command.json='[\"hermes\",\"kwrag-slot\",\"p1-attachment-status\",\"--json\"]'" in dockerfile
-
-
-def test_enabled_and_disabled_status_fixtures_are_canonical_and_content_free() -> None:
-    expected_keys = {
-        "bindingDigest",
-        "componentDigest",
-        "consumerHealth",
-        "consumptionReceiptDigest",
-        "gpuAccessStatus",
-        "hostPortCount",
-        "linkageStatus",
-        "mountReadOnly",
-        "operationReceiptDigest",
-        "resourceProfileDigest",
-        "resourceStatus",
-        "resultReceiptDigest",
-        "revocationStatus",
-        "schema",
-    }
-    for name in ("status-disabled.json", "status-enabled.json"):
-        raw = (STATUS_FIXTURES / name).read_bytes()
-        assert raw.endswith(b"\n") and not raw.endswith(b"\n\n")
-        value = json.loads(raw.decode("utf-8"))
-        assert set(value) == expected_keys
-        assert raw == canonical_json_bytes(value) + b"\n"
-        assert value["schema"] == "jitech-embedded-retrieval-status/v1"
-        assert "query" not in value and "results" not in value and "prompt" not in value
+    assert "com.epicevent.agent-runtime.retrieval." not in dockerfile
+    assert "com.epicevent.hermes.kwrag.p1." not in dockerfile
 
 
 def test_explicit_consumer_binds_operation_result_and_consumption_receipts(tmp_path: Path) -> None:
@@ -598,8 +550,8 @@ def test_explicit_consumer_binds_operation_result_and_consumption_receipts(tmp_p
         "enabled": True,
         "component_digest": component_digest,
         "runtime_binding_digest": "sha256:" + "c" * 64,
-        "expected_index_manifest": "sha256:" + "a" * 64,
-        "expected_pipeline_fingerprint": "sha256:" + "b" * 64,
+        "current_index_manifest": "sha256:" + "a" * 64,
+        "current_pipeline_fingerprint": "sha256:" + "b" * 64,
         "max_result_characters": _fixture_result_character_budget(),
     })
 
@@ -1927,8 +1879,8 @@ def test_consumer_budgets_complete_canonical_results_with_catch_and_valid_contro
         "enabled": True,
         "component_digest": component_digest,
         "runtime_binding_digest": "sha256:" + "c" * 64,
-        "expected_index_manifest": "sha256:" + "a" * 64,
-        "expected_pipeline_fingerprint": "sha256:" + "b" * 64,
+        "current_index_manifest": "sha256:" + "a" * 64,
+        "current_pipeline_fingerprint": "sha256:" + "b" * 64,
     }
 
     class Runtime:
@@ -1958,150 +1910,6 @@ def test_consumer_budgets_complete_canonical_results_with_catch_and_valid_contro
     assert prepared.result_receipt["result_characters"] == full_payload_characters
 
 
-def test_generation_bound_binding_requires_generation_aware_request_and_verifier(
-    tmp_path: Path,
-) -> None:
-    from plugins.kwrag_slot.consumer import (
-        HermesSlotRetrievalBinding,
-        HermesSlotRetrievalConsumer,
-        HermesSlotRetrievalError,
-    )
-
-    component_digest = load_component_manifest()["component_wheel"]["sha256"]
-    generation = "kakao-oc20-20260805T010203Z-" + "a" * 16
-    binding = HermesSlotRetrievalBinding.from_mapping({
-        "schema_version": "hermes-kwrag-slot-binding-v2",
-        "enabled": True,
-        "component_digest": component_digest,
-        "runtime_binding_digest": "sha256:" + "c" * 64,
-        "expected_source_generation": generation,
-        "expected_index_manifest": "sha256:" + "a" * 64,
-        "expected_pipeline_fingerprint": "sha256:" + "b" * 64,
-        "max_result_characters": _fixture_result_character_budget(),
-    })
-    generation_exchange = _exchange()
-    generation_exchange.response["source_generation"] = generation
-    generation_exchange.operation_receipt["source_generation"] = generation
-    receipt_digest = "sha256:" + hashlib.sha256(
-        canonical_json_bytes(generation_exchange.operation_receipt)
-    ).hexdigest()
-    generation_exchange.response["operation_receipt"] = {
-        "status": "written",
-        "digest": receipt_digest,
-    }
-    runtime = SimpleNamespace(search_exchange=MagicMock(return_value=generation_exchange))
-    sink = _test_receipt_sink(tmp_path / "generation-bound.jsonl")
-
-    with pytest.raises(HermesSlotRetrievalError, match="source generation"):
-        HermesSlotRetrievalConsumer(binding, runtime, sink).search(_request())
-    runtime.search_exchange.assert_not_called()
-
-    request = {**_request(), "source_generation": generation}
-    prepared = HermesSlotRetrievalConsumer(binding, runtime, sink).search(request)
-    assert prepared.result_receipt["source_generation"] == generation
-    runtime.search_exchange.assert_called_once()
-
-
-def test_generation_bound_binding_rejects_ambiguous_generation_values() -> None:
-    from plugins.kwrag_slot.consumer import HermesSlotRetrievalBinding, HermesSlotRetrievalError
-
-    base = {
-        "schema_version": "hermes-kwrag-slot-binding-v2",
-        "enabled": True,
-        "component_digest": load_component_manifest()["component_wheel"]["sha256"],
-        "runtime_binding_digest": "sha256:" + "c" * 64,
-        "expected_index_manifest": "sha256:" + "a" * 64,
-        "expected_pipeline_fingerprint": "sha256:" + "b" * 64,
-        "max_result_characters": _fixture_result_character_budget(),
-    }
-    for generation in ("", "latest", "unknown", "contains whitespace"):
-        with pytest.raises(HermesSlotRetrievalError, match="source generation"):
-            HermesSlotRetrievalBinding.from_mapping({
-                **base,
-                "expected_source_generation": generation,
-            })
-
-
-def test_generation_bound_exchange_and_receipt_preserve_source_identity(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from kwrag import slot_consumer
-    from plugins.kwrag_slot.consumer import (
-        HermesSlotRetrievalBinding,
-        HermesSlotRetrievalConsumer,
-    )
-
-    generation = "kakao-oc20-20260805T010203Z-" + "b" * 16
-    results = _exchange().response["results"]
-    result_bytes = canonical_json_bytes(results)
-    result_digest = "sha256:" + hashlib.sha256(result_bytes).hexdigest()
-
-    def verify(
-        request,
-        _response,
-        _operation,
-        *,
-        expected_index_manifest,
-        expected_pipeline_fingerprint,
-        expected_source_generation,
-        max_result_characters,
-    ):
-        assert request["source_generation"] == expected_source_generation == generation
-        assert max_result_characters == _fixture_result_character_budget()
-        return SimpleNamespace(
-            request_id=request["request_id"],
-            operation_id=request["operation_id"],
-            run_id=request["run_id"],
-            attempt=1,
-            index_manifest=expected_index_manifest,
-            pipeline_fingerprint=expected_pipeline_fingerprint,
-            result_status="hits",
-            result_digest=result_digest,
-            operation_receipt_digest="sha256:" + "d" * 64,
-            result_count=1,
-            result_characters=len(result_bytes.decode()),
-            source_generation=expected_source_generation,
-            results=lambda: json.loads(result_bytes),
-        )
-
-    monkeypatch.setattr(slot_consumer, "verify_slot_search_exchange", verify)
-    binding = HermesSlotRetrievalBinding.from_mapping({
-        "schema_version": "hermes-kwrag-slot-binding-v2",
-        "enabled": True,
-        "component_digest": load_component_manifest()["component_wheel"]["sha256"],
-        "runtime_binding_digest": "sha256:" + "c" * 64,
-        "expected_source_generation": generation,
-        "expected_index_manifest": "sha256:" + "a" * 64,
-        "expected_pipeline_fingerprint": "sha256:" + "b" * 64,
-        "max_result_characters": _fixture_result_character_budget(),
-    })
-    request = {**_request(), "source_generation": generation}
-    prepared = HermesSlotRetrievalConsumer(
-        binding,
-        SimpleNamespace(search_exchange=MagicMock(return_value=_exchange())),
-        _test_receipt_sink(tmp_path / "generation-bound-valid.jsonl"),
-    ).search(request)
-    assert prepared.result_receipt["source_generation"] == generation
-    assert prepared.content_free_attestation()["sourceGeneration"] == generation
-
-    legacy_binding = HermesSlotRetrievalBinding.from_mapping({
-        "schema_version": "hermes-kwrag-slot-binding-v1",
-        "enabled": True,
-        "component_digest": load_component_manifest()["component_wheel"]["sha256"],
-        "runtime_binding_digest": "sha256:" + "c" * 64,
-        "expected_index_manifest": "sha256:" + "a" * 64,
-        "expected_pipeline_fingerprint": "sha256:" + "b" * 64,
-        "max_result_characters": _fixture_result_character_budget(),
-    })
-    legacy_prepared = HermesSlotRetrievalConsumer(
-        legacy_binding,
-        SimpleNamespace(search_exchange=MagicMock(return_value=_exchange())),
-        _test_receipt_sink(tmp_path / "legacy-generation-bound.jsonl"),
-    ).search(request)
-    assert legacy_prepared.result_receipt["source_generation"] == generation
-
-
 @pytest.mark.skipif(os.name != "posix", reason="POSIX platform admission contract")
 def test_non_linux_posix_receipt_preflight_fails_before_retrieval(
     tmp_path: Path,
@@ -2120,8 +1928,8 @@ def test_non_linux_posix_receipt_preflight_fails_before_retrieval(
         "enabled": True,
         "component_digest": load_component_manifest()["component_wheel"]["sha256"],
         "runtime_binding_digest": "sha256:" + "c" * 64,
-        "expected_index_manifest": "sha256:" + "a" * 64,
-        "expected_pipeline_fingerprint": "sha256:" + "b" * 64,
+        "current_index_manifest": "sha256:" + "a" * 64,
+        "current_pipeline_fingerprint": "sha256:" + "b" * 64,
         "max_result_characters": _fixture_result_character_budget(),
     })
     runtime = SimpleNamespace(search_exchange=MagicMock(return_value=_exchange()))
@@ -2157,8 +1965,8 @@ def test_disabled_binding_has_no_runtime_or_residual_slot_identity() -> None:
         "enabled": False,
         "component_digest": load_component_manifest()["component_wheel"]["sha256"],
         "runtime_binding_digest": None,
-        "expected_index_manifest": None,
-        "expected_pipeline_fingerprint": None,
+        "current_index_manifest": None,
+        "current_pipeline_fingerprint": None,
         "max_result_characters": 0,
     })
     consumer = HermesSlotRetrievalConsumer(binding, None, None)
@@ -2180,8 +1988,8 @@ def test_enabled_binding_fails_closed_on_component_or_receipt_drift() -> None:
         "enabled": True,
         "component_digest": component_digest,
         "runtime_binding_digest": "sha256:" + "c" * 64,
-        "expected_index_manifest": "sha256:" + "a" * 64,
-        "expected_pipeline_fingerprint": "sha256:" + "b" * 64,
+        "current_index_manifest": "sha256:" + "a" * 64,
+        "current_pipeline_fingerprint": "sha256:" + "b" * 64,
         "max_result_characters": _fixture_result_character_budget(),
     }
     with pytest.raises(HermesSlotRetrievalError, match="embedded component"):
@@ -2211,8 +2019,8 @@ def test_consumption_receipt_sink_digest_mismatch_fails_closed() -> None:
         "enabled": True,
         "component_digest": load_component_manifest()["component_wheel"]["sha256"],
         "runtime_binding_digest": "sha256:" + "c" * 64,
-        "expected_index_manifest": "sha256:" + "a" * 64,
-        "expected_pipeline_fingerprint": "sha256:" + "b" * 64,
+        "current_index_manifest": "sha256:" + "a" * 64,
+        "current_pipeline_fingerprint": "sha256:" + "b" * 64,
         "max_result_characters": _fixture_result_character_budget(),
     })
 
@@ -2242,8 +2050,8 @@ def test_prompt_consumption_is_single_use_and_requires_session_identity(tmp_path
         "enabled": True,
         "component_digest": load_component_manifest()["component_wheel"]["sha256"],
         "runtime_binding_digest": "sha256:" + "c" * 64,
-        "expected_index_manifest": "sha256:" + "a" * 64,
-        "expected_pipeline_fingerprint": "sha256:" + "b" * 64,
+        "current_index_manifest": "sha256:" + "a" * 64,
+        "current_pipeline_fingerprint": "sha256:" + "b" * 64,
         "max_result_characters": _fixture_result_character_budget(),
     })
 
@@ -2356,8 +2164,8 @@ def test_codex_app_server_is_rejected_before_consumption_receipt(tmp_path: Path)
         "enabled": True,
         "component_digest": load_component_manifest()["component_wheel"]["sha256"],
         "runtime_binding_digest": "sha256:" + "c" * 64,
-        "expected_index_manifest": "sha256:" + "a" * 64,
-        "expected_pipeline_fingerprint": "sha256:" + "b" * 64,
+        "current_index_manifest": "sha256:" + "a" * 64,
+        "current_pipeline_fingerprint": "sha256:" + "b" * 64,
         "max_result_characters": _fixture_result_character_budget(),
     })
 
@@ -4379,8 +4187,8 @@ def test_approved_evidence_reaches_synthetic_atomic_request_not_returned_history
         "enabled": True,
         "component_digest": load_component_manifest()["component_wheel"]["sha256"],
         "runtime_binding_digest": "sha256:" + "c" * 64,
-        "expected_index_manifest": "sha256:" + "a" * 64,
-        "expected_pipeline_fingerprint": "sha256:" + "b" * 64,
+        "current_index_manifest": "sha256:" + "a" * 64,
+        "current_pipeline_fingerprint": "sha256:" + "b" * 64,
         "max_result_characters": _fixture_result_character_budget(),
     })
 
@@ -4510,8 +4318,8 @@ def test_approved_evidence_rebinds_to_current_turn_after_preflight_compression(
         "enabled": True,
         "component_digest": load_component_manifest()["component_wheel"]["sha256"],
         "runtime_binding_digest": "sha256:" + "c" * 64,
-        "expected_index_manifest": "sha256:" + "a" * 64,
-        "expected_pipeline_fingerprint": "sha256:" + "b" * 64,
+        "current_index_manifest": "sha256:" + "a" * 64,
+        "current_pipeline_fingerprint": "sha256:" + "b" * 64,
         "max_result_characters": _fixture_result_character_budget(),
     })
 
@@ -4643,8 +4451,8 @@ def test_zero_hits_are_not_consumed_or_dispatched(tmp_path: Path) -> None:
         "enabled": True,
         "component_digest": load_component_manifest()["component_wheel"]["sha256"],
         "runtime_binding_digest": "sha256:" + "c" * 64,
-        "expected_index_manifest": "sha256:" + "a" * 64,
-        "expected_pipeline_fingerprint": "sha256:" + "b" * 64,
+        "current_index_manifest": "sha256:" + "a" * 64,
+        "current_pipeline_fingerprint": "sha256:" + "b" * 64,
         "max_result_characters": _fixture_result_character_budget(),
     })
 

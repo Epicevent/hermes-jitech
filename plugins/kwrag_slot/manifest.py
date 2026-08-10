@@ -22,13 +22,6 @@ _FIELDS = {
     "transport",
     "policy_boundary",
 }
-_RESOURCE_FIELDS = {
-    "cpuReservationMillicores",
-    "gpuAccess",
-    "memoryReservationBytes",
-    "pidsReservation",
-    "profileDigest",
-}
 
 
 class ComponentManifestError(ValueError):
@@ -75,14 +68,25 @@ def _artifact(value: Any, *, filename_required: bool) -> dict[str, Any]:
 
 
 def load_component_manifest() -> dict[str, Any]:
-    payload = resources.files("plugins.kwrag_slot").joinpath("component-manifest.json").read_bytes()
-    if payload.startswith(b"\xef\xbb\xbf") or not payload.endswith(b"\n") or payload.endswith(b"\n\n"):
+    payload = (
+        resources
+        .files("plugins.kwrag_slot")
+        .joinpath("component-manifest.json")
+        .read_bytes()
+    )
+    if (
+        payload.startswith(b"\xef\xbb\xbf")
+        or not payload.endswith(b"\n")
+        or payload.endswith(b"\n\n")
+    ):
         raise ComponentManifestError("component manifest bytes are not canonical")
     canonical_payload = payload[:-1]
     try:
         parsed = json.loads(canonical_payload.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ComponentManifestError("component manifest is not strict UTF-8 JSON") from exc
+        raise ComponentManifestError(
+            "component manifest is not strict UTF-8 JSON"
+        ) from exc
     if not isinstance(parsed, dict) or set(parsed) != _FIELDS:
         raise ComponentManifestError("component manifest fields are invalid")
     if canonical_json_bytes(parsed) != canonical_payload:
@@ -92,9 +96,13 @@ def load_component_manifest() -> dict[str, Any]:
     revision = parsed.get("component_source_revision")
     if not isinstance(revision, str) or not _REVISION.fullmatch(revision):
         raise ComponentManifestError("component source revision is invalid")
-    source_archive = _artifact(parsed.get("component_source_archive"), filename_required=False)
+    source_archive = _artifact(
+        parsed.get("component_source_archive"), filename_required=False
+    )
     wheel = _artifact(parsed.get("component_wheel"), filename_required=True)
-    contract_digest = _digest(parsed.get("contract_collection_digest"), "contract digest")
+    contract_digest = _digest(
+        parsed.get("contract_collection_digest"), "contract digest"
+    )
     if (
         parsed.get("default_enabled") is not False
         or parsed.get("host_port_count") != 0
@@ -104,7 +112,7 @@ def load_component_manifest() -> dict[str, Any]:
     policy = parsed.get("policy_boundary")
     if not isinstance(policy, dict) or policy != {
         "automatic_search": False,
-        "backend_selected": False,
+        "backend_selected": True,
         "invocation_policy_selected": False,
         "prompt_assembly_added": False,
     }:
@@ -116,30 +124,3 @@ def load_component_manifest() -> dict[str, Any]:
         "contract_collection_digest": contract_digest,
         "manifest_digest": "sha256:" + hashlib.sha256(payload).hexdigest(),
     }
-
-
-def load_resource_profile() -> dict[str, Any]:
-    payload = resources.files("plugins.kwrag_slot").joinpath("resource-profile.json").read_bytes()
-    if payload.startswith(b"\xef\xbb\xbf") or not payload.endswith(b"\n") or payload.endswith(b"\n\n"):
-        raise ComponentManifestError("resource profile bytes are not canonical")
-    canonical_payload = payload[:-1]
-    try:
-        parsed = json.loads(canonical_payload.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ComponentManifestError("resource profile is not strict UTF-8 JSON") from exc
-    if not isinstance(parsed, dict) or set(parsed) != _RESOURCE_FIELDS:
-        raise ComponentManifestError("resource profile fields are invalid")
-    if canonical_json_bytes(parsed) != canonical_payload:
-        raise ComponentManifestError("resource profile is not canonically encoded")
-    profile_digest = _digest(parsed.get("profileDigest"), "resource profile digest")
-    digest_payload = {key: parsed[key] for key in _RESOURCE_FIELDS if key != "profileDigest"}
-    if "sha256:" + hashlib.sha256(canonical_json_bytes(digest_payload)).hexdigest() != profile_digest:
-        raise ComponentManifestError("resource profile digest does not match its fields")
-    if (
-        parsed.get("cpuReservationMillicores") != 500
-        or parsed.get("gpuAccess") != "none"
-        or parsed.get("memoryReservationBytes") != 536_870_912
-        or parsed.get("pidsReservation") != 64
-    ):
-        raise ComponentManifestError("resource profile values are unsupported")
-    return parsed

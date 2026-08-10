@@ -3346,9 +3346,7 @@ def _(rid, params: dict) -> dict:
         try:
             from plugins.kwrag_slot.terminal import validate_explicit_request
 
-            kwrag_request = validate_explicit_request(
-                kwrag_request, require_pins=False
-            )
+            kwrag_request = validate_explicit_request(kwrag_request)
         except Exception as exc:
             return _err(rid, 4002, f"invalid kwrag request: {exc}")
     session, err = _sess_nowait(params, rid)
@@ -3615,13 +3613,10 @@ def _run_prompt_submit(
                     prepare_approved_retrieval,
                 )
 
-                approved_retrieval, kwrag_current_turn_context = (
-                    prepare_approved_retrieval(kwrag_request)
-                )
+                approved_retrieval = prepare_approved_retrieval(kwrag_request)
                 result = dispatch_current_terminal_turn(
                     agent,
                     run_message,
-                    kwrag_current_turn_context=kwrag_current_turn_context,
                     approved_retrieval=approved_retrieval,
                     conversation_history=list(history),
                     stream_callback=_stream,
