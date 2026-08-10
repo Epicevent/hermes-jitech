@@ -7,18 +7,18 @@ import subprocess
 
 
 COMPONENT_DIGEST = (
-    "sha256:40c8516fb15a617d1e2082798782442b2ba9ba855146d688a546e36db6dd5739"
+    "sha256:b1cd83c41fa531879d8883ff12d23956b946b8925bc2c35c797713e90ed29c28"
 )
 MANIFEST_DIGEST = (
-    "sha256:10fd5fd1ca835f89d32bf3a3b7c407f11d022293cfbe32b54a1871227e0f2786"
+    "sha256:b82bc4f2524cf3477c590539f6aff5c586850eb21b6f51a969981149225e0062"
 )
 CONTRACT_DIGEST = (
     "sha256:ccf826f0fe6f7edc36b6d5eacdee87277859d2f6dae3a4ea4cab5f51cba183db"
 )
 SOURCE_ARCHIVE_DIGEST = (
-    "sha256:19c2fc2193ebb5633129f98d972e477471330cb79fa5189bb7eb777123bec5ea"
+    "sha256:3c959c42c22a467d52a570a2d6e85bcc629a59f85e4861b36b03cef30c3e6f44"
 )
-SOURCE_REVISION = "83afc8fa97b2191665afa152e61feae1f5e87145"
+SOURCE_REVISION = "a4189ff3681ad92b278aabda8bfc2ddd49ec6872"
 LABEL_PREFIX = "com.epicevent.hermes.kwrag."
 
 
@@ -35,7 +35,9 @@ def _inspect_labels(image: str) -> dict[str, str]:
     return labels
 
 
-def test_image_binds_product_component_without_ops_runtime_contract(built_image) -> None:
+def test_image_binds_product_component_without_ops_runtime_contract(
+    built_image,
+) -> None:
     labels = _inspect_labels(built_image)
     expected = {
         "schema": "hermes-kwrag-product-component/v1",
@@ -51,7 +53,9 @@ def test_image_binds_product_component_without_ops_runtime_contract(built_image)
     }
     for suffix, value in expected.items():
         assert labels[f"{LABEL_PREFIX}{suffix}"] == value
-    assert not any(key.startswith("com.epicevent.agent-runtime.retrieval.") for key in labels)
+    assert not any(
+        key.startswith("com.epicevent.agent-runtime.retrieval.") for key in labels
+    )
     assert not any(key.startswith("com.epicevent.hermes.kwrag.p1.") for key in labels)
 
     result = subprocess.run(

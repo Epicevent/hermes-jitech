@@ -68,14 +68,25 @@ def _artifact(value: Any, *, filename_required: bool) -> dict[str, Any]:
 
 
 def load_component_manifest() -> dict[str, Any]:
-    payload = resources.files("plugins.kwrag_slot").joinpath("component-manifest.json").read_bytes()
-    if payload.startswith(b"\xef\xbb\xbf") or not payload.endswith(b"\n") or payload.endswith(b"\n\n"):
+    payload = (
+        resources
+        .files("plugins.kwrag_slot")
+        .joinpath("component-manifest.json")
+        .read_bytes()
+    )
+    if (
+        payload.startswith(b"\xef\xbb\xbf")
+        or not payload.endswith(b"\n")
+        or payload.endswith(b"\n\n")
+    ):
         raise ComponentManifestError("component manifest bytes are not canonical")
     canonical_payload = payload[:-1]
     try:
         parsed = json.loads(canonical_payload.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ComponentManifestError("component manifest is not strict UTF-8 JSON") from exc
+        raise ComponentManifestError(
+            "component manifest is not strict UTF-8 JSON"
+        ) from exc
     if not isinstance(parsed, dict) or set(parsed) != _FIELDS:
         raise ComponentManifestError("component manifest fields are invalid")
     if canonical_json_bytes(parsed) != canonical_payload:
@@ -85,9 +96,13 @@ def load_component_manifest() -> dict[str, Any]:
     revision = parsed.get("component_source_revision")
     if not isinstance(revision, str) or not _REVISION.fullmatch(revision):
         raise ComponentManifestError("component source revision is invalid")
-    source_archive = _artifact(parsed.get("component_source_archive"), filename_required=False)
+    source_archive = _artifact(
+        parsed.get("component_source_archive"), filename_required=False
+    )
     wheel = _artifact(parsed.get("component_wheel"), filename_required=True)
-    contract_digest = _digest(parsed.get("contract_collection_digest"), "contract digest")
+    contract_digest = _digest(
+        parsed.get("contract_collection_digest"), "contract digest"
+    )
     if (
         parsed.get("default_enabled") is not False
         or parsed.get("host_port_count") != 0
@@ -97,7 +112,7 @@ def load_component_manifest() -> dict[str, Any]:
     policy = parsed.get("policy_boundary")
     if not isinstance(policy, dict) or policy != {
         "automatic_search": False,
-        "backend_selected": False,
+        "backend_selected": True,
         "invocation_policy_selected": False,
         "prompt_assembly_added": False,
     }:

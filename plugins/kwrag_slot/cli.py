@@ -16,6 +16,11 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
         help="Print the embedded product component identity",
     )
     status.add_argument("--json", action="store_true")
+    index = subparsers.add_parser(
+        "index",
+        help="Explicitly rebuild the Kakao dense index in this slot's Workspace",
+    )
+    index.add_argument("--json", action="store_true")
 
 
 def _status() -> dict[str, object]:
@@ -37,9 +42,14 @@ def _status() -> dict[str, object]:
 
 
 def kwrag_slot_command(args: argparse.Namespace) -> int:
-    if args.kwrag_slot_command != "status":
+    if args.kwrag_slot_command == "status":
+        result = _status()
+    elif args.kwrag_slot_command == "index":
+        from plugins.kwrag_slot.terminal import rebuild_kakao_index
+
+        result = rebuild_kakao_index()
+    else:
         raise RuntimeError("unsupported KWRAG command")
-    result = _status()
     if args.json:
         print(
             json.dumps(

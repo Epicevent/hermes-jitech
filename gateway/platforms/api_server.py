@@ -1617,13 +1617,12 @@ class APIServerAdapter(BasePlatformAdapter):
         if err is not None:
             return err
         approved_retrieval = None
-        kwrag_current_turn_context = None
         if kwrag_request is not None:
             loop = asyncio.get_running_loop()
             try:
                 from plugins.kwrag_slot.terminal import prepare_approved_retrieval
 
-                approved_retrieval, kwrag_current_turn_context = await loop.run_in_executor(
+                approved_retrieval = await loop.run_in_executor(
                     None,
                     lambda: prepare_approved_retrieval(kwrag_request),
                 )
@@ -1642,7 +1641,6 @@ class APIServerAdapter(BasePlatformAdapter):
             gateway_session_key=gateway_session_key,
             persist_user_message=persist_user_message,
             approved_retrieval=approved_retrieval,
-            kwrag_current_turn_context=kwrag_current_turn_context,
         )
         effective_session_id = result.get("session_id") if isinstance(result, dict) else session_id
         final_response = result.get("final_response", "") if isinstance(result, dict) else ""
@@ -1685,12 +1683,11 @@ class APIServerAdapter(BasePlatformAdapter):
             return err
         loop = asyncio.get_running_loop()
         approved_retrieval = None
-        kwrag_current_turn_context = None
         if kwrag_request is not None:
             try:
                 from plugins.kwrag_slot.terminal import prepare_approved_retrieval
 
-                approved_retrieval, kwrag_current_turn_context = await loop.run_in_executor(
+                approved_retrieval = await loop.run_in_executor(
                     None,
                     lambda: prepare_approved_retrieval(kwrag_request),
                 )
@@ -1767,7 +1764,6 @@ class APIServerAdapter(BasePlatformAdapter):
                     gateway_session_key=gateway_session_key,
                     persist_user_message=persist_user_message,
                     approved_retrieval=approved_retrieval,
-                    kwrag_current_turn_context=kwrag_current_turn_context,
                 )
                 final_response = result.get("final_response", "") if isinstance(result, dict) else ""
                 effective_session_id = result.get("session_id", session_id) if isinstance(result, dict) else session_id
@@ -3565,7 +3561,6 @@ class APIServerAdapter(BasePlatformAdapter):
         gateway_session_key: Optional[str] = None,
         persist_user_message: Optional[str] = None,
         approved_retrieval: object = None,
-        kwrag_current_turn_context: Optional[bytes] = None,
     ) -> tuple:
         """
         Create an agent and run a conversation in a thread executor.
@@ -3601,14 +3596,11 @@ class APIServerAdapter(BasePlatformAdapter):
             if persist_user_message is not None:
                 run_kwargs["persist_user_message"] = persist_user_message
             if approved_retrieval is not None:
-                if not isinstance(kwrag_current_turn_context, bytes):
-                    raise ValueError("verified Kakao turn context is unavailable")
                 from plugins.kwrag_slot.terminal import dispatch_current_terminal_turn
 
                 result = dispatch_current_terminal_turn(
                     agent,
                     user_message,
-                    kwrag_current_turn_context=kwrag_current_turn_context,
                     approved_retrieval=approved_retrieval,
                     task_id=effective_task_id,
                     conversation_history=conversation_history,

@@ -26,7 +26,7 @@ from plugins.kwrag_slot.manifest import (
 
 
 ROOT = Path(__file__).resolve().parents[2]
-WHEEL = ROOT / "vendor" / "kwrag" / "kwrag_product_service-0.4.0-py3-none-any.whl"
+WHEEL = ROOT / "vendor" / "kwrag" / "kwrag_product_service-0.5.0-py3-none-any.whl"
 
 _SupportedAnthropicLeaf = type("Anthropic", (), {"__module__": "anthropic"})
 _SupportedAnthropicBedrockLeaf = type(

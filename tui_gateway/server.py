@@ -3613,13 +3613,10 @@ def _run_prompt_submit(
                     prepare_approved_retrieval,
                 )
 
-                approved_retrieval, kwrag_current_turn_context = (
-                    prepare_approved_retrieval(kwrag_request)
-                )
+                approved_retrieval = prepare_approved_retrieval(kwrag_request)
                 result = dispatch_current_terminal_turn(
                     agent,
                     run_message,
-                    kwrag_current_turn_context=kwrag_current_turn_context,
                     approved_retrieval=approved_retrieval,
                     conversation_history=list(history),
                     stream_callback=_stream,

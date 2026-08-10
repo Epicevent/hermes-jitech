@@ -156,24 +156,25 @@ RUN uv sync --frozen --no-install-project --extra all --extra messaging --extra 
 
 # KWRAG is an embedded, default-off product component.  Its pure-Python wheel
 # is verified before installation so a product image cannot silently consume a
-# different local artifact.  The component opens no host port and chooses no
-# retrieval backend or invocation policy.
-COPY vendor/kwrag/kwrag_product_service-0.4.0-py3-none-any.whl /tmp/kwrag_product_service-0.4.0-py3-none-any.whl
+# different local artifact.  The component opens no host port. Its explicit
+# Kakao path uses KURE/vector/BGE, but selects no automatic invocation or
+# provider policy.
+COPY vendor/kwrag/kwrag_product_service-0.5.0-py3-none-any.whl /tmp/kwrag_product_service-0.5.0-py3-none-any.whl
 RUN printf '%s  %s\n' \
-        '40c8516fb15a617d1e2082798782442b2ba9ba855146d688a546e36db6dd5739' \
-        '/tmp/kwrag_product_service-0.4.0-py3-none-any.whl' \
+        'b1cd83c41fa531879d8883ff12d23956b946b8925bc2c35c797713e90ed29c28' \
+        '/tmp/kwrag_product_service-0.5.0-py3-none-any.whl' \
         > /tmp/kwrag_product_service.sha256 && \
     sha256sum -c /tmp/kwrag_product_service.sha256 && \
     rm /tmp/kwrag_product_service.sha256 && \
-    uv pip install --no-cache-dir --no-deps /tmp/kwrag_product_service-0.4.0-py3-none-any.whl && \
-    rm /tmp/kwrag_product_service-0.4.0-py3-none-any.whl
+    uv pip install --no-cache-dir --no-deps /tmp/kwrag_product_service-0.5.0-py3-none-any.whl && \
+    rm /tmp/kwrag_product_service-0.5.0-py3-none-any.whl
 
 LABEL com.epicevent.hermes.kwrag.schema="hermes-kwrag-product-component/v1" \
-      com.epicevent.hermes.kwrag.component-digest="sha256:40c8516fb15a617d1e2082798782442b2ba9ba855146d688a546e36db6dd5739" \
+      com.epicevent.hermes.kwrag.component-digest="sha256:b1cd83c41fa531879d8883ff12d23956b946b8925bc2c35c797713e90ed29c28" \
       com.epicevent.hermes.kwrag.contract-digest="sha256:ccf826f0fe6f7edc36b6d5eacdee87277859d2f6dae3a4ea4cab5f51cba183db" \
-      com.epicevent.hermes.kwrag.component-manifest-digest="sha256:10fd5fd1ca835f89d32bf3a3b7c407f11d022293cfbe32b54a1871227e0f2786" \
-      com.epicevent.hermes.kwrag.source-archive-digest="sha256:19c2fc2193ebb5633129f98d972e477471330cb79fa5189bb7eb777123bec5ea" \
-      com.epicevent.hermes.kwrag.source-revision="83afc8fa97b2191665afa152e61feae1f5e87145" \
+      com.epicevent.hermes.kwrag.component-manifest-digest="sha256:b82bc4f2524cf3477c590539f6aff5c586850eb21b6f51a969981149225e0062" \
+      com.epicevent.hermes.kwrag.source-archive-digest="sha256:3c959c42c22a467d52a570a2d6e85bcc629a59f85e4861b36b03cef30c3e6f44" \
+      com.epicevent.hermes.kwrag.source-revision="a4189ff3681ad92b278aabda8bfc2ddd49ec6872" \
       com.epicevent.hermes.kwrag.transport="in_process" \
       com.epicevent.hermes.kwrag.default-enabled="false" \
       com.epicevent.hermes.kwrag.host-port-count="0" \
