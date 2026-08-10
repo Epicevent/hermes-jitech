@@ -147,6 +147,9 @@ def test_prepare_uses_dense_product_runtime_without_ops_or_generation_contracts(
     assert producer_request["corpus"] is None
     assert "expected_source_generation" not in producer_request
     assert "expected_index_manifest" not in producer_request
+    binding = captured["binding"]
+    assert binding.current_index_manifest == identity.index_manifest
+    assert binding.current_pipeline_fingerprint == identity.pipeline_fingerprint
     assert "binding_path" not in captured["runtime"]
 
 

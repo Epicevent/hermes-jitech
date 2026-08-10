@@ -30,8 +30,8 @@ _BINDING_FIELDS = {
     "enabled",
     "component_digest",
     "runtime_binding_digest",
-    "expected_index_manifest",
-    "expected_pipeline_fingerprint",
+    "current_index_manifest",
+    "current_pipeline_fingerprint",
     "max_result_characters",
 }
 
@@ -1023,8 +1023,8 @@ class HermesSlotRetrievalBinding:
     enabled: bool
     component_digest: str
     runtime_binding_digest: str | None
-    expected_index_manifest: str | None
-    expected_pipeline_fingerprint: str | None
+    current_index_manifest: str | None
+    current_pipeline_fingerprint: str | None
     max_result_characters: int
 
     @classmethod
@@ -1046,15 +1046,18 @@ class HermesSlotRetrievalBinding:
         if isinstance(max_chars, bool) or not isinstance(max_chars, int) or not 0 <= max_chars <= 80_000:
             raise HermesSlotRetrievalError("Hermes result character budget is invalid")
         runtime_digest = raw.get("runtime_binding_digest")
-        manifest_digest = raw.get("expected_index_manifest")
-        pipeline_digest = raw.get("expected_pipeline_fingerprint")
+        # These identities are sampled from the already-open slot runtime.  A
+        # caller never supplies them as admission pins; they bind the exact
+        # active Workspace release observed for this search only.
+        manifest_digest = raw.get("current_index_manifest")
+        pipeline_digest = raw.get("current_pipeline_fingerprint")
         if enabled:
             return cls(
                 enabled=True,
                 component_digest=component_digest,
                 runtime_binding_digest=_digest(runtime_digest, "runtime binding digest"),
-                expected_index_manifest=_digest(manifest_digest, "index manifest digest"),
-                expected_pipeline_fingerprint=_digest(pipeline_digest, "pipeline fingerprint"),
+                current_index_manifest=_digest(manifest_digest, "index manifest digest"),
+                current_pipeline_fingerprint=_digest(pipeline_digest, "pipeline fingerprint"),
                 max_result_characters=max_chars,
             )
         if any(value is not None for value in (runtime_digest, manifest_digest, pipeline_digest)):
@@ -1446,9 +1449,15 @@ class HermesSlotRetrievalConsumer:
             from kwrag.slot_consumer import verify_slot_search_exchange
         except ImportError as exc:
             raise HermesSlotRetrievalError("embedded KWRAG component is unavailable") from exc
+        active_index_manifest = self._binding.current_index_manifest
+        active_pipeline_fingerprint = self._binding.current_pipeline_fingerprint
         verification_kwargs = {
-            "expected_index_manifest": self._binding.expected_index_manifest,
-            "expected_pipeline_fingerprint": self._binding.expected_pipeline_fingerprint,
+            # ``slot_consumer`` keeps these parameter names for its strict
+            # exchange validator.  The values here are sampled from the
+            # already-open active Workspace runtime, never supplied by the
+            # browser and never used as a caller admission pin.
+            "expected_index_manifest": active_index_manifest,
+            "expected_pipeline_fingerprint": active_pipeline_fingerprint,
             "max_result_characters": self._binding.max_result_characters,
         }
         exchange = self._runtime.search_exchange(dict(request))

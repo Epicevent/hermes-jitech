@@ -183,8 +183,11 @@ def prepare_approved_retrieval(
                 "enabled": True,
                 "component_digest": manifest["component_wheel"]["sha256"],
                 "runtime_binding_digest": identity.digest,
-                "expected_index_manifest": identity.index_manifest,
-                "expected_pipeline_fingerprint": identity.pipeline_fingerprint,
+                # Bind the release currently opened by the slot runtime.  The
+                # browser request carries only query/corpus; no generation or
+                # manifest pin is accepted from the caller.
+                "current_index_manifest": identity.index_manifest,
+                "current_pipeline_fingerprint": identity.pipeline_fingerprint,
                 "max_result_characters": _MAX_RESULT_CHARACTERS,
             })
             return HermesSlotRetrievalConsumer(

@@ -320,8 +320,8 @@ def _prepared_hits(
         "enabled": True,
         "component_digest": load_component_manifest()["component_wheel"]["sha256"],
         "runtime_binding_digest": "sha256:" + "c" * 64,
-        "expected_index_manifest": "sha256:" + "a" * 64,
-        "expected_pipeline_fingerprint": "sha256:" + "b" * 64,
+        "current_index_manifest": "sha256:" + "a" * 64,
+        "current_pipeline_fingerprint": "sha256:" + "b" * 64,
         "max_result_characters": result_character_budget,
     })
 
@@ -550,8 +550,8 @@ def test_explicit_consumer_binds_operation_result_and_consumption_receipts(tmp_p
         "enabled": True,
         "component_digest": component_digest,
         "runtime_binding_digest": "sha256:" + "c" * 64,
-        "expected_index_manifest": "sha256:" + "a" * 64,
-        "expected_pipeline_fingerprint": "sha256:" + "b" * 64,
+        "current_index_manifest": "sha256:" + "a" * 64,
+        "current_pipeline_fingerprint": "sha256:" + "b" * 64,
         "max_result_characters": _fixture_result_character_budget(),
     })
 
@@ -1879,8 +1879,8 @@ def test_consumer_budgets_complete_canonical_results_with_catch_and_valid_contro
         "enabled": True,
         "component_digest": component_digest,
         "runtime_binding_digest": "sha256:" + "c" * 64,
-        "expected_index_manifest": "sha256:" + "a" * 64,
-        "expected_pipeline_fingerprint": "sha256:" + "b" * 64,
+        "current_index_manifest": "sha256:" + "a" * 64,
+        "current_pipeline_fingerprint": "sha256:" + "b" * 64,
     }
 
     class Runtime:
@@ -1928,8 +1928,8 @@ def test_non_linux_posix_receipt_preflight_fails_before_retrieval(
         "enabled": True,
         "component_digest": load_component_manifest()["component_wheel"]["sha256"],
         "runtime_binding_digest": "sha256:" + "c" * 64,
-        "expected_index_manifest": "sha256:" + "a" * 64,
-        "expected_pipeline_fingerprint": "sha256:" + "b" * 64,
+        "current_index_manifest": "sha256:" + "a" * 64,
+        "current_pipeline_fingerprint": "sha256:" + "b" * 64,
         "max_result_characters": _fixture_result_character_budget(),
     })
     runtime = SimpleNamespace(search_exchange=MagicMock(return_value=_exchange()))
@@ -1965,8 +1965,8 @@ def test_disabled_binding_has_no_runtime_or_residual_slot_identity() -> None:
         "enabled": False,
         "component_digest": load_component_manifest()["component_wheel"]["sha256"],
         "runtime_binding_digest": None,
-        "expected_index_manifest": None,
-        "expected_pipeline_fingerprint": None,
+        "current_index_manifest": None,
+        "current_pipeline_fingerprint": None,
         "max_result_characters": 0,
     })
     consumer = HermesSlotRetrievalConsumer(binding, None, None)
@@ -1988,8 +1988,8 @@ def test_enabled_binding_fails_closed_on_component_or_receipt_drift() -> None:
         "enabled": True,
         "component_digest": component_digest,
         "runtime_binding_digest": "sha256:" + "c" * 64,
-        "expected_index_manifest": "sha256:" + "a" * 64,
-        "expected_pipeline_fingerprint": "sha256:" + "b" * 64,
+        "current_index_manifest": "sha256:" + "a" * 64,
+        "current_pipeline_fingerprint": "sha256:" + "b" * 64,
         "max_result_characters": _fixture_result_character_budget(),
     }
     with pytest.raises(HermesSlotRetrievalError, match="embedded component"):
@@ -2019,8 +2019,8 @@ def test_consumption_receipt_sink_digest_mismatch_fails_closed() -> None:
         "enabled": True,
         "component_digest": load_component_manifest()["component_wheel"]["sha256"],
         "runtime_binding_digest": "sha256:" + "c" * 64,
-        "expected_index_manifest": "sha256:" + "a" * 64,
-        "expected_pipeline_fingerprint": "sha256:" + "b" * 64,
+        "current_index_manifest": "sha256:" + "a" * 64,
+        "current_pipeline_fingerprint": "sha256:" + "b" * 64,
         "max_result_characters": _fixture_result_character_budget(),
     })
 
@@ -2050,8 +2050,8 @@ def test_prompt_consumption_is_single_use_and_requires_session_identity(tmp_path
         "enabled": True,
         "component_digest": load_component_manifest()["component_wheel"]["sha256"],
         "runtime_binding_digest": "sha256:" + "c" * 64,
-        "expected_index_manifest": "sha256:" + "a" * 64,
-        "expected_pipeline_fingerprint": "sha256:" + "b" * 64,
+        "current_index_manifest": "sha256:" + "a" * 64,
+        "current_pipeline_fingerprint": "sha256:" + "b" * 64,
         "max_result_characters": _fixture_result_character_budget(),
     })
 
@@ -2164,8 +2164,8 @@ def test_codex_app_server_is_rejected_before_consumption_receipt(tmp_path: Path)
         "enabled": True,
         "component_digest": load_component_manifest()["component_wheel"]["sha256"],
         "runtime_binding_digest": "sha256:" + "c" * 64,
-        "expected_index_manifest": "sha256:" + "a" * 64,
-        "expected_pipeline_fingerprint": "sha256:" + "b" * 64,
+        "current_index_manifest": "sha256:" + "a" * 64,
+        "current_pipeline_fingerprint": "sha256:" + "b" * 64,
         "max_result_characters": _fixture_result_character_budget(),
     })
 
@@ -4187,8 +4187,8 @@ def test_approved_evidence_reaches_synthetic_atomic_request_not_returned_history
         "enabled": True,
         "component_digest": load_component_manifest()["component_wheel"]["sha256"],
         "runtime_binding_digest": "sha256:" + "c" * 64,
-        "expected_index_manifest": "sha256:" + "a" * 64,
-        "expected_pipeline_fingerprint": "sha256:" + "b" * 64,
+        "current_index_manifest": "sha256:" + "a" * 64,
+        "current_pipeline_fingerprint": "sha256:" + "b" * 64,
         "max_result_characters": _fixture_result_character_budget(),
     })
 
@@ -4318,8 +4318,8 @@ def test_approved_evidence_rebinds_to_current_turn_after_preflight_compression(
         "enabled": True,
         "component_digest": load_component_manifest()["component_wheel"]["sha256"],
         "runtime_binding_digest": "sha256:" + "c" * 64,
-        "expected_index_manifest": "sha256:" + "a" * 64,
-        "expected_pipeline_fingerprint": "sha256:" + "b" * 64,
+        "current_index_manifest": "sha256:" + "a" * 64,
+        "current_pipeline_fingerprint": "sha256:" + "b" * 64,
         "max_result_characters": _fixture_result_character_budget(),
     })
 
@@ -4451,8 +4451,8 @@ def test_zero_hits_are_not_consumed_or_dispatched(tmp_path: Path) -> None:
         "enabled": True,
         "component_digest": load_component_manifest()["component_wheel"]["sha256"],
         "runtime_binding_digest": "sha256:" + "c" * 64,
-        "expected_index_manifest": "sha256:" + "a" * 64,
-        "expected_pipeline_fingerprint": "sha256:" + "b" * 64,
+        "current_index_manifest": "sha256:" + "a" * 64,
+        "current_pipeline_fingerprint": "sha256:" + "b" * 64,
         "max_result_characters": _fixture_result_character_budget(),
     })
 
