@@ -161,7 +161,7 @@ RUN uv sync --frozen --no-install-project --extra all --extra messaging --extra 
 # provider policy.
 COPY vendor/kwrag/kwrag_product_service-0.5.0-py3-none-any.whl /tmp/kwrag_product_service-0.5.0-py3-none-any.whl
 RUN printf '%s  %s\n' \
-        'b1cd83c41fa531879d8883ff12d23956b946b8925bc2c35c797713e90ed29c28' \
+        '6ec4457ea3ca6229990280e1bdf8ef086f9047f107d7e636a2526aaffd10f49f' \
         '/tmp/kwrag_product_service-0.5.0-py3-none-any.whl' \
         > /tmp/kwrag_product_service.sha256 && \
     sha256sum -c /tmp/kwrag_product_service.sha256 && \
@@ -170,11 +170,11 @@ RUN printf '%s  %s\n' \
     rm /tmp/kwrag_product_service-0.5.0-py3-none-any.whl
 
 LABEL com.epicevent.hermes.kwrag.schema="hermes-kwrag-product-component/v1" \
-      com.epicevent.hermes.kwrag.component-digest="sha256:b1cd83c41fa531879d8883ff12d23956b946b8925bc2c35c797713e90ed29c28" \
+      com.epicevent.hermes.kwrag.component-digest="sha256:6ec4457ea3ca6229990280e1bdf8ef086f9047f107d7e636a2526aaffd10f49f" \
       com.epicevent.hermes.kwrag.contract-digest="sha256:ccf826f0fe6f7edc36b6d5eacdee87277859d2f6dae3a4ea4cab5f51cba183db" \
-      com.epicevent.hermes.kwrag.component-manifest-digest="sha256:b82bc4f2524cf3477c590539f6aff5c586850eb21b6f51a969981149225e0062" \
-      com.epicevent.hermes.kwrag.source-archive-digest="sha256:3c959c42c22a467d52a570a2d6e85bcc629a59f85e4861b36b03cef30c3e6f44" \
-      com.epicevent.hermes.kwrag.source-revision="a4189ff3681ad92b278aabda8bfc2ddd49ec6872" \
+      com.epicevent.hermes.kwrag.component-manifest-digest="sha256:675a87393737f97c5e2163f80d0a2ffaddb40772f05e33e31e1ca8f31581e51e" \
+      com.epicevent.hermes.kwrag.source-archive-digest="sha256:11d37c619d58e5a50894b56bd1d9091e6f862b160363155a98af07d59d381d16" \
+      com.epicevent.hermes.kwrag.source-revision="abae51d79ab04de12e5ab242b92425923551ec6a" \
       com.epicevent.hermes.kwrag.transport="in_process" \
       com.epicevent.hermes.kwrag.default-enabled="false" \
       com.epicevent.hermes.kwrag.host-port-count="0" \
