@@ -3346,9 +3346,7 @@ def _(rid, params: dict) -> dict:
         try:
             from plugins.kwrag_slot.terminal import validate_explicit_request
 
-            kwrag_request = validate_explicit_request(
-                kwrag_request, require_pins=False
-            )
+            kwrag_request = validate_explicit_request(kwrag_request)
         except Exception as exc:
             return _err(rid, 4002, f"invalid kwrag request: {exc}")
     session, err = _sess_nowait(params, rid)

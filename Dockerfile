@@ -158,45 +158,26 @@ RUN uv sync --frozen --no-install-project --extra all --extra messaging --extra 
 # is verified before installation so a product image cannot silently consume a
 # different local artifact.  The component opens no host port and chooses no
 # retrieval backend or invocation policy.
-COPY vendor/kwrag/kwrag_product_service-0.2.0-py3-none-any.whl /tmp/kwrag_product_service-0.2.0-py3-none-any.whl
+COPY vendor/kwrag/kwrag_product_service-0.4.0-py3-none-any.whl /tmp/kwrag_product_service-0.4.0-py3-none-any.whl
 RUN printf '%s  %s\n' \
-        '7c793623aa74d5a953a187cf7c962314474c6b00367c574dd477f4f781e07300' \
-        '/tmp/kwrag_product_service-0.2.0-py3-none-any.whl' \
+        '40c8516fb15a617d1e2082798782442b2ba9ba855146d688a546e36db6dd5739' \
+        '/tmp/kwrag_product_service-0.4.0-py3-none-any.whl' \
         > /tmp/kwrag_product_service.sha256 && \
     sha256sum -c /tmp/kwrag_product_service.sha256 && \
     rm /tmp/kwrag_product_service.sha256 && \
-    uv pip install --no-cache-dir --no-deps /tmp/kwrag_product_service-0.2.0-py3-none-any.whl && \
-    rm /tmp/kwrag_product_service-0.2.0-py3-none-any.whl
+    uv pip install --no-cache-dir --no-deps /tmp/kwrag_product_service-0.4.0-py3-none-any.whl && \
+    rm /tmp/kwrag_product_service-0.4.0-py3-none-any.whl
 
-COPY vendor/kwrag_p1/kwrag_p1_attachment-0.1.2-py3-none-any.whl /tmp/kwrag_p1_attachment-0.1.2-py3-none-any.whl
-RUN printf '%s  %s\n' \
-        '242cafa5a73d2b54b63a60ad6e71c73d671d99db371d7c0904cfce2ae2c9e4b6' \
-        '/tmp/kwrag_p1_attachment-0.1.2-py3-none-any.whl' \
-        > /tmp/kwrag_p1_attachment.sha256 && \
-    sha256sum -c /tmp/kwrag_p1_attachment.sha256 && \
-    rm /tmp/kwrag_p1_attachment.sha256 && \
-    uv pip install --no-cache-dir --no-deps /tmp/kwrag_p1_attachment-0.1.2-py3-none-any.whl && \
-    rm /tmp/kwrag_p1_attachment-0.1.2-py3-none-any.whl
-
-LABEL com.epicevent.agent-runtime.retrieval.schema="jitech-embedded-retrieval/v1" \
-      com.epicevent.agent-runtime.retrieval.component-digest="sha256:7c793623aa74d5a953a187cf7c962314474c6b00367c574dd477f4f781e07300" \
-      com.epicevent.agent-runtime.retrieval.contract-digest="sha256:ccf826f0fe6f7edc36b6d5eacdee87277859d2f6dae3a4ea4cab5f51cba183db" \
-      com.epicevent.agent-runtime.retrieval.component-manifest-digest="sha256:89520b45d4df550708ba3eb4bd48fb5f5f03d118adcddb80d09b9a00e4b1bb75" \
-      com.epicevent.agent-runtime.retrieval.source-archive-digest="sha256:36b16db0d73d6c29d20bdafa937150a7056ccf314ad83b880f08ea82f4929655" \
-      com.epicevent.agent-runtime.retrieval.source-revision="b41349bc1215514a872f31ccc24c47b0f7621e6d" \
-      com.epicevent.agent-runtime.retrieval.transport="in_process" \
-      com.epicevent.agent-runtime.retrieval.default-enabled="false" \
-      com.epicevent.agent-runtime.retrieval.host-port-count="0" \
-      com.epicevent.agent-runtime.retrieval.nas-read-only="true" \
-      com.epicevent.agent-runtime.retrieval.resource.json='{"cpuReservationMillicores":500,"gpuAccess":"none","memoryReservationBytes":536870912,"pidsReservation":64,"profileDigest":"sha256:2d4ff46a2d76e712421a9758ecb0ae1d262e2d42ea00cee888c103477e6709ed"}' \
-      com.epicevent.agent-runtime.retrieval.verify-command.json='["hermes","kwrag-slot","status","--json"]' \
-      com.epicevent.hermes.kwrag.p1.component-wheel-digest="sha256:242cafa5a73d2b54b63a60ad6e71c73d671d99db371d7c0904cfce2ae2c9e4b6" \
-      com.epicevent.hermes.kwrag.p1.component-manifest-digest="sha256:3c866b053eae82280753beb2b6f03e643c1f93c3dbd7011ef34aece1dc7fdd0e" \
-      com.epicevent.hermes.kwrag.p1.attachment-decision-digest="sha256:fd4d1068407d0b28d41e7813f8cef7b193a5fe43f39db166588911e6fde3bbb5" \
-      com.epicevent.hermes.kwrag.p1.default-enabled="false" \
-      com.epicevent.hermes.kwrag.p1.caller-explicit="true" \
-      com.epicevent.hermes.kwrag.p1.status-schema="jitech-embedded-retrieval-attachment-status/v1" \
-      com.epicevent.hermes.kwrag.p1.verify-command.json='["hermes","kwrag-slot","p1-attachment-status","--json"]'
+LABEL com.epicevent.hermes.kwrag.schema="hermes-kwrag-product-component/v1" \
+      com.epicevent.hermes.kwrag.component-digest="sha256:40c8516fb15a617d1e2082798782442b2ba9ba855146d688a546e36db6dd5739" \
+      com.epicevent.hermes.kwrag.contract-digest="sha256:ccf826f0fe6f7edc36b6d5eacdee87277859d2f6dae3a4ea4cab5f51cba183db" \
+      com.epicevent.hermes.kwrag.component-manifest-digest="sha256:10fd5fd1ca835f89d32bf3a3b7c407f11d022293cfbe32b54a1871227e0f2786" \
+      com.epicevent.hermes.kwrag.source-archive-digest="sha256:19c2fc2193ebb5633129f98d972e477471330cb79fa5189bb7eb777123bec5ea" \
+      com.epicevent.hermes.kwrag.source-revision="83afc8fa97b2191665afa152e61feae1f5e87145" \
+      com.epicevent.hermes.kwrag.transport="in_process" \
+      com.epicevent.hermes.kwrag.default-enabled="false" \
+      com.epicevent.hermes.kwrag.host-port-count="0" \
+      com.epicevent.hermes.kwrag.verify-command.json='["hermes","kwrag-slot","status","--json"]'
 
 # ---------- Source code ----------
 # .dockerignore excludes node_modules, so the installs above survive.

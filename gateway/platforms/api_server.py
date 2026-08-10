@@ -393,8 +393,9 @@ def _session_chat_kwrag(
 ) -> tuple[Optional[Dict[str, str]], Optional["web.Response"]]:
     """Read the caller-explicit Kakao retrieval request, if present.
 
-    Absence is the normal path and performs no retrieval.  The adapter owns
-    the generation/index and producer validation after this shape check.
+    Absence is the normal path and performs no retrieval.  Hermes validates
+    only the caller-owned query/corpus shape here; KWRAG owns the mounted
+    source identity and search implementation.
     """
     value = body.get("kwrag")
     if value is None:
@@ -407,7 +408,7 @@ def _session_chat_kwrag(
     try:
         from plugins.kwrag_slot.terminal import validate_explicit_request
 
-        return validate_explicit_request(value, require_pins=False), None
+        return validate_explicit_request(value), None
     except Exception as exc:
         return None, web.json_response(
             _openai_error(str(exc), code="invalid_kwrag"),

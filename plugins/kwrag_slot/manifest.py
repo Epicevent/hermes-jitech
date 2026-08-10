@@ -22,13 +22,6 @@ _FIELDS = {
     "transport",
     "policy_boundary",
 }
-_RESOURCE_FIELDS = {
-    "cpuReservationMillicores",
-    "gpuAccess",
-    "memoryReservationBytes",
-    "pidsReservation",
-    "profileDigest",
-}
 
 
 class ComponentManifestError(ValueError):
@@ -116,30 +109,3 @@ def load_component_manifest() -> dict[str, Any]:
         "contract_collection_digest": contract_digest,
         "manifest_digest": "sha256:" + hashlib.sha256(payload).hexdigest(),
     }
-
-
-def load_resource_profile() -> dict[str, Any]:
-    payload = resources.files("plugins.kwrag_slot").joinpath("resource-profile.json").read_bytes()
-    if payload.startswith(b"\xef\xbb\xbf") or not payload.endswith(b"\n") or payload.endswith(b"\n\n"):
-        raise ComponentManifestError("resource profile bytes are not canonical")
-    canonical_payload = payload[:-1]
-    try:
-        parsed = json.loads(canonical_payload.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ComponentManifestError("resource profile is not strict UTF-8 JSON") from exc
-    if not isinstance(parsed, dict) or set(parsed) != _RESOURCE_FIELDS:
-        raise ComponentManifestError("resource profile fields are invalid")
-    if canonical_json_bytes(parsed) != canonical_payload:
-        raise ComponentManifestError("resource profile is not canonically encoded")
-    profile_digest = _digest(parsed.get("profileDigest"), "resource profile digest")
-    digest_payload = {key: parsed[key] for key in _RESOURCE_FIELDS if key != "profileDigest"}
-    if "sha256:" + hashlib.sha256(canonical_json_bytes(digest_payload)).hexdigest() != profile_digest:
-        raise ComponentManifestError("resource profile digest does not match its fields")
-    if (
-        parsed.get("cpuReservationMillicores") != 500
-        or parsed.get("gpuAccess") != "none"
-        or parsed.get("memoryReservationBytes") != 536_870_912
-        or parsed.get("pidsReservation") != 64
-    ):
-        raise ComponentManifestError("resource profile values are unsupported")
-    return parsed

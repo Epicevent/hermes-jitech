@@ -34,8 +34,6 @@ _BINDING_FIELDS = {
     "expected_pipeline_fingerprint",
     "max_result_characters",
 }
-_BINDING_FIELDS_V2 = _BINDING_FIELDS | {"expected_source_generation"}
-_GENERATION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$")
 
 
 def _effective_user_id() -> int:
@@ -1020,16 +1018,6 @@ def _digest(value: object, field: str) -> str:
     return text
 
 
-def _source_generation(value: object, field: str = "source generation") -> str:
-    if (
-        not isinstance(value, str)
-        or not _GENERATION.fullmatch(value)
-        or value.lower() in {"unknown", "latest", "current"}
-    ):
-        raise HermesSlotRetrievalError(f"{field} is not a canonical source generation")
-    return value
-
-
 @dataclass(frozen=True)
 class HermesSlotRetrievalBinding:
     enabled: bool
@@ -1037,21 +1025,15 @@ class HermesSlotRetrievalBinding:
     runtime_binding_digest: str | None
     expected_index_manifest: str | None
     expected_pipeline_fingerprint: str | None
-    expected_source_generation: str | None
     max_result_characters: int
 
     @classmethod
     def from_mapping(cls, raw: Any) -> "HermesSlotRetrievalBinding":
         if not isinstance(raw, Mapping):
             raise HermesSlotRetrievalError("Hermes slot retrieval binding fields are invalid")
-        schema = raw.get("schema_version")
-        if schema == "hermes-kwrag-slot-binding-v1":
-            expected_fields = _BINDING_FIELDS
-        elif schema == "hermes-kwrag-slot-binding-v2":
-            expected_fields = _BINDING_FIELDS_V2
-        else:
+        if raw.get("schema_version") != "hermes-kwrag-slot-binding-v1":
             raise HermesSlotRetrievalError("Hermes slot retrieval binding schema is invalid")
-        if set(raw) != expected_fields:
+        if set(raw) != _BINDING_FIELDS:
             raise HermesSlotRetrievalError("Hermes slot retrieval binding fields are invalid")
         enabled = raw.get("enabled")
         if not isinstance(enabled, bool):
@@ -1066,26 +1048,20 @@ class HermesSlotRetrievalBinding:
         runtime_digest = raw.get("runtime_binding_digest")
         manifest_digest = raw.get("expected_index_manifest")
         pipeline_digest = raw.get("expected_pipeline_fingerprint")
-        generation = raw.get("expected_source_generation")
         if enabled:
-            if schema == "hermes-kwrag-slot-binding-v2":
-                generation_value = _source_generation(generation)
-            else:
-                generation_value = None
             return cls(
                 enabled=True,
                 component_digest=component_digest,
                 runtime_binding_digest=_digest(runtime_digest, "runtime binding digest"),
                 expected_index_manifest=_digest(manifest_digest, "index manifest digest"),
                 expected_pipeline_fingerprint=_digest(pipeline_digest, "pipeline fingerprint"),
-                expected_source_generation=generation_value,
                 max_result_characters=max_chars,
             )
-        if any(value is not None for value in (runtime_digest, manifest_digest, pipeline_digest, generation)):
+        if any(value is not None for value in (runtime_digest, manifest_digest, pipeline_digest)):
             raise HermesSlotRetrievalError("disabled Hermes retrieval must not retain a runtime binding")
         if max_chars != 0:
             raise HermesSlotRetrievalError("disabled Hermes retrieval must have a zero result budget")
-        return cls(False, component_digest, None, None, None, None, 0)
+        return cls(False, component_digest, None, None, None, 0)
 
 
 @dataclass
@@ -1144,8 +1120,6 @@ class HermesSlotRetrievalResult:
             raise HermesSlotRetrievalError("verified result payload is not UTF-8") from exc
         if canonical_receipt.get("result_characters") != result_characters:
             raise HermesSlotRetrievalError("verified result character budget is not bound")
-        if "source_generation" in canonical_receipt:
-            _source_generation(canonical_receipt["source_generation"])
         return tuple(canonical_results), canonical_receipt
 
     def record_prompt_consumption(
@@ -1285,10 +1259,6 @@ class HermesSlotRetrievalResult:
             "operation_receipt_digest": verified_receipt["operation_receipt_digest"],
             "result_receipt_digest": self.result_receipt_digest,
         }
-        if "source_generation" in verified_receipt:
-            receipt["source_generation"] = _source_generation(
-                verified_receipt["source_generation"]
-            )
         receipt_digest = "sha256:" + hashlib.sha256(canonical_json_bytes(receipt)).hexdigest()
         if self._receipt_sink is None:
             raise HermesSlotRetrievalError("consumption receipt sink is unavailable")
@@ -1440,10 +1410,6 @@ class HermesSlotRetrievalResult:
             "providerAttestationStatus": "unavailable",
             "billingStatus": "unavailable",
         }
-        if "source_generation" in verified_receipt:
-            attestation["sourceGeneration"] = _source_generation(
-                verified_receipt["source_generation"]
-            )
         return attestation
 
 
@@ -1485,59 +1451,13 @@ class HermesSlotRetrievalConsumer:
             "expected_pipeline_fingerprint": self._binding.expected_pipeline_fingerprint,
             "max_result_characters": self._binding.max_result_characters,
         }
-        expected_source_generation = self._binding.expected_source_generation
-        # The current Kakao producer names the caller pin
-        # ``expected_source_generation``.  Keep reading the historical field
-        # for already-published non-generation fixtures, but never infer a
-        # generation when neither field is present.
-        request_generation = request.get("expected_source_generation")
-        if request_generation is None:
-            request_generation = request.get("source_generation")
-        if expected_source_generation is None and request_generation is not None:
-            expected_source_generation = _source_generation(request_generation)
-        if expected_source_generation is not None:
-            if request_generation != expected_source_generation:
-                raise HermesSlotRetrievalError(
-                    "slot request source generation does not match its binding"
-                )
-            # A generation-bound request is not compatible with the historical
-            # 49c10212 verifier.  Reject before calling the backend rather than
-            # silently dropping the source identity and claiming a safe result.
-            import inspect
-
-            try:
-                verifier_parameters = inspect.signature(
-                    verify_slot_search_exchange
-                ).parameters
-            except (TypeError, ValueError) as exc:
-                raise HermesSlotRetrievalError(
-                    "generation-bound KWRAG verifier capability is unavailable"
-                ) from exc
-            if "expected_source_generation" not in verifier_parameters:
-                raise HermesSlotRetrievalError(
-                    "embedded KWRAG verifier lacks source-generation binding"
-                )
-            verification_kwargs["expected_source_generation"] = expected_source_generation
         exchange = self._runtime.search_exchange(dict(request))
-        try:
-            verified = verify_slot_search_exchange(
-                request,
-                exchange.response,
-                exchange.operation_receipt,
-                **verification_kwargs,
-            )
-        except TypeError as exc:
-            if expected_source_generation is not None:
-                raise HermesSlotRetrievalError(
-                    "generation-bound KWRAG verifier rejected its source identity"
-                ) from exc
-            raise
-        if expected_source_generation is not None:
-            verified_generation = getattr(verified, "source_generation", None)
-            if verified_generation != expected_source_generation:
-                raise HermesSlotRetrievalError(
-                    "verified exchange source generation is not bound"
-                )
+        verified = verify_slot_search_exchange(
+            request,
+            exchange.response,
+            exchange.operation_receipt,
+            **verification_kwargs,
+        )
         receipt = {
             "schema_version": "hermes-kwrag-result-receipt-v1",
             "consumer_family": "hermes",
@@ -1556,8 +1476,6 @@ class HermesSlotRetrievalConsumer:
             "result_count": verified.result_count,
             "result_characters": verified.result_characters,
         }
-        if expected_source_generation is not None:
-            receipt["source_generation"] = expected_source_generation
         receipt_bytes = canonical_json_bytes(receipt)
         receipt_digest = "sha256:" + hashlib.sha256(receipt_bytes).hexdigest()
         written_digest = self._receipt_sink.write(receipt)

@@ -1,22 +1,17 @@
-"""Caller-explicit Kakao retrieval join for one Hermes terminal turn.
+"""Thin caller adapter from one explicit Hermes turn to KWRAG.
 
-This module is deliberately a thin adapter.  The fixed KWRAG producer owns
-source/index validation and its operation/producer receipts; the Hermes
-consumer owns the result/consumption/provider handoff receipts; and the API
-caller owns whether this adapter is invoked at all.  There is no automatic
-search, query generation, provider selection, or fallback here.
+KWRAG owns the mounted source, search implementation, and operation receipt.
+Hermes owns only request-shape adaptation, result consumption, bounded current-
+turn context, and the existing provider handoff.  No ops command, approval,
+capsule, generated binding, or caller-supplied generation participates here.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
-import re
 import uuid
-from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, Mapping
 
 from hermes_constants import get_hermes_home
@@ -31,322 +26,75 @@ from plugins.kwrag_slot.manifest import canonical_json_bytes, load_component_man
 from plugins.kwrag_slot.prompt_context import run_conversation_with_approved_retrieval
 
 
-_SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
-_GENERATION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$")
 _MAX_QUERY_CHARACTERS = 4_000
 _MAX_RESULTS = 10
 _MAX_RESULT_CHARACTERS = 20_000
-_REQUEST_FIELDS = {
-    "schema_version",
-    "query",
-    "request_id",
-    "operation_id",
-    "run_id",
-    "attempt",
-    "max_results",
-    "corpus",
-    "source_generation",
-}
-_RUNTIME_HANDOFF_RECEIPT_FIELDS = {
-    "embedding_operation",
-    "activation",
-    "operation",
-    "result",
-    "consumption",
-    "provider",
-}
+_DEFAULT_KAKAO_PACKAGE_ROOT = Path("/workspace/nas_docs/kw/package")
 
 
 class KakaoTerminalRetrievalError(HermesSlotRetrievalError):
-    """The explicit Kakao terminal request cannot be admitted safely."""
-
-
-def _digest(value: Any, label: str) -> str:
-    if not isinstance(value, str) or not _SHA256.fullmatch(value):
-        raise KakaoTerminalRetrievalError(f"{label} is invalid")
-    return value
-
-
-def _generation(value: Any, label: str = "source generation") -> str:
-    if (
-        not isinstance(value, str)
-        or not _GENERATION.fullmatch(value)
-        or value.lower() in {"unknown", "latest", "current"}
-    ):
-        raise KakaoTerminalRetrievalError(f"{label} is invalid")
-    return value
+    """The explicit Kakao terminal request cannot be served."""
 
 
 def _query(value: Any) -> str:
-    # Validate the caller's bytes before any strip/coercion.  The producer's
-    # canonical request validator then applies the same invariant again.
     if not isinstance(value, str) or not 1 <= len(value) <= _MAX_QUERY_CHARACTERS:
         raise KakaoTerminalRetrievalError("query must be 1-4000 characters")
     if value != value.strip():
-        raise KakaoTerminalRetrievalError("query must not have surrounding whitespace")
+        raise KakaoTerminalRetrievalError(
+            "query must not have surrounding whitespace"
+        )
     return value
 
 
-def validate_explicit_request(
-    value: Mapping[str, Any], *, require_pins: bool = True
-) -> dict[str, str | None]:
-    """Validate the API's explicit request without creating a query policy.
+def validate_explicit_request(value: Mapping[str, Any]) -> dict[str, str]:
+    """Accept only the caller decision that actually belongs to Hermes."""
 
-    Source/index identities may be supplied as caller hints, but the runtime
-    handoff is authoritative when the request is admitted by the terminal.
-    The default keeps the historical direct helper contract strict; the API
-    path opts into runtime-owned pins.
-    """
-
-    allowed = {
-        "query",
-        "corpus",
-        "expected_source_generation",
-        "expected_index_manifest",
-    }
-    if not isinstance(value, Mapping) or not set(value) <= allowed or set(value) < {
-        "query",
-        "corpus",
-    }:
-        raise KakaoTerminalRetrievalError("kwrag request fields are invalid")
-    if require_pins and set(value) != allowed:
+    if not isinstance(value, Mapping) or set(value) != {"query", "corpus"}:
         raise KakaoTerminalRetrievalError("kwrag request fields are invalid")
     query = _query(value["query"])
     corpus = value["corpus"]
-    if not isinstance(corpus, str) or not corpus or corpus != corpus.strip():
-        raise KakaoTerminalRetrievalError("corpus is invalid")
-    expected_generation = value.get("expected_source_generation")
-    expected_manifest = value.get("expected_index_manifest")
-    if expected_generation is not None:
-        expected_generation = _digest(expected_generation, "source generation")
-    if expected_manifest is not None:
-        expected_manifest = _digest(expected_manifest, "index manifest")
-    if (expected_generation is None) != (expected_manifest is None):
-        raise KakaoTerminalRetrievalError(
-            "source generation and index manifest hints must be paired"
-        )
-    result: dict[str, str | None] = {
-        "query": query,
-        "corpus": corpus,
-    }
-    if expected_generation is not None:
-        result["expected_source_generation"] = expected_generation
-        result["expected_index_manifest"] = expected_manifest
-    return result
+    if corpus != "kakao":
+        raise KakaoTerminalRetrievalError("corpus must be kakao")
+    return {"query": query, "corpus": corpus}
 
 
-def _validate_runtime_handoff(value: Any) -> tuple[dict[str, Any], str]:
-    """Validate one content-free server runtime handoff.
-
-    The producer owns source observation and derived-release construction.  The
-    Hermes adapter only accepts the immutable identity/receipt projection and
-    never treats research or provider fields as admission inputs.
-    """
-
-    if not isinstance(value, Mapping) or value.get("schema_version") != (
-        "kwrag-dense-runtime-handoff-v1"
+def _source_package_root(value: Path | None) -> Path:
+    root = _DEFAULT_KAKAO_PACKAGE_ROOT if value is None else Path(value)
+    if not root.is_absolute() or (os.name == "posix" and "\\" in str(root)) or any(
+        part in {".", ".."} for part in root.parts
     ):
-        raise KakaoTerminalRetrievalError("runtime handoff schema is invalid")
-    if value.get("status") != "active":
-        raise KakaoTerminalRetrievalError("runtime handoff is not active")
-    if value.get("read_only_required") is not True:
-        raise KakaoTerminalRetrievalError("runtime handoff is not read-only")
-    if value.get("raw_content_present") is not False:
-        raise KakaoTerminalRetrievalError("runtime handoff contains raw content")
-    for field in (
-        "source_generation",
-        "source_snapshot_sha256",
-        "source_database_sha256",
-        "source_membership_sha256",
-        "source_profile_sha256",
-        "index_manifest_sha256",
-        "pipeline_fingerprint",
-        "embedding_fingerprint",
-    ):
-        _digest(value.get(field), field)
-    for field in ("slot_namespace", "release_id", "release_relative", "read_view_relative"):
-        raw = value.get(field)
-        if not isinstance(raw, str) or not raw or raw != raw.strip():
-            raise KakaoTerminalRetrievalError(f"runtime handoff {field} is invalid")
-    if value["release_relative"] != (
-        f"{value['slot_namespace']}/releases/{value['release_id']}"
-    ):
-        raise KakaoTerminalRetrievalError("runtime handoff release is invalid")
-    if any(part in str(value["read_view_relative"]).replace("\\", "/").split("/") for part in ("..", "")):
-        raise KakaoTerminalRetrievalError("runtime handoff read view is invalid")
-    receipts = value.get("receipt_digests")
-    if not isinstance(receipts, Mapping) or set(receipts) != _RUNTIME_HANDOFF_RECEIPT_FIELDS:
-        raise KakaoTerminalRetrievalError("runtime handoff receipts are invalid")
-    for field, digest in receipts.items():
-        if field == "embedding_operation" or field == "activation":
-            _digest(digest, f"runtime handoff {field} receipt")
-        elif digest is not None:
-            _digest(digest, f"runtime handoff {field} receipt")
-    # Operation/result/consumption/provider receipts belong to later stages;
-    # accepting an already-populated value here would allow stale evidence.
-    if any(receipts[field] is not None for field in ("operation", "result", "consumption", "provider")):
-        raise KakaoTerminalRetrievalError("runtime handoff contains stale turn receipts")
-    canonical = canonical_json_bytes(dict(value))
-    return dict(value), "sha256:" + hashlib.sha256(canonical).hexdigest()
-
-
-def _load_runtime_handoff(fixed_producer: Any, binding_path: Path) -> tuple[dict[str, Any], str]:
-    loader = getattr(fixed_producer, "load_runtime_handoff", None)
-    if not callable(loader):
-        raise KakaoTerminalRetrievalError("runtime handoff loader is unavailable")
-    try:
-        return _validate_runtime_handoff(loader(binding_path))
-    except KakaoTerminalRetrievalError:
-        raise
-    except Exception as exc:
-        raise KakaoTerminalRetrievalError("runtime handoff is unavailable") from exc
-
-
-def _producer_binding_path() -> Path:
-    raw = os.environ.get(
-        "JITECH_KWRAG_FIXED_PRODUCER_BINDING",
-        "/run/kwrag/fixed-producer-binding.json",
-    )
-    path = Path(raw)
-    if not path.is_absolute() or "\\" in raw or "." in path.parts or ".." in path.parts:
-        raise KakaoTerminalRetrievalError("fixed producer binding path is invalid")
-    return path
+        raise KakaoTerminalRetrievalError("Kakao source package path is invalid")
+    return root
 
 
 def _receipt_root() -> Path:
-    value = os.environ.get("JITECH_KWRAG_RECEIPT_ROOT")
-    root = Path(value) if value else Path(get_hermes_home()) / "kwrag-p1-attachment"
-    if not root.is_absolute() or root.is_symlink() or not root.is_dir():
+    root = Path(get_hermes_home()) / "kwrag"
+    if not root.is_absolute() or root.is_symlink():
+        raise KakaoTerminalRetrievalError("Hermes KWRAG receipt root is unavailable")
+    try:
+        root.mkdir(mode=0o700, parents=False, exist_ok=True)
+        if os.name == "posix" and (root.stat().st_mode & 0o777) != 0o700:
+            raise KakaoTerminalRetrievalError(
+                "Hermes KWRAG receipt root permissions are invalid"
+            )
+    except OSError as exc:
+        raise KakaoTerminalRetrievalError(
+            "Hermes KWRAG receipt root is unavailable"
+        ) from exc
+    if not root.is_dir() or root.is_symlink():
         raise KakaoTerminalRetrievalError("Hermes KWRAG receipt root is unavailable")
     return root
 
 
-@dataclass(frozen=True)
-class _FixedProducerRuntime:
-    request: Mapping[str, Any]
-    response: Mapping[str, Any]
-    operation_receipt: Mapping[str, Any]
-
-    def search_exchange(self, request: Any) -> Any:
-        if dict(request) != dict(self.request):
-            raise KakaoTerminalRetrievalError("Kakao request changed after producer verification")
-        return SimpleNamespace(
-            response=dict(self.response),
-            operation_receipt=dict(self.operation_receipt),
-        )
-
-
-def _fixed_producer_exchange(request: Mapping[str, Any]) -> tuple[_FixedProducerRuntime, str]:
-    try:
-        from kwrag import fixed_producer
-    except ImportError as exc:
-        raise KakaoTerminalRetrievalError("generation-aware fixed producer is unavailable") from exc
-
-    load_binding = getattr(fixed_producer, "load_fixed_producer_binding", None)
-    execute = getattr(fixed_producer, "execute_fixed_producer", None)
-    verify = getattr(fixed_producer, "verify_fixed_producer_output", None)
-    if not all(callable(item) for item in (load_binding, execute, verify)):
-        raise KakaoTerminalRetrievalError("fixed producer ABI is incomplete")
-    binding_path = _producer_binding_path()
-    try:
-        binding = load_binding(binding_path)
-    except Exception as exc:
-        raise KakaoTerminalRetrievalError("fixed producer binding is unavailable") from exc
-    if getattr(binding, "enabled", None) is not True:
-        raise KakaoTerminalRetrievalError("caller-explicit Kakao retrieval is disabled")
-    runtime_handoff, runtime_handoff_digest = _load_runtime_handoff(
-        fixed_producer, binding_path
-    )
-    request_fields = dict(request)
-    expected_source_generation = runtime_handoff["source_generation"]
-    expected_index_manifest = runtime_handoff["index_manifest_sha256"]
-    request_generation = request_fields.get("expected_source_generation")
-    request_manifest = request_fields.get("expected_index_manifest")
-    if request_generation is not None and request_generation != expected_source_generation:
-        raise KakaoTerminalRetrievalError("source generation hint drifted")
-    if request_manifest is not None and request_manifest != expected_index_manifest:
-        raise KakaoTerminalRetrievalError("index manifest hint drifted")
-    request_fields["expected_source_generation"] = expected_source_generation
-    request_fields["expected_index_manifest"] = expected_index_manifest
-    if getattr(binding, "index_manifest_digest", None) != expected_index_manifest:
-        raise KakaoTerminalRetrievalError("index manifest drifted before retrieval")
-    producer_request = request_fields
-    try:
-        execution = execute(
-            canonical_json_bytes(producer_request), binding_path=binding_path
-        )
-        output = json.loads(execution.output_bytes.decode("utf-8"))
-        verify(
-            execution.output_bytes,
-            execution.producer_receipt,
-            request=producer_request,
-            expected_binding_digest=execution.binding_digest,
-        )
-    except Exception as exc:
-        raise KakaoTerminalRetrievalError("Kakao source exchange was not verified") from exc
-    if not isinstance(output, Mapping):
-        raise KakaoTerminalRetrievalError("Kakao producer output is invalid")
-    consumable = output.get("consumable")
-    linkage = output.get("linkage")
-    operation_receipt = dict(execution.operation_receipt)
-    if not isinstance(consumable, Mapping) or not isinstance(linkage, Mapping):
-        raise KakaoTerminalRetrievalError("Kakao producer output is invalid")
-    if consumable.get("source_generation") != expected_source_generation:
-        raise KakaoTerminalRetrievalError("producer source generation is not bound")
-    if consumable.get("index_manifest") != expected_index_manifest:
-        raise KakaoTerminalRetrievalError("producer index manifest is not bound")
-    if consumable.get("pipeline_fingerprint") != runtime_handoff["pipeline_fingerprint"]:
-        raise KakaoTerminalRetrievalError("producer pipeline is not bound")
-    for field, expected in (
-        ("source_generation", expected_source_generation),
-        ("index_manifest", expected_index_manifest),
-        ("pipeline_fingerprint", runtime_handoff["pipeline_fingerprint"]),
-    ):
-        observed = operation_receipt.get(field)
-        if observed is not None and observed != expected:
-            raise KakaoTerminalRetrievalError(
-                f"producer operation receipt {field} drifted"
-            )
-    if (
-        "read_only_required" in operation_receipt
-        and operation_receipt["read_only_required"] is not True
-    ):
-        raise KakaoTerminalRetrievalError("producer operation receipt is not read-only")
-    _, post_handoff_digest = _load_runtime_handoff(fixed_producer, binding_path)
-    if post_handoff_digest != runtime_handoff_digest:
-        raise KakaoTerminalRetrievalError("runtime handoff drifted during retrieval")
-    receipt_digest = "sha256:" + hashlib.sha256(
-        canonical_json_bytes(operation_receipt)
-    ).hexdigest()
-    if linkage.get("operation_receipt_digest") != receipt_digest:
-        raise KakaoTerminalRetrievalError("producer operation receipt is not bound")
-    response = {
-        "schema_version": "kwrag-slot-search-response-v1",
-        "request_id": consumable.get("request_id"),
-        "operation_id": consumable.get("operation_id"),
-        "run_id": consumable.get("run_id"),
-        "attempt": consumable.get("attempt"),
-        "authorization_basis": "slot_mounted_storage",
-        "source_generation": expected_source_generation,
-        "index_manifest": consumable.get("index_manifest"),
-        "pipeline_fingerprint": consumable.get("pipeline_fingerprint"),
-        "result_digest": linkage.get("result_digest"),
-        "result_status": consumable.get("result_status"),
-        "operation_receipt": {"status": "written", "digest": receipt_digest},
-        "results": consumable.get("results"),
-        "duration_ms": operation_receipt.get("duration_ms", 0),
-    }
-    response["runtime_handoff_digest"] = runtime_handoff_digest
-    return _FixedProducerRuntime(producer_request, response, operation_receipt), runtime_handoff_digest
-
-
 def prepare_approved_retrieval(
     request: Mapping[str, Any],
+    *,
+    package_root: Path | None = None,
 ) -> tuple[HermesSlotRetrievalResult, bytes]:
-    """Run one explicit runtime-handoff-bound exchange and return evidence."""
+    """Run one explicit product-native search and return verified evidence."""
 
-    validated = validate_explicit_request(request, require_pins=False)
-    producer_request: dict[str, Any] = {
+    validated = validate_explicit_request(request)
+    producer_request = {
         "schema_version": "kwrag-slot-search-request-v1",
         "query": validated["query"],
         "request_id": str(uuid.uuid4()),
@@ -354,38 +102,52 @@ def prepare_approved_retrieval(
         "run_id": str(uuid.uuid4()),
         "attempt": 1,
         "max_results": _MAX_RESULTS,
-        "corpus": validated["corpus"],
-        "expected_source_generation": validated["expected_source_generation"],
-        "expected_index_manifest": validated["expected_index_manifest"],
     }
-    runtime, runtime_binding_digest = _fixed_producer_exchange(producer_request)
-    manifest = load_component_manifest()
+    try:
+        from kwrag.product_runtime import open_kakao_product_runtime
+    except ImportError as exc:
+        raise KakaoTerminalRetrievalError(
+            "product-native KWRAG runtime is unavailable"
+        ) from exc
+
     root = _receipt_root()
-    source_generation = runtime.response["source_generation"]
-    index_manifest = runtime.response["index_manifest"]
-    binding = HermesSlotRetrievalBinding.from_mapping(
-        {
-            "schema_version": "hermes-kwrag-slot-binding-v2",
-            "enabled": True,
-            "component_digest": manifest["component_wheel"]["sha256"],
-            "runtime_binding_digest": runtime_binding_digest,
-            "expected_index_manifest": index_manifest,
-            "expected_pipeline_fingerprint": runtime.response["pipeline_fingerprint"],
-            "expected_source_generation": source_generation,
-            "max_result_characters": _MAX_RESULT_CHARACTERS,
-        }
-    )
-    result = HermesSlotRetrievalConsumer(
-        binding,
-        runtime,
-        FileConsumptionReceiptSink(root / "result-receipts.jsonl"),
-    ).search(runtime.request)
+    try:
+        with open_kakao_product_runtime(
+            package_root=_source_package_root(package_root),
+            receipt_path=root / "operation-receipts.jsonl",
+        ) as runtime:
+            identity = runtime.identity
+            manifest = load_component_manifest()
+            binding = HermesSlotRetrievalBinding.from_mapping(
+                {
+                    "schema_version": "hermes-kwrag-slot-binding-v1",
+                    "enabled": True,
+                    "component_digest": manifest["component_wheel"]["sha256"],
+                    "runtime_binding_digest": identity.digest,
+                    "expected_index_manifest": identity.index_manifest,
+                    "expected_pipeline_fingerprint": identity.pipeline_fingerprint,
+                    "max_result_characters": _MAX_RESULT_CHARACTERS,
+                }
+            )
+            result = HermesSlotRetrievalConsumer(
+                binding,
+                runtime,
+                FileConsumptionReceiptSink(root / "result-receipts.jsonl"),
+            ).search(producer_request)
+    except KakaoTerminalRetrievalError:
+        raise
+    except Exception as exc:
+        raise KakaoTerminalRetrievalError(
+            "Kakao product retrieval was not verified"
+        ) from exc
+
     context = {
         "schema_version": "hermes-kwrag-current-turn-context-v1",
-        "source_generation": source_generation,
-        "index_manifest": index_manifest,
+        "index_manifest": result.result_receipt["index_manifest"],
         "runtime_binding_digest": result.result_receipt["runtime_binding_digest"],
-        "operation_receipt_digest": result.result_receipt["operation_receipt_digest"],
+        "operation_receipt_digest": result.result_receipt[
+            "operation_receipt_digest"
+        ],
         "result_receipt_digest": result.result_receipt_digest,
         "result_digest": result.result_receipt["result_digest"],
         "result_count": result.result_receipt["result_count"],
@@ -412,7 +174,6 @@ def dispatch_current_terminal_turn(
         raise KakaoTerminalRetrievalError("current-turn context is invalid") from exc
     if set(context) != {
         "schema_version",
-        "source_generation",
         "index_manifest",
         "runtime_binding_digest",
         "operation_receipt_digest",
@@ -423,7 +184,6 @@ def dispatch_current_terminal_turn(
         raise KakaoTerminalRetrievalError("current-turn context fields are invalid")
     receipt = approved_retrieval.result_receipt
     for field, key in (
-        ("source_generation", "source_generation"),
         ("index_manifest", "index_manifest"),
         ("runtime_binding_digest", "runtime_binding_digest"),
         ("operation_receipt_digest", "operation_receipt_digest"),
@@ -431,9 +191,15 @@ def dispatch_current_terminal_turn(
         ("result_digest", "result_digest"),
         ("result_count", "result_count"),
     ):
-        expected = approved_retrieval.result_receipt_digest if key is None else receipt[key]
+        expected = (
+            approved_retrieval.result_receipt_digest
+            if key is None
+            else receipt[key]
+        )
         if context[field] != expected:
-            raise KakaoTerminalRetrievalError("current-turn context is not bound to verified evidence")
+            raise KakaoTerminalRetrievalError(
+                "current-turn context is not bound to verified evidence"
+            )
     return run_conversation_with_approved_retrieval(
         agent,
         user_message,

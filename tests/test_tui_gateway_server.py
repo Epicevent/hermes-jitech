@@ -2186,8 +2186,8 @@ def test_prompt_submit_forwards_only_explicit_kwrag_request(monkeypatch):
 
     normalized = {"query": "who owns the slot?", "corpus": "kakao"}
 
-    def validate(value, require_pins=False):
-        captured["validation"] = (value, require_pins)
+    def validate(value):
+        captured["validation"] = value
         return normalized
 
     monkeypatch.setattr(
@@ -2219,7 +2219,7 @@ def test_prompt_submit_forwards_only_explicit_kwrag_request(monkeypatch):
             }
         )
         assert response["result"]["status"] == "streaming"
-        assert captured["validation"] == (normalized, False)
+        assert captured["validation"] == normalized
         assert captured["run"][3] == normalized
     finally:
         server._sessions.pop("sid", None)
