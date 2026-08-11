@@ -326,7 +326,8 @@ def test_real_embedded_dense_runtime_reaches_verified_hermes_result(
     from kwrag.workspace_dense import rebuild_workspace_dense_index
 
     package = tmp_path / "nas_docs" / "kw" / "package"
-    workspace = tmp_path / "workspace" / ".kwrag" / "dense"
+    workspace_root = tmp_path / "workspace" / ".kwrag"
+    workspace = workspace_root / "dense"
     home = tmp_path / "home"
     package.mkdir(parents=True)
     workspace.mkdir(parents=True)
@@ -389,7 +390,7 @@ def test_real_embedded_dense_runtime_reaches_verified_hermes_result(
         monkeypatch.setattr("kwrag.live_kakao._require_readonly", lambda _path: None)
         rebuild_workspace_dense_index(
             package_root=package,
-            workspace_root=workspace,
+        workspace_root=workspace,
             slot_namespace="oc20",
             gpu=client,
             allow_nonproduction=True,
@@ -415,7 +416,7 @@ def test_real_embedded_dense_runtime_reaches_verified_hermes_result(
         prepared = terminal.prepare_approved_retrieval(
             {"query": "who owns the slot?", "corpus": "kakao"},
             package_root=package,
-            workspace_root=workspace,
+            workspace_root=workspace_root,
             socket_path=tmp_path / "unused.sock",
             slot_namespace="oc20",
         )
@@ -426,7 +427,7 @@ def test_real_embedded_dense_runtime_reaches_verified_hermes_result(
     assert prepared.result_receipt["result_count"] == 1
     assert prepared.results[0]["snippet"] == "the slot owner is atelier"
     operation_receipt = json.loads(
-        (workspace / "receipts" / "operation-receipts.jsonl").read_text(
+        (workspace_root / "receipts" / "operation-receipts.jsonl").read_text(
             encoding="utf-8"
         )
     )
