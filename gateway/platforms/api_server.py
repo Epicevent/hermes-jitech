@@ -390,28 +390,51 @@ def _session_chat_client_message_id(
 
 def _session_chat_kwrag(
     body: Dict[str, Any],
-) -> tuple[Optional[Dict[str, str]], Optional["web.Response"]]:
-    """Read the caller-explicit Kakao retrieval request, if present.
+    user_message: Any = None,
+) -> tuple[Optional[Dict[str, Any]], Optional["web.Response"]]:
+    """Read the product-facing RAG switch and optional caller scope.
 
-    Absence is the normal path and performs no retrieval.  Hermes validates
-    only the caller-owned query/corpus shape here; KWRAG owns the mounted
-    source identity and search implementation.
+    ``rag`` is the current API shape; the legacy ``kwrag`` object remains
+    accepted for existing clients. Retrieval is absent unless the caller
+    explicitly enables it. The original visible user text is passed as the
+    query; Hermes does not invent a query or source policy here.
     """
-    value = body.get("kwrag")
+    value = body.get("rag")
+    legacy = body.get("kwrag")
+    if value is None and legacy is not None:
+        value = legacy
     if value is None:
         return None, None
     if not isinstance(value, dict):
+        code = "invalid_rag" if "rag" in body else "invalid_kwrag"
+        label = "rag" if "rag" in body else "kwrag"
         return None, web.json_response(
-            _openai_error("kwrag must be an object", code="invalid_kwrag"),
+            _openai_error(f"{label} must be an object", code=code),
             status=400,
         )
+    if "rag" in body:
+        enabled = value.get("enabled")
+        if not isinstance(enabled, bool):
+            return None, web.json_response(
+                _openai_error("rag.enabled must be boolean", code="invalid_rag"),
+                status=400,
+            )
+        if not enabled:
+            return None, None
+        request: Dict[str, Any] = {
+            "query": _session_chat_visible_user_text(user_message),
+        }
+        if "scope" in value:
+            request["scope"] = value["scope"]
+        value = request
     try:
         from plugins.kwrag_slot.terminal import validate_explicit_request
 
         return validate_explicit_request(value), None
     except Exception as exc:
+        code = "invalid_rag" if "rag" in body else "invalid_kwrag"
         return None, web.json_response(
-            _openai_error(str(exc), code="invalid_kwrag"),
+            _openai_error(str(exc), code=code),
             status=400,
         )
 
@@ -1613,7 +1636,7 @@ class APIServerAdapter(BasePlatformAdapter):
         system_prompt = body.get("system_message") or body.get("instructions")
         if system_prompt is not None and not isinstance(system_prompt, str):
             return web.json_response(_openai_error("system_message must be a string", code="invalid_system_message"), status=400)
-        kwrag_request, err = _session_chat_kwrag(body)
+        kwrag_request, err = _session_chat_kwrag(body, user_message)
         if err is not None:
             return err
         approved_retrieval = None
@@ -1627,9 +1650,19 @@ class APIServerAdapter(BasePlatformAdapter):
                     lambda: prepare_approved_retrieval(kwrag_request),
                 )
             except Exception as exc:
-                logger.warning("explicit Kakao retrieval was rejected: %s", exc)
+                logger.warning("explicit RAG retrieval was rejected: %s", exc)
+                retrieval_code = (
+                    "kwrag_index_required"
+                    if str(exc) == "index_required"
+                    else "kwrag_unavailable"
+                )
+                retrieval_message = (
+                    "RAG index is required; ask Hermes to build it first"
+                    if str(exc) == "index_required"
+                    else "explicit RAG retrieval was not verified"
+                )
                 return web.json_response(
-                    _openai_error("explicit Kakao retrieval was not verified", code="kwrag_unavailable"),
+                    _openai_error(retrieval_message, code=retrieval_code),
                     status=503,
                 )
         history = self._conversation_history_for_session(session_id)
@@ -1678,7 +1711,7 @@ class APIServerAdapter(BasePlatformAdapter):
         persist_user_message, err = _session_chat_persist_user_message(body)
         if err is not None:
             return err
-        kwrag_request, err = _session_chat_kwrag(body)
+        kwrag_request, err = _session_chat_kwrag(body, user_message)
         if err is not None:
             return err
         loop = asyncio.get_running_loop()
@@ -1692,9 +1725,19 @@ class APIServerAdapter(BasePlatformAdapter):
                     lambda: prepare_approved_retrieval(kwrag_request),
                 )
             except Exception as exc:
-                logger.warning("explicit Kakao retrieval was rejected for stream: %s", exc)
+                logger.warning("explicit RAG retrieval was rejected for stream: %s", exc)
+                retrieval_code = (
+                    "kwrag_index_required"
+                    if str(exc) == "index_required"
+                    else "kwrag_unavailable"
+                )
+                retrieval_message = (
+                    "RAG index is required; ask Hermes to build it first"
+                    if str(exc) == "index_required"
+                    else "explicit RAG retrieval was not verified"
+                )
                 return web.json_response(
-                    _openai_error("explicit Kakao retrieval was not verified", code="kwrag_unavailable"),
+                    _openai_error(retrieval_message, code=retrieval_code),
                     status=503,
                 )
         client_message_id, err = _session_chat_client_message_id(body)
@@ -3615,6 +3658,22 @@ class APIServerAdapter(BasePlatformAdapter):
             provider_receipt = getattr(agent, "last_provider_receipt", None)
             if isinstance(provider_receipt, dict):
                 usage["provider_receipt"] = provider_receipt
+            if approved_retrieval is not None:
+                # Keep the UI-visible linkage content-free. The evidence
+                # snippets remain ephemeral prompt input; only receipt
+                # identities/statuses are returned to the caller.
+                usage["retrieval_receipt"] = {
+                    "result_receipt_digest": approved_retrieval.result_receipt_digest,
+                    "result_receipt_status": approved_retrieval.result_receipt_status,
+                    "consumption_receipt_digest": approved_retrieval.consumption_receipt_digest,
+                    "consumption_receipt_status": approved_retrieval.consumption_receipt_status,
+                    "provider_attempt_outcome_receipt_digest": (
+                        approved_retrieval.provider_attempt_outcome_receipt_digest
+                    ),
+                    "provider_attempt_outcome_status": (
+                        approved_retrieval.provider_attempt_outcome_status
+                    ),
+                }
             # Include the effective session ID in the result so callers
             # (e.g. X-Hermes-Session-Id header) can track compression-
             # triggered session rotations. (#16938)

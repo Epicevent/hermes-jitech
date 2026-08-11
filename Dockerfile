@@ -157,11 +157,11 @@ RUN uv sync --frozen --no-install-project --extra all --extra messaging --extra 
 # KWRAG is an embedded, default-off product component.  Its pure-Python wheel
 # is verified before installation so a product image cannot silently consume a
 # different local artifact.  The component opens no host port. Its explicit
-# Kakao path uses KURE/vector/BGE, but selects no automatic invocation or
-# provider policy.
+# Initial mounted source adapter uses KURE/vector/BGE, but selects no
+# automatic invocation or provider policy.
 COPY vendor/kwrag/kwrag_product_service-0.5.0-py3-none-any.whl /tmp/kwrag_product_service-0.5.0-py3-none-any.whl
 RUN printf '%s  %s\n' \
-        '6ec4457ea3ca6229990280e1bdf8ef086f9047f107d7e636a2526aaffd10f49f' \
+        '3fd0a23b65f0cf98c2cdb56f53346d100794d8bf9666ae72e6c2b6747786d54b' \
         '/tmp/kwrag_product_service-0.5.0-py3-none-any.whl' \
         > /tmp/kwrag_product_service.sha256 && \
     sha256sum -c /tmp/kwrag_product_service.sha256 && \
@@ -170,11 +170,11 @@ RUN printf '%s  %s\n' \
     rm /tmp/kwrag_product_service-0.5.0-py3-none-any.whl
 
 LABEL com.epicevent.hermes.kwrag.schema="hermes-kwrag-product-component/v1" \
-      com.epicevent.hermes.kwrag.component-digest="sha256:6ec4457ea3ca6229990280e1bdf8ef086f9047f107d7e636a2526aaffd10f49f" \
+      com.epicevent.hermes.kwrag.component-digest="sha256:3fd0a23b65f0cf98c2cdb56f53346d100794d8bf9666ae72e6c2b6747786d54b" \
       com.epicevent.hermes.kwrag.contract-digest="sha256:ccf826f0fe6f7edc36b6d5eacdee87277859d2f6dae3a4ea4cab5f51cba183db" \
-      com.epicevent.hermes.kwrag.component-manifest-digest="sha256:675a87393737f97c5e2163f80d0a2ffaddb40772f05e33e31e1ca8f31581e51e" \
-      com.epicevent.hermes.kwrag.source-archive-digest="sha256:11d37c619d58e5a50894b56bd1d9091e6f862b160363155a98af07d59d381d16" \
-      com.epicevent.hermes.kwrag.source-revision="abae51d79ab04de12e5ab242b92425923551ec6a" \
+      com.epicevent.hermes.kwrag.component-manifest-digest="sha256:5e3fc34262e5e4f953689d0e737a8e9467d78ba97e04be3a38f5dda9985bd1c0" \
+      com.epicevent.hermes.kwrag.source-archive-digest="sha256:9d1263e2c21640d1921aaf8f8ae9f610138a463ac499714d5a1668f22c4bbd77" \
+      com.epicevent.hermes.kwrag.source-revision="e608ec56d8b5e0c28945d362dec5f54bb9e85c0b" \
       com.epicevent.hermes.kwrag.transport="in_process" \
       com.epicevent.hermes.kwrag.default-enabled="false" \
       com.epicevent.hermes.kwrag.host-port-count="0" \

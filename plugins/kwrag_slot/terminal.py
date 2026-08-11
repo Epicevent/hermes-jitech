@@ -13,7 +13,7 @@ import os
 import re
 import uuid
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from hermes_constants import get_hermes_home
 from plugins.kwrag_slot.consumer import (
@@ -29,9 +29,10 @@ from plugins.kwrag_slot.prompt_context import run_conversation_with_approved_ret
 
 _MAX_QUERY_CHARACTERS = 4_000
 _MAX_RESULTS = 10
+_MAX_ROUTED_ROOMS = 5
 _MAX_RESULT_CHARACTERS = 20_000
-_DEFAULT_KAKAO_PACKAGE_ROOT = Path("/workspace/nas_docs/kw/package")
-_DEFAULT_WORKSPACE_INDEX_ROOT = Path("/workspace/.kwrag/dense")
+_DEFAULT_SOURCE_ROOT = Path("/workspace/nas_docs")
+_DEFAULT_WORKSPACE_INDEX_ROOT = Path("/workspace/.kwrag")
 _SOCKET_ENV = "JITECH_KWRAG_SHARED_GPU_SOCKET"
 _SLOT_ENV = "JITECH_KWRAG_SLOT_NAMESPACE"
 _SLOT_RE = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
@@ -49,16 +50,146 @@ def _query(value: Any) -> str:
     return value
 
 
-def validate_explicit_request(value: Mapping[str, Any]) -> dict[str, str]:
-    """Accept only the caller decision that actually belongs to Hermes."""
+def _room_ids(value: Any) -> list[str] | None:
+    if value is None:
+        return None
+    if (
+        not isinstance(value, Sequence)
+        or isinstance(value, (str, bytes))
+        or not 1 <= len(value) <= 64
+    ):
+        raise KakaoTerminalRetrievalError("room scope is invalid")
+    normalized: list[str] = []
+    for room in value:
+        if isinstance(room, Mapping):
+            if set(room) != {"source", "roomId"}:
+                raise KakaoTerminalRetrievalError("room scope is invalid")
+            if room.get("source") != "kakao":
+                raise KakaoTerminalRetrievalError(
+                    "requested source adapter is not available in this runtime"
+                )
+            room = room.get("roomId")
+        if isinstance(room, str) and room == room.strip() and room:
+            normalized.append(room)
+    rooms = normalized
+    if len(rooms) != len(value) or any(not room for room in rooms):
+        raise KakaoTerminalRetrievalError("room scope is invalid")
+    if len(set(rooms)) != len(rooms):
+        raise KakaoTerminalRetrievalError("room scope contains duplicates")
+    return rooms
 
-    if not isinstance(value, Mapping) or set(value) != {"query", "corpus"}:
+
+def validate_explicit_request(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate optional user scope without making room selection mandatory.
+
+    ``corpus=kakao`` is retained as a compatibility alias for the old UI's
+    Kakao toggle.  It is a source selector, not a KWRAG room id.
+    """
+
+    if not isinstance(value, Mapping):
         raise KakaoTerminalRetrievalError("kwrag request fields are invalid")
+    if set(value) - {"query", "corpus", "scope", "sources", "rooms"}:
+        raise KakaoTerminalRetrievalError("kwrag request fields are invalid")
+    if "query" not in value:
+        raise KakaoTerminalRetrievalError("query is required")
     query = _query(value["query"])
-    corpus = value["corpus"]
-    if corpus != "kakao":
-        raise KakaoTerminalRetrievalError("corpus must be kakao")
-    return {"query": query, "corpus": corpus}
+    scope = value.get("scope")
+    if scope is not None and not isinstance(scope, Mapping):
+        raise KakaoTerminalRetrievalError("retrieval scope is invalid")
+    if scope is not None and set(scope) - {"sources", "rooms"}:
+        raise KakaoTerminalRetrievalError("retrieval scope fields are invalid")
+    source_values = (
+        scope.get("sources") if scope is not None else value.get("sources")
+    )
+    room_values = scope.get("rooms") if scope is not None else value.get("rooms")
+    legacy_corpus = value.get("corpus")
+    if legacy_corpus is not None:
+        if legacy_corpus != "kakao":
+            raise KakaoTerminalRetrievalError("corpus must be kakao")
+        if source_values is not None and source_values != ["kakao"]:
+            raise KakaoTerminalRetrievalError("source scope conflicts with corpus")
+        source_values = ["kakao"]
+    if source_values is None:
+        # Omitted source means the runtime-visible prepared source set.  The
+        # current compatibility alias below still narrows legacy `corpus=kakao`.
+        sources = None
+    elif (
+        not isinstance(source_values, Sequence)
+        or isinstance(source_values, (str, bytes))
+        or not 1 <= len(source_values) <= 16
+        or any(not isinstance(source, str) or not source.strip() for source in source_values)
+        or len(set(source_values)) != len(source_values)
+    ):
+        raise KakaoTerminalRetrievalError("source scope is invalid")
+    else:
+        sources = [source.strip().lower() for source in source_values]
+    if sources is not None and not sources:
+        raise KakaoTerminalRetrievalError("source scope is empty")
+    rooms = _room_ids(room_values)
+    return {"query": query, "sources": sources, "rooms": rooms}
+
+
+def _available_rooms(runtime: Any) -> list[str]:
+    candidates = [getattr(runtime, "available_rooms", None)]
+    scope = getattr(getattr(runtime, "application", None), "scope", None)
+    if scope is not None:
+        candidates.append(getattr(scope, "available_rooms", None))
+    # ProductRuntime keeps the mounted scope private while the compatibility
+    # API is still settling. This read-only fallback does not select a source
+    # or bypass the mount; it only exposes the rooms the opened runtime already
+    # validated.
+    private_runtime = getattr(runtime, "_runtime", None)
+    private_scope = getattr(private_runtime, "scope", None)
+    if private_scope is not None:
+        candidates.append(getattr(private_scope, "available_rooms", None))
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        rooms = list(candidate)
+        if rooms and all(isinstance(room, str) and room for room in rooms):
+            return sorted(set(rooms))
+    raise KakaoTerminalRetrievalError("mounted Kakao room catalog is unavailable")
+
+
+def _route_rooms(
+    query: str,
+    requested_rooms: list[str] | None,
+    runtime: Any,
+) -> tuple[list[str], str]:
+    available = _available_rooms(runtime)
+    available_set = set(available)
+    if requested_rooms is not None:
+        if set(requested_rooms) - available_set:
+            raise KakaoTerminalRetrievalError("requested Kakao room is outside the mount")
+        return requested_rooms, "explicit_room_scope"
+
+    mentioned = [
+        room
+        for room in available
+        if re.search(rf"(?<![A-Za-z0-9_-]){re.escape(room)}(?![A-Za-z0-9_-])", query, re.I)
+    ]
+    if len(mentioned) > 1:
+        raise KakaoTerminalRetrievalError(
+            "Kakao room mention is ambiguous; choose one room"
+        )
+    if mentioned:
+        return mentioned, "internal_room_id_hint"
+
+    # A runtime may provide a measured atlas router.  The adapter treats it as
+    # an optional capability and still verifies its result against the live
+    # mounted room catalog.
+    route = getattr(runtime, "route_rooms", None)
+    if callable(route):
+        routed = list(route(query, limit=3))
+        if routed and len(routed) <= _MAX_ROUTED_ROOMS and all(
+            isinstance(room, str) and room in available_set for room in routed
+        ):
+            return list(dict.fromkeys(routed)), "internal_room_router"
+
+    # Current 0.5 runtime has no room-atlas API yet.  Searching the complete
+    # mounted room set is the safe compatibility behavior until that API is
+    # shipped; it never guesses a single room.
+    return available, "all_mounted_rooms"
 
 
 def _absolute_path(
@@ -112,9 +243,9 @@ def _runtime_paths(
     return (
         _absolute_path(
             package_root,
-            env="JITECH_KWRAG_KAKAO_PACKAGE_ROOT",
-            default=_DEFAULT_KAKAO_PACKAGE_ROOT,
-            label="Kakao source package",
+            env="JITECH_KWRAG_SOURCE_ROOT",
+            default=_DEFAULT_SOURCE_ROOT,
+            label="slot source mount",
         ),
         _absolute_path(
             workspace_root,
@@ -133,6 +264,14 @@ def _runtime_paths(
     )
 
 
+def _source_package_root(source_mount: Path) -> Path:
+    """Resolve `/workspace/nas_docs` to the mounted Kakao package leaf."""
+
+    if (source_mount / "membership.json").is_file():
+        return source_mount
+    return source_mount / "kw" / "package"
+
+
 def prepare_approved_retrieval(
     request: Mapping[str, Any],
     *,
@@ -144,6 +283,10 @@ def prepare_approved_retrieval(
     """Run one explicit dense/vector/rerank search and verify its result."""
 
     validated = validate_explicit_request(request)
+    if validated["sources"] not in (None, ["kakao"]):
+        raise KakaoTerminalRetrievalError(
+            "requested source adapter is not available in this runtime"
+        )
     producer_request = {
         "schema_version": "kwrag-slot-search-request-v1",
         "query": validated["query"],
@@ -155,11 +298,28 @@ def prepare_approved_retrieval(
         "corpus": None,
     }
     try:
-        from kwrag.product_runtime import open_kakao_product_runtime
+        from kwrag import product_runtime
     except ImportError as exc:
         raise KakaoTerminalRetrievalError(
             "product-native KWRAG runtime is unavailable"
         ) from exc
+    open_runtime = getattr(product_runtime, "open_product_runtime", None)
+    if not callable(open_runtime):
+        raise KakaoTerminalRetrievalError(
+            "product-native KWRAG search API is unavailable"
+        )
+    status_reader = getattr(product_runtime, "index_status", None)
+    if callable(status_reader):
+        try:
+            status = status_reader()
+        except Exception as exc:
+            raise KakaoTerminalRetrievalError("rag_backend_unavailable") from exc
+        if isinstance(status, Mapping):
+            status_name = status.get("status")
+            if status_name == "unbuilt":
+                raise KakaoTerminalRetrievalError("index_required")
+            if status_name in {"unavailable", "invalid"}:
+                raise KakaoTerminalRetrievalError("rag_backend_unavailable")
 
     package, workspace, socket, slot, root = _runtime_paths(
         package_root=package_root,
@@ -168,15 +328,36 @@ def prepare_approved_retrieval(
         slot_namespace=slot_namespace,
     )
     try:
-        with open_kakao_product_runtime(
-            package_root=package,
-            workspace_root=workspace,
-            slot_namespace=slot,
-            socket_path=socket,
-            receipt_path=root / "operation-receipts.jsonl",
-            gpu_receipt_path=root / "gpu-receipts.jsonl",
-        ) as runtime:
+        runtime_kwargs = {
+            "workspace_root": workspace,
+            "slot_namespace": slot,
+            "socket_path": socket,
+            "receipt_path": root / "operation-receipts.jsonl",
+            "gpu_receipt_path": root / "gpu-receipts.jsonl",
+        }
+        runtime_kwargs["source_root"] = _source_package_root(package)
+        with open_runtime(**runtime_kwargs) as runtime:
+            rooms, route_strategy = _route_rooms(
+                validated["query"], validated["rooms"], runtime
+            )
+            if len(rooms) == 1:
+                producer_request["corpus"] = rooms[0]
+            else:
+                if validated["rooms"] is not None:
+                    raise KakaoTerminalRetrievalError(
+                        "multi-room scope is not supported by the opened product runtime"
+                    )
+                # The current slot API treats an omitted corpus as the whole
+                # validated mounted room set. Never invent a `corpora` field
+                # that an older runtime would reject or silently broaden.
+                producer_request.pop("corpus", None)
             identity = runtime.identity
+            active_index_id = getattr(identity, "active_index_id", None)
+            index_manifest = getattr(identity, "index_manifest", active_index_id)
+            if not isinstance(index_manifest, str) or not re.fullmatch(
+                r"sha256:[0-9a-f]{64}", index_manifest
+            ):
+                index_manifest = None
             manifest = load_component_manifest()
             binding = HermesSlotRetrievalBinding.from_mapping({
                 "schema_version": "hermes-kwrag-slot-binding-v1",
@@ -186,7 +367,7 @@ def prepare_approved_retrieval(
                 # Bind the release currently opened by the slot runtime.  The
                 # browser request carries only query/corpus; no generation or
                 # manifest pin is accepted from the caller.
-                "current_index_manifest": identity.index_manifest,
+                "current_index_manifest": index_manifest,
                 "current_pipeline_fingerprint": identity.pipeline_fingerprint,
                 "max_result_characters": _MAX_RESULT_CHARACTERS,
             })
@@ -194,46 +375,116 @@ def prepare_approved_retrieval(
                 binding,
                 runtime,
                 FileConsumptionReceiptSink(root / "result-receipts.jsonl"),
-            ).search(producer_request)
+            ).search(producer_request, routing_strategy=route_strategy)
     except KakaoTerminalRetrievalError:
         raise
     except Exception as exc:
         raise KakaoTerminalRetrievalError(
-            "Kakao product retrieval was not verified"
+            "product-native RAG retrieval was not verified"
         ) from exc
 
 
-def rebuild_kakao_index(
+def _validate_index_scope(value: Any, label: str) -> Any:
+    if value is None:
+        return None
+    if not isinstance(value, (Mapping, Sequence)) or isinstance(value, (str, bytes)):
+        raise KakaoTerminalRetrievalError(f"{label} is invalid")
+    return value
+
+
+def _native_index_scope(value: Any) -> str | list[str] | None:
+    """Map the product-facing scope to the current source API.
+
+    The current server package indexes sources, while room narrowing belongs
+    to the subsequent search request.  Do not pass the richer UI mapping to a
+    narrower runtime API or silently broaden an explicitly selected source.
+    """
+
+    if value is None:
+        return None
+    if isinstance(value, Mapping):
+        sources = value.get("sources")
+        rooms = value.get("rooms")
+        if sources is None and rooms is not None:
+            sources = [room.get("source") for room in rooms]
+        if not isinstance(sources, Sequence) or isinstance(sources, (str, bytes)):
+            raise KakaoTerminalRetrievalError("index scope sources are invalid")
+        normalized = list(sources)
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        normalized = list(value)
+    else:
+        raise KakaoTerminalRetrievalError("index scope is invalid")
+    if not normalized or any(not isinstance(source, str) for source in normalized):
+        raise KakaoTerminalRetrievalError("index scope sources are invalid")
+    normalized = [source.strip().lower() for source in normalized]
+    if any(source != "kakao" for source in normalized):
+        raise KakaoTerminalRetrievalError(
+            "requested source adapter is not available in this runtime"
+        )
+    return "kakao" if len(set(normalized)) == 1 else normalized
+
+
+def build_index(
     *,
-    package_root: Path | None = None,
+    scope: Mapping[str, Any] | None = None,
+    exclude: Sequence[Mapping[str, Any]] | None = None,
+    rebuild: bool = False,
+    source_root: Path | None = None,
     workspace_root: Path | None = None,
     socket_path: Path | None = None,
     slot_namespace: str | None = None,
 ) -> dict[str, Any]:
-    """Explicitly rebuild the slot's disposable Workspace index."""
+    """Build the disposable slot index through the product-native API."""
 
+    if not isinstance(rebuild, bool):
+        raise KakaoTerminalRetrievalError("rebuild must be boolean")
+    scope = _native_index_scope(_validate_index_scope(scope, "index scope"))
+    exclude = _validate_index_scope(exclude, "index exclusions")
+    if exclude:
+        raise KakaoTerminalRetrievalError(
+            "index exclusions are not supported by the current product runtime"
+        )
     try:
-        from kwrag.product_runtime import rebuild_kakao_product_index
+        from kwrag import product_runtime
     except ImportError as exc:
         raise KakaoTerminalRetrievalError(
             "product-native KWRAG runtime is unavailable"
         ) from exc
-    package, workspace, socket, slot, root = _runtime_paths(
-        package_root=package_root,
-        workspace_root=workspace_root,
-        socket_path=socket_path,
-        slot_namespace=slot_namespace,
-    )
-    try:
-        return rebuild_kakao_product_index(
-            package_root=package,
-            workspace_root=workspace,
-            slot_namespace=slot,
-            socket_path=socket,
-            gpu_receipt_path=root / "gpu-receipts.jsonl",
+
+    builder = getattr(product_runtime, "build_index", None)
+    if not callable(builder):
+        raise KakaoTerminalRetrievalError(
+            "product-native index build API is unavailable"
         )
+    try:
+        # The product-native server API owns the runtime mount, Workspace,
+        # slot identity and GPU socket. Hermes supplies only bounded scope.
+        return builder(scope=scope, exclude=None, rebuild=rebuild)
     except Exception as exc:
-        raise KakaoTerminalRetrievalError("Kakao index rebuild failed") from exc
+        raise KakaoTerminalRetrievalError("KWRAG index build failed") from exc
+
+
+def index_status(
+    *,
+    source_root: Path | None = None,
+    workspace_root: Path | None = None,
+    slot_namespace: str | None = None,
+) -> dict[str, Any]:
+    """Return content-free status for the slot's disposable active index."""
+
+    try:
+        from kwrag import product_runtime
+    except ImportError:
+        product_runtime = None
+    status_fn = getattr(product_runtime, "index_status", None) if product_runtime else None
+    if not callable(status_fn):
+        raise KakaoTerminalRetrievalError(
+            "product-native index status API is unavailable"
+        )
+    try:
+        return status_fn()
+    except Exception as exc:
+        raise KakaoTerminalRetrievalError("KWRAG index status failed") from exc
 
 
 def dispatch_current_terminal_turn(

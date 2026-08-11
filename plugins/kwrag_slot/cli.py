@@ -18,7 +18,7 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     status.add_argument("--json", action="store_true")
     index = subparsers.add_parser(
         "index",
-        help="Explicitly rebuild the Kakao dense index in this slot's Workspace",
+        help="Explicitly build the disposable RAG index in this slot's Workspace",
     )
     index.add_argument("--json", action="store_true")
 
@@ -45,9 +45,9 @@ def kwrag_slot_command(args: argparse.Namespace) -> int:
     if args.kwrag_slot_command == "status":
         result = _status()
     elif args.kwrag_slot_command == "index":
-        from plugins.kwrag_slot.terminal import rebuild_kakao_index
+        from plugins.kwrag_slot.terminal import build_index
 
-        result = rebuild_kakao_index()
+        result = build_index(rebuild=True)
     else:
         raise RuntimeError("unsupported KWRAG command")
     if args.json:

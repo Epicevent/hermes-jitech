@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import socketserver
 import sys
 import types
 from types import SimpleNamespace
@@ -24,14 +25,17 @@ ROOT = Path(__file__).resolve().parents[2]
 WHEEL = ROOT / "vendor" / "kwrag" / "kwrag_product_service-0.5.0-py3-none-any.whl"
 
 
-def _request() -> dict[str, str]:
+def _request() -> dict[str, object]:
     return {"query": "who owns the slot?", "corpus": "kakao"}
 
 
 def test_explicit_request_owns_only_query_and_product_corpus() -> None:
-    assert terminal.validate_explicit_request(_request()) == _request()
+    assert terminal.validate_explicit_request(_request()) == {
+        "query": _request()["query"],
+        "sources": ["kakao"],
+        "rooms": None,
+    }
     invalid = (
-        {"query": "question"},
         {"query": "question", "corpus": "groupware"},
         {**_request(), "expected_source_generation": "sha256:" + "1" * 64},
         {**_request(), "expected_index_manifest": "sha256:" + "2" * 64},
@@ -39,12 +43,26 @@ def test_explicit_request_owns_only_query_and_product_corpus() -> None:
     for value in invalid:
         with pytest.raises(terminal.KakaoTerminalRetrievalError):
             terminal.validate_explicit_request(value)
+    assert terminal.validate_explicit_request({"query": "all sources"}) == {
+        "query": "all sources",
+        "sources": None,
+        "rooms": None,
+    }
+    assert terminal.validate_explicit_request(
+        {"query": "one source", "scope": {"sources": ["kakao"]}}
+    ) == {
+        "query": "one source",
+        "sources": ["kakao"],
+        "rooms": None,
+    }
 
 
 def test_query_is_not_trimmed_or_generated() -> None:
     for query in (" question", "question ", "", 7):
         with pytest.raises(terminal.KakaoTerminalRetrievalError):
             terminal.validate_explicit_request({"query": query, "corpus": "kakao"})
+    with pytest.raises(terminal.KakaoTerminalRetrievalError, match="query is required"):
+        terminal.validate_explicit_request({"corpus": "kakao"})
 
 
 def _install_runtime_module(monkeypatch, **members) -> None:
@@ -75,6 +93,9 @@ def test_prepare_uses_dense_product_runtime_without_ops_or_generation_contracts(
     class _Runtime:
         def __init__(self) -> None:
             self.identity = identity
+            self.application = SimpleNamespace(
+                scope=SimpleNamespace(available_rooms=["room-a", "room-b"])
+            )
 
         def __enter__(self):
             return self
@@ -88,7 +109,7 @@ def test_prepare_uses_dense_product_runtime_without_ops_or_generation_contracts(
 
     _install_runtime_module(
         monkeypatch,
-        open_kakao_product_runtime=open_runtime,
+        open_product_runtime=open_runtime,
     )
     monkeypatch.setattr(terminal, "get_hermes_home", lambda: home)
     monkeypatch.setattr(
@@ -108,8 +129,9 @@ def test_prepare_uses_dense_product_runtime_without_ops_or_generation_contracts(
             captured["consumer_runtime"] = runtime
             captured["sink"] = sink
 
-        def search(self, request):
+        def search(self, request, **kwargs):
             captured["producer_request"] = request
+            captured["routing_strategy"] = kwargs.get("routing_strategy")
             return result
 
     monkeypatch.setattr(terminal, "HermesSlotRetrievalConsumer", _Consumer)
@@ -125,7 +147,7 @@ def test_prepare_uses_dense_product_runtime_without_ops_or_generation_contracts(
 
     assert prepared is result
     assert captured["runtime"] == {
-        "package_root": package_root,
+        "source_root": package_root,
         "workspace_root": workspace_root,
         "slot_namespace": "oc20",
         "socket_path": socket_path,
@@ -141,10 +163,13 @@ def test_prepare_uses_dense_product_runtime_without_ops_or_generation_contracts(
         "run_id",
         "attempt",
         "max_results",
-        "corpus",
     }
     assert producer_request["query"] == _request()["query"]
-    assert producer_request["corpus"] is None
+    # The opened e608 product runtime has one `corpus` field and defines
+    # omission as the complete mounted room set.  Hermes must not invent a
+    # `corpora` field that the runtime would reject or reinterpret.
+    assert "corpus" not in producer_request
+    assert captured["routing_strategy"] == "all_mounted_rooms"
     assert "expected_source_generation" not in producer_request
     assert "expected_index_manifest" not in producer_request
     binding = captured["binding"]
@@ -153,36 +178,101 @@ def test_prepare_uses_dense_product_runtime_without_ops_or_generation_contracts(
     assert "binding_path" not in captured["runtime"]
 
 
-def test_explicit_index_rebuild_uses_the_same_product_paths(
+def test_unique_room_id_in_question_becomes_hard_scope() -> None:
+    runtime = SimpleNamespace(
+        application=SimpleNamespace(
+            scope=SimpleNamespace(available_rooms=["room-a", "room-b"])
+        )
+    )
+
+
+def test_explicit_single_room_is_passed_as_the_runtime_corpus() -> None:
+    runtime = SimpleNamespace(
+        application=SimpleNamespace(
+            scope=SimpleNamespace(available_rooms=["room-a", "room-b"])
+        )
+    )
+    assert terminal._route_rooms("ordinary question", ["room-b"], runtime) == (
+        ["room-b"],
+        "explicit_room_scope",
+    )
+
+
+def test_ambiguous_room_id_mentions_fail_closed_before_search() -> None:
+    runtime = SimpleNamespace(
+        application=SimpleNamespace(
+            scope=SimpleNamespace(available_rooms=["room-a", "room-b"])
+        )
+    )
+    with pytest.raises(terminal.KakaoTerminalRetrievalError, match="ambiguous"):
+        terminal._route_rooms("compare room-a with room-b", None, runtime)
+    assert terminal._route_rooms("what happened in room-a?", None, runtime) == (
+        ["room-a"],
+        "internal_room_id_hint",
+    )
+
+
+def test_agent_index_build_uses_product_native_scope_api(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     home = tmp_path / "home"
     home.mkdir()
     captured = {}
 
-    def rebuild(**kwargs):
+    def build_index(**kwargs):
         captured.update(kwargs)
-        return {"activation": {"status": "active"}}
+        return {
+            "status": "active",
+            "build_id": "build-1",
+            "indexed_source_count": 2,
+            "skipped_source_count": 0,
+        }
 
-    _install_runtime_module(
-        monkeypatch,
-        rebuild_kakao_product_index=rebuild,
-    )
+    _install_runtime_module(monkeypatch, build_index=build_index)
     monkeypatch.setattr(terminal, "get_hermes_home", lambda: home)
-    result = terminal.rebuild_kakao_index(
-        package_root=tmp_path / "package",
-        workspace_root=tmp_path / "index",
+    result = terminal.build_index(
+        scope={"sources": ["kakao"]},
+        rebuild=True,
+        source_root=tmp_path / "nas_docs",
+        workspace_root=tmp_path / "workspace" / ".kwrag",
         socket_path=tmp_path / "gpu.sock",
         slot_namespace="oc20",
     )
-    assert result["activation"]["status"] == "active"
+    assert result["status"] == "active"
     assert captured == {
-        "package_root": tmp_path / "package",
-        "workspace_root": tmp_path / "index",
-        "slot_namespace": "oc20",
-        "socket_path": tmp_path / "gpu.sock",
-        "gpu_receipt_path": home / "kwrag" / "gpu-receipts.jsonl",
+        "scope": "kakao",
+        "exclude": None,
+        "rebuild": True,
     }
+    with pytest.raises(terminal.KakaoTerminalRetrievalError, match="exclusions"):
+        terminal.build_index(
+            scope={"sources": ["kakao"]},
+            exclude=[{"source": "kakao", "pattern": "tmp/*"}],
+        )
+
+
+def test_missing_active_index_fails_before_runtime_open(tmp_path, monkeypatch) -> None:
+    opened = False
+
+    def open_runtime(**_kwargs):
+        nonlocal opened
+        opened = True
+        raise AssertionError("runtime must not open without an active index")
+
+    _install_runtime_module(
+        monkeypatch,
+        index_status=lambda: {"status": "unbuilt"},
+        open_product_runtime=open_runtime,
+    )
+    with pytest.raises(terminal.KakaoTerminalRetrievalError, match="index_required"):
+        terminal.prepare_approved_retrieval(
+            _request(),
+            package_root=tmp_path / "nas_docs",
+            workspace_root=tmp_path / "workspace",
+            socket_path=tmp_path / "gpu.sock",
+            slot_namespace="oc20",
+        )
+    assert opened is False
 
 
 def test_dispatch_uses_existing_consumption_and_provider_seam(
@@ -208,6 +298,10 @@ def test_dispatch_uses_existing_consumption_and_provider_seam(
     assert called["kwargs"]["task_id"] == "session-1"
 
 
+@pytest.mark.skipif(
+    not hasattr(socketserver, "UnixStreamServer"),
+    reason="embedded GPU transport integration requires POSIX UnixStreamServer",
+)
 def test_real_embedded_dense_runtime_reaches_verified_hermes_result(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -222,7 +316,7 @@ def test_real_embedded_dense_runtime_reaches_verified_hermes_result(
         if name == "kwrag" or name.startswith("kwrag."):
             sys.modules.pop(name, None)
 
-    from kwrag.product_runtime import open_kakao_product_runtime
+    from kwrag.product_runtime import open_product_runtime
     from kwrag.shared_gpu_core import CallerIdentity, SharedGpuCore, SharedGpuCoreConfig
     from kwrag.shared_gpu_models import NonProductionDeterministicBackend
     from kwrag.shared_gpu_transport import (
@@ -302,7 +396,9 @@ def test_real_embedded_dense_runtime_reaches_verified_hermes_result(
         )
 
         def _open_test_runtime(**kwargs):
-            return open_kakao_product_runtime(
+            if "source_root" in kwargs:
+                kwargs["package_root"] = kwargs.pop("source_root")
+            return open_product_runtime(
                 **kwargs,
                 _allow_nonproduction_release=True,
             )
@@ -311,7 +407,7 @@ def test_real_embedded_dense_runtime_reaches_verified_hermes_result(
             "kwrag.product_runtime._gpu_client", lambda **_kwargs: client
         )
         monkeypatch.setattr(
-            "kwrag.product_runtime.open_kakao_product_runtime",
+            "kwrag.product_runtime.open_product_runtime",
             _open_test_runtime,
         )
         monkeypatch.setattr(terminal, "get_hermes_home", lambda: home)
