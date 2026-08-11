@@ -396,8 +396,6 @@ def test_real_embedded_dense_runtime_reaches_verified_hermes_result(
         )
 
         def _open_test_runtime(**kwargs):
-            if "source_root" in kwargs:
-                kwargs["package_root"] = kwargs.pop("source_root")
             return open_product_runtime(
                 **kwargs,
                 _allow_nonproduction_release=True,
