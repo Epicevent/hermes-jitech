@@ -314,11 +314,23 @@ def prepare_approved_retrieval(
             "product-native KWRAG search API is unavailable"
         )
     status_reader = getattr(product_runtime, "index_status", None)
+    # The production helper owns its default mount.  Tests and embedding
+    # callers may provide an explicit runtime root, in which case the
+    # context-free status function can inspect `/workspace/nas_docs` before
+    # the supplied root is opened. A status failure is therefore advisory
+    # until the explicitly bound runtime is opened; a reported unbuilt or
+    # invalid state remains a hard failure.
+    explicit_runtime_paths = any(
+        value is not None
+        for value in (package_root, workspace_root, socket_path, slot_namespace)
+    )
     if callable(status_reader):
         try:
             status = status_reader()
         except Exception as exc:
-            raise KakaoTerminalRetrievalError("rag_backend_unavailable") from exc
+            if not explicit_runtime_paths:
+                raise KakaoTerminalRetrievalError("rag_backend_unavailable") from exc
+            status = None
         if isinstance(status, Mapping):
             status_name = status.get("status")
             if status_name == "unbuilt":

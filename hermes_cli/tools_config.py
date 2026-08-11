@@ -1285,13 +1285,6 @@ def _get_platform_tools(
         known_map = config.get("known_plugin_toolsets", {})
         known_for_platform = set(known_map.get(platform, []))
         for pts in plugin_ts_keys:
-            # KWRAG is a product-native fixed tool surface. With an explicit
-            # platform toolset list, absence means the operator intentionally
-            # disabled it; it should not be re-added by the generic
-            # "unknown plugin defaults to enabled" rule. When no explicit
-            # list exists, the default platform still exposes the tools.
-            if pts == "kwrag" and platform in platform_toolsets and pts not in toolset_names:
-                continue
             if pts in toolset_names:
                 # Explicitly listed in config — enabled
                 enabled_toolsets.add(pts)
