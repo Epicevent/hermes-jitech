@@ -3346,7 +3346,19 @@ def _(rid, params: dict) -> dict:
         try:
             from plugins.kwrag_slot.terminal import validate_explicit_request
 
-            kwrag_request = validate_explicit_request(kwrag_request)
+            raw_kwrag_request = kwrag_request
+            normalized_kwrag_request = validate_explicit_request(raw_kwrag_request)
+            # Keep the legacy `corpus=kakao` wire shape for the TUI gateway.
+            # The product-native API gateway uses the generic sources/rooms
+            # projection, but existing TUI callers and their dispatch seam
+            # still consume the compatibility alias.
+            if "corpus" in raw_kwrag_request:
+                kwrag_request = {
+                    "query": normalized_kwrag_request["query"],
+                    "corpus": raw_kwrag_request["corpus"],
+                }
+            else:
+                kwrag_request = normalized_kwrag_request
         except Exception as exc:
             return _err(rid, 4002, f"invalid kwrag request: {exc}")
     session, err = _sess_nowait(params, rid)

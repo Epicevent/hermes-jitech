@@ -451,12 +451,12 @@ def _actual_anthropic_agent(session_id: str, *, streaming: bool):
     return agent, old_client
 
 
-def test_plugin_registers_only_operator_cli() -> None:
+def test_plugin_registers_bounded_index_tools_and_operator_cli() -> None:
     manager = PluginManager()
     ctx = PluginContext(PluginManifest(name="kwrag_slot"), manager)
     register(ctx)
     assert set(manager._cli_commands) == {"kwrag-slot"}
-    assert manager._plugin_tool_names == set()
+    assert manager._plugin_tool_names == {"kwrag_index_build", "kwrag_index_status"}
     assert manager._hooks == {}
 
 

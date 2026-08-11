@@ -48,6 +48,9 @@ _HERMES_CORE_TOOLS = [
     "text_to_speech",
     # Planning & memory
     "todo", "memory",
+    # Explicit slot-local KWRAG indexing/status tools.  Retrieval itself is
+    # still opt-in per turn; exposing these tools does not enable RAG.
+    "kwrag_index_build", "kwrag_index_status",
     # Session history search
     "session_search",
     # Clarifying questions
@@ -383,6 +386,10 @@ TOOLSETS = {
             "browser_vision", "browser_console", "browser_cdp", "browser_dialog",
             # Planning & memory
             "todo", "memory",
+            # Explicit slot-local RAG index controls. Retrieval remains
+            # caller-enabled; these tools are only for an explicit index
+            # build/status request from the agent conversation.
+            "kwrag_index_build", "kwrag_index_status",
             # Session history search
             "session_search",
             # Code execution + delegation

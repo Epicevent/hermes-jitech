@@ -1056,8 +1056,20 @@ class HermesSlotRetrievalBinding:
                 enabled=True,
                 component_digest=component_digest,
                 runtime_binding_digest=_digest(runtime_digest, "runtime binding digest"),
-                current_index_manifest=_digest(manifest_digest, "index manifest digest"),
-                current_pipeline_fingerprint=_digest(pipeline_digest, "pipeline fingerprint"),
+                # These are observational fields when supplied by a legacy
+                # runtime. The product-native runtime may expose an opaque
+                # active build id instead of a SHA-256 manifest; it is bound
+                # by the response/receipt, never used as caller admission.
+                current_index_manifest=(
+                    _digest(manifest_digest, "index manifest digest")
+                    if manifest_digest is not None
+                    else None
+                ),
+                current_pipeline_fingerprint=(
+                    _digest(pipeline_digest, "pipeline fingerprint")
+                    if pipeline_digest is not None
+                    else None
+                ),
                 max_result_characters=max_chars,
             )
         if any(value is not None for value in (runtime_digest, manifest_digest, pipeline_digest)):
@@ -1261,6 +1273,8 @@ class HermesSlotRetrievalResult:
             "result_digest": verified_receipt["result_digest"],
             "operation_receipt_digest": verified_receipt["operation_receipt_digest"],
             "result_receipt_digest": self.result_receipt_digest,
+            "routing_strategy": verified_receipt.get("routing_strategy", "unknown"),
+            "routing_scope_digest": verified_receipt.get("routing_scope_digest"),
         }
         receipt_digest = "sha256:" + hashlib.sha256(canonical_json_bytes(receipt)).hexdigest()
         if self._receipt_sink is None:
@@ -1431,7 +1445,12 @@ class HermesSlotRetrievalConsumer:
         self._runtime = runtime
         self._receipt_sink = receipt_sink
 
-    def search(self, request: Mapping[str, Any]) -> HermesSlotRetrievalResult:
+    def search(
+        self,
+        request: Mapping[str, Any],
+        *,
+        routing_strategy: str = "unknown",
+    ) -> HermesSlotRetrievalResult:
         if not self._binding.enabled or self._runtime is None or self._receipt_sink is None:
             raise HermesSlotRetrievalError("Hermes slot retrieval is disabled")
         receipt_preflight = getattr(
@@ -1449,17 +1468,23 @@ class HermesSlotRetrievalConsumer:
             from kwrag.slot_consumer import verify_slot_search_exchange
         except ImportError as exc:
             raise HermesSlotRetrievalError("embedded KWRAG component is unavailable") from exc
-        active_index_manifest = self._binding.current_index_manifest
-        active_pipeline_fingerprint = self._binding.current_pipeline_fingerprint
         verification_kwargs = {
-            # ``slot_consumer`` keeps these parameter names for its strict
-            # exchange validator.  The values here are sampled from the
-            # already-open active Workspace runtime, never supplied by the
-            # browser and never used as a caller admission pin.
-            "expected_index_manifest": active_index_manifest,
-            "expected_pipeline_fingerprint": active_pipeline_fingerprint,
+            # The active index/build identity is returned by the runtime and
+            # bound into the content-free receipt. It is not a browser-supplied
+            # generation or manifest admission pin.
             "max_result_characters": self._binding.max_result_characters,
         }
+        # The embedded verifier validates the release actually opened for
+        # this turn. These values are observed from the runtime binding, never
+        # accepted from the browser as admission pins.
+        if self._binding.current_index_manifest is not None:
+            verification_kwargs["expected_index_manifest"] = (
+                self._binding.current_index_manifest
+            )
+        if self._binding.current_pipeline_fingerprint is not None:
+            verification_kwargs["expected_pipeline_fingerprint"] = (
+                self._binding.current_pipeline_fingerprint
+            )
         exchange = self._runtime.search_exchange(dict(request))
         verified = verify_slot_search_exchange(
             request,
@@ -1467,6 +1492,17 @@ class HermesSlotRetrievalConsumer:
             exchange.operation_receipt,
             **verification_kwargs,
         )
+        selected_rooms = request.get("corpora")
+        if selected_rooms is None:
+            selected_rooms = request.get("corpus")
+        routing_scope_digest = "sha256:" + hashlib.sha256(
+            canonical_json_bytes(
+                {
+                    "sources": request.get("sources"),
+                    "rooms": selected_rooms,
+                }
+            )
+        ).hexdigest()
         receipt = {
             "schema_version": "hermes-kwrag-result-receipt-v1",
             "consumer_family": "hermes",
@@ -1484,6 +1520,8 @@ class HermesSlotRetrievalConsumer:
             "operation_receipt_digest": verified.operation_receipt_digest,
             "result_count": verified.result_count,
             "result_characters": verified.result_characters,
+            "routing_strategy": routing_strategy,
+            "routing_scope_digest": routing_scope_digest,
         }
         receipt_bytes = canonical_json_bytes(receipt)
         receipt_digest = "sha256:" + hashlib.sha256(receipt_bytes).hexdigest()
