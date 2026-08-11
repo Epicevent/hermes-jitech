@@ -1285,6 +1285,17 @@ def _get_platform_tools(
         known_map = config.get("known_plugin_toolsets", {})
         known_for_platform = set(known_map.get(platform, []))
         for pts in plugin_ts_keys:
+            # A saved configurable selection is authoritative.  The product
+            # native KWRAG tools remain part of the default composite (so the
+            # normal API/CLI surface exposes them), but an operator who saved
+            # a concrete tool list must be able to omit them explicitly.
+            if (
+                pts == "kwrag"
+                and platform in platform_toolsets
+                and has_explicit_config
+                and pts not in toolset_names
+            ):
+                continue
             if pts in toolset_names:
                 # Explicitly listed in config — enabled
                 enabled_toolsets.add(pts)
