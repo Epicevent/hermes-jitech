@@ -269,7 +269,12 @@ def _source_package_root(source_mount: Path) -> Path:
 
     if (source_mount / "membership.json").is_file():
         return source_mount
-    return source_mount / "kw" / "package"
+    nested = source_mount / "kw" / "package"
+    if (nested / "membership.json").is_file():
+        return nested
+    # Keep an explicit test/integration mount root intact when the runtime
+    # itself owns the source-layout validation. Never invent a missing leaf.
+    return source_mount
 
 
 def prepare_approved_retrieval(

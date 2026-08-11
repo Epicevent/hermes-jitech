@@ -1474,6 +1474,17 @@ class HermesSlotRetrievalConsumer:
             # generation or manifest admission pin.
             "max_result_characters": self._binding.max_result_characters,
         }
+        # The embedded verifier validates the release actually opened for
+        # this turn. These values are observed from the runtime binding, never
+        # accepted from the browser as admission pins.
+        if self._binding.current_index_manifest is not None:
+            verification_kwargs["expected_index_manifest"] = (
+                self._binding.current_index_manifest
+            )
+        if self._binding.current_pipeline_fingerprint is not None:
+            verification_kwargs["expected_pipeline_fingerprint"] = (
+                self._binding.current_pipeline_fingerprint
+            )
         exchange = self._runtime.search_exchange(dict(request))
         verified = verify_slot_search_exchange(
             request,

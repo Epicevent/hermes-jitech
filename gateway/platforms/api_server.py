@@ -430,7 +430,14 @@ def _session_chat_kwrag(
     try:
         from plugins.kwrag_slot.terminal import validate_explicit_request
 
-        return validate_explicit_request(value), None
+        normalized = validate_explicit_request(value)
+        # Preserve the legacy kwrag.corpus request shape for existing session
+        # clients. The generic `rag` path uses the normalized source/room
+        # shape; this compatibility projection does not alter retrieval
+        # semantics and keeps older callers byte-for-byte stable.
+        if "rag" not in body and "corpus" in value:
+            return {"query": normalized["query"], "corpus": value["corpus"]}, None
+        return normalized, None
     except Exception as exc:
         code = "invalid_rag" if "rag" in body else "invalid_kwrag"
         return None, web.json_response(
