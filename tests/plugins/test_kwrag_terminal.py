@@ -151,8 +151,8 @@ def test_prepare_uses_dense_product_runtime_without_ops_or_generation_contracts(
         "workspace_root": workspace_root,
         "slot_namespace": "oc20",
         "socket_path": socket_path,
-        "receipt_path": home / "kwrag" / "operation-receipts.jsonl",
-        "gpu_receipt_path": home / "kwrag" / "gpu-receipts.jsonl",
+        "receipt_path": workspace_root / "receipts" / "operation-receipts.jsonl",
+        "gpu_receipt_path": workspace_root / "receipts" / "gpu-receipts.jsonl",
     }
     producer_request = captured["producer_request"]
     assert set(producer_request) == {
@@ -426,7 +426,9 @@ def test_real_embedded_dense_runtime_reaches_verified_hermes_result(
     assert prepared.result_receipt["result_count"] == 1
     assert prepared.results[0]["snippet"] == "the slot owner is atelier"
     operation_receipt = json.loads(
-        (home / "kwrag" / "operation-receipts.jsonl").read_text(encoding="utf-8")
+        (workspace / "receipts" / "operation-receipts.jsonl").read_text(
+            encoding="utf-8"
+        )
     )
     assert [
         stage["stage_id"] for stage in operation_receipt["pipeline_evidence"]["stages"]

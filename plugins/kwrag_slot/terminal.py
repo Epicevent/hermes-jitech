@@ -345,12 +345,13 @@ def prepare_approved_retrieval(
         slot_namespace=slot_namespace,
     )
     try:
+        runtime_receipt_root = workspace / "receipts"
         runtime_kwargs = {
             "workspace_root": workspace,
             "slot_namespace": slot,
             "socket_path": socket,
-            "receipt_path": root / "operation-receipts.jsonl",
-            "gpu_receipt_path": root / "gpu-receipts.jsonl",
+            "receipt_path": runtime_receipt_root / "operation-receipts.jsonl",
+            "gpu_receipt_path": runtime_receipt_root / "gpu-receipts.jsonl",
         }
         runtime_kwargs["source_root"] = _source_package_root(package)
         with open_runtime(**runtime_kwargs) as runtime:
