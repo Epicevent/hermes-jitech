@@ -164,18 +164,22 @@ def test_prepare_uses_dense_product_runtime_without_ops_or_generation_contracts(
     producer_request = captured["producer_request"]
     assert set(producer_request) == {
         "schema_version",
+        "operation",
         "query",
         "request_id",
         "operation_id",
         "run_id",
         "attempt",
         "max_results",
-        "corpus",
+        "scope",
     }
     assert producer_request["query"] == _request()["query"]
-    # The opened product runtime requires the corpus key and uses null for the
-    # complete mounted room set. Hermes must not invent a `corpora` field.
-    assert producer_request["corpus"] is None
+    assert producer_request["schema_version"] == "kwrag-product-cli-request-v1"
+    assert producer_request["operation"] == "search"
+    assert producer_request["scope"] == {"sources": ["kakao"], "rooms": [
+        {"source": "kakao", "room_id": "room-a"},
+        {"source": "kakao", "room_id": "room-b"},
+    ]}
     assert captured["routing_strategy"] == "all_mounted_rooms"
     assert "expected_source_generation" not in producer_request
     assert "expected_index_manifest" not in producer_request
@@ -270,7 +274,6 @@ def test_agent_index_build_uses_product_native_scope_api(
     assert result["status"] == "active"
     assert captured == {
         "scope": "kakao",
-        "exclude": None,
         "rebuild": True,
     }
     with pytest.raises(terminal.KakaoTerminalRetrievalError, match="exclusions"):

@@ -321,14 +321,15 @@ def prepare_approved_retrieval(
 
     validated = validate_explicit_request(request)
     producer_request = {
-        "schema_version": "kwrag-slot-search-request-v1",
+        "schema_version": "kwrag-product-cli-request-v1",
+        "operation": "search",
         "query": validated["query"],
         "request_id": str(uuid.uuid4()),
         "operation_id": str(uuid.uuid4()),
         "run_id": str(uuid.uuid4()),
         "attempt": 1,
         "max_results": _MAX_RESULTS,
-        "corpus": None,
+        "scope": {"sources": ["kakao"]},
     }
     try:
         from kwrag import product_runtime
@@ -388,26 +389,16 @@ def prepare_approved_retrieval(
             # must fail closed rather than silently search a different source.
             requested_sources = validated["sources"]
             if requested_sources is not None and requested_sources != ["kakao"]:
-                if not bool(getattr(runtime, "supports_source_scope", False)):
-                    raise KakaoTerminalRetrievalError(
-                        "requested source adapter is not available in this runtime"
-                    )
-                producer_request["sources"] = requested_sources
+                raise KakaoTerminalRetrievalError(
+                    "requested source adapter is not available in this runtime"
+                )
             rooms, route_strategy = _route_rooms(
                 validated["query"], validated["rooms"], runtime
             )
-            if len(rooms) == 1:
-                producer_request["corpus"] = rooms[0]
-            else:
-                if validated["rooms"] is not None:
-                    raise KakaoTerminalRetrievalError(
-                        "multi-room scope is not supported by the opened product runtime"
-                    )
-                # The current slot API uses an explicit null corpus for the
-                # whole validated mounted room set. Keep the key present: the
-                # verifier distinguishes `corpus: null` from a malformed
-                # query-only request and rejects the latter.
-                producer_request["corpus"] = None
+            if rooms:
+                producer_request["scope"]["rooms"] = [
+                    {"source": "kakao", "room_id": room} for room in rooms
+                ]
             identity = runtime.identity
             active_index_id = getattr(identity, "active_index_id", None)
             index_manifest = getattr(identity, "index_manifest", active_index_id)
@@ -512,7 +503,7 @@ def build_index(
     try:
         # The product-native server API owns the runtime mount, Workspace,
         # slot identity and GPU socket. Hermes supplies only bounded scope.
-        return builder(scope=scope, exclude=None, rebuild=rebuild)
+        return builder(scope=scope, rebuild=rebuild)
     except Exception as exc:
         raise KakaoTerminalRetrievalError("KWRAG index build failed") from exc
 

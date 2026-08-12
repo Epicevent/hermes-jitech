@@ -1955,7 +1955,11 @@ def test_consumer_binds_observed_index_without_admission_pin(
         _test_receipt_sink(tmp_path / "observed-index.jsonl"),
     ).search(_request())
 
-    assert captured == {"max_result_characters": _fixture_result_character_budget()}
+    assert captured == {
+        "expected_index_manifest": binding.current_index_manifest,
+        "expected_pipeline_fingerprint": binding.current_pipeline_fingerprint,
+        "max_result_characters": _fixture_result_character_budget(),
+    }
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX platform admission contract")
