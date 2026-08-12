@@ -36,7 +36,7 @@ def test_explicit_request_owns_only_query_and_product_corpus() -> None:
         "rooms": None,
     }
     invalid = (
-        {"query": "question", "corpus": "groupware"},
+        {"query": "question", "corpus": ""},
         {**_request(), "expected_source_generation": "sha256:" + "1" * 64},
         {**_request(), "expected_index_manifest": "sha256:" + "2" * 64},
     )
@@ -53,6 +53,13 @@ def test_explicit_request_owns_only_query_and_product_corpus() -> None:
     ) == {
         "query": "one source",
         "sources": ["kakao"],
+        "rooms": None,
+    }
+    assert terminal.validate_explicit_request(
+        {"query": "one source", "scope": {"sources": ["groupware"]}}
+    ) == {
+        "query": "one source",
+        "sources": ["groupware"],
         "rooms": None,
     }
 
@@ -157,18 +164,22 @@ def test_prepare_uses_dense_product_runtime_without_ops_or_generation_contracts(
     producer_request = captured["producer_request"]
     assert set(producer_request) == {
         "schema_version",
+        "operation",
         "query",
         "request_id",
         "operation_id",
         "run_id",
         "attempt",
         "max_results",
-        "corpus",
+        "scope",
     }
     assert producer_request["query"] == _request()["query"]
-    # The opened product runtime requires the corpus key and uses null for the
-    # complete mounted room set. Hermes must not invent a `corpora` field.
-    assert producer_request["corpus"] is None
+    assert producer_request["schema_version"] == "kwrag-product-cli-request-v1"
+    assert producer_request["operation"] == "search"
+    assert producer_request["scope"] == {"sources": ["kakao"], "rooms": [
+        {"source": "kakao", "room_id": "room-a"},
+        {"source": "kakao", "room_id": "room-b"},
+    ]}
     assert captured["routing_strategy"] == "all_mounted_rooms"
     assert "expected_source_generation" not in producer_request
     assert "expected_index_manifest" not in producer_request
@@ -196,6 +207,28 @@ def test_explicit_single_room_is_passed_as_the_runtime_corpus() -> None:
         ["room-b"],
         "explicit_room_scope",
     )
+
+
+def test_structured_room_source_is_retained_for_capability_validation() -> None:
+    request = {
+        "query": "find the groupware note",
+        "scope": {"rooms": [{"source": "groupware", "roomId": "room-a"}]},
+    }
+    assert terminal.validate_explicit_request(request) == {
+        "query": request["query"],
+        "sources": ["groupware"],
+        "rooms": ["room-a"],
+    }
+    with pytest.raises(terminal.KakaoTerminalRetrievalError, match="conflicts"):
+        terminal.validate_explicit_request(
+            {
+                "query": "q",
+                "scope": {
+                    "sources": ["kakao"],
+                    "rooms": [{"source": "groupware", "roomId": "room-a"}],
+                },
+            }
+        )
 
 
 def test_ambiguous_room_id_mentions_fail_closed_before_search() -> None:
@@ -240,8 +273,7 @@ def test_agent_index_build_uses_product_native_scope_api(
     )
     assert result["status"] == "active"
     assert captured == {
-        "scope": "kakao",
-        "exclude": None,
+        "scope": {"sources": ["kakao"]},
         "rebuild": True,
     }
     with pytest.raises(terminal.KakaoTerminalRetrievalError, match="exclusions"):

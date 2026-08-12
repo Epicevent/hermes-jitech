@@ -1469,22 +1469,13 @@ class HermesSlotRetrievalConsumer:
         except ImportError as exc:
             raise HermesSlotRetrievalError("embedded KWRAG component is unavailable") from exc
         verification_kwargs = {
-            # The active index/build identity is returned by the runtime and
-            # bound into the content-free receipt. It is not a browser-supplied
-            # generation or manifest admission pin.
+            # These identities are sampled from the already-open runtime and
+            # verify that this response belongs to that same runtime exchange.
+            # They are not caller-supplied freshness/admission pins.
+            "expected_index_manifest": self._binding.current_index_manifest,
+            "expected_pipeline_fingerprint": self._binding.current_pipeline_fingerprint,
             "max_result_characters": self._binding.max_result_characters,
         }
-        # The embedded verifier validates the release actually opened for
-        # this turn. These values are observed from the runtime binding, never
-        # accepted from the browser as admission pins.
-        if self._binding.current_index_manifest is not None:
-            verification_kwargs["expected_index_manifest"] = (
-                self._binding.current_index_manifest
-            )
-        if self._binding.current_pipeline_fingerprint is not None:
-            verification_kwargs["expected_pipeline_fingerprint"] = (
-                self._binding.current_pipeline_fingerprint
-            )
         exchange = self._runtime.search_exchange(dict(request))
         verified = verify_slot_search_exchange(
             request,
@@ -1495,6 +1486,10 @@ class HermesSlotRetrievalConsumer:
         selected_rooms = request.get("corpora")
         if selected_rooms is None:
             selected_rooms = request.get("corpus")
+        if selected_rooms is None:
+            scope = request.get("scope")
+            if isinstance(scope, Mapping):
+                selected_rooms = scope.get("rooms")
         routing_scope_digest = "sha256:" + hashlib.sha256(
             canonical_json_bytes(
                 {

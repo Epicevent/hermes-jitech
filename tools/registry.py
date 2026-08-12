@@ -80,12 +80,13 @@ class ToolEntry:
     __slots__ = (
         "name", "toolset", "schema", "handler", "check_fn",
         "requires_env", "is_async", "description", "emoji",
-        "max_result_size_chars", "dynamic_schema_overrides",
+        "max_result_size_chars", "dynamic_schema_overrides", "agent_handler",
     )
 
     def __init__(self, name, toolset, schema, handler, check_fn,
                  requires_env, is_async, description, emoji,
-                 max_result_size_chars=None, dynamic_schema_overrides=None):
+                 max_result_size_chars=None, dynamic_schema_overrides=None,
+                 agent_handler=None):
         self.name = name
         self.toolset = toolset
         self.schema = schema
@@ -104,6 +105,11 @@ class ToolEntry:
         # on every get_definitions() call; results are merged shallow on top
         # of the base schema before the {"type": "function", ...} wrap.
         self.dynamic_schema_overrides = dynamic_schema_overrides
+        # Optional plugin-owned handler for calls that must retain the active
+        # AIAgent instance (for example, a verified result consumed by the
+        # same conversation). Core dispatch only exposes this generic hook;
+        # it never names a plugin or tool.
+        self.agent_handler = agent_handler
 
 
 # ---------------------------------------------------------------------------
@@ -194,6 +200,16 @@ class ToolRegistry:
         with self._lock:
             return self._tools.get(name)
 
+    def get_agent_handler(self, name: str) -> Optional[Callable]:
+        """Return a plugin-owned active-agent handler for *name*, if any.
+
+        The core executor uses this generic hook to preserve an active agent
+        across a tool call.  Core code must not identify individual plugins or
+        tool names to provide that capability.
+        """
+        entry = self.get_entry(name)
+        return entry.agent_handler if entry is not None else None
+
     def get_registered_toolset_names(self) -> List[str]:
         """Return sorted unique toolset names present in the registry."""
         return sorted({entry.toolset for entry in self._snapshot_entries()})
@@ -244,6 +260,7 @@ class ToolRegistry:
         emoji: str = "",
         max_result_size_chars: int | float | None = None,
         dynamic_schema_overrides: Callable = None,
+        agent_handler: Callable = None,
         override: bool = False,
     ):
         """Register a tool.  Called at module-import time by each tool file.
@@ -299,6 +316,7 @@ class ToolRegistry:
                 emoji=emoji,
                 max_result_size_chars=max_result_size_chars,
                 dynamic_schema_overrides=dynamic_schema_overrides,
+                agent_handler=agent_handler,
             )
             if check_fn and toolset not in self._toolset_checks:
                 self._toolset_checks[toolset] = check_fn
