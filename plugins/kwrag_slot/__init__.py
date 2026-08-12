@@ -1,7 +1,7 @@
 """Caller-explicit, in-process KWRAG product integration for Hermes.
 
-The plugin registers two bounded model tools for explicit index build/status
-requests plus the legacy CLI/status surface. It registers no shell tool,
+The plugin registers bounded model tools for explicit index build/status and
+verified search requests plus the legacy CLI/status surface. It registers no shell tool,
 prompt hook, lifecycle hook, automatic retrieval policy, or operations-tool
 admission contract.
 """
@@ -22,7 +22,7 @@ def register(ctx) -> None:
         description=(
             "Build identity and explicit Workspace indexing for the embedded "
             "KWRAG component. Model tools remain bounded to explicit index "
-            "build/status and expose no shell, hook, or runtime admission "
-            "policy."
+            "build/status and verified search, and expose no shell, hook, or "
+            "runtime admission policy."
         ),
     )
