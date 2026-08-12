@@ -78,6 +78,28 @@ def _room_ids(value: Any) -> list[str] | None:
     return rooms
 
 
+def _room_sources(value: Any) -> list[str] | None:
+    """Extract and validate source identity carried by structured rooms.
+
+    Bare room IDs retain the current runtime's default-source semantics.  A
+    structured room is different: its source is caller intent and must not be
+    discarded before the source capability check runs.
+    """
+    if value is None:
+        return None
+    sources: list[str] = []
+    for room in value:
+        if not isinstance(room, Mapping):
+            continue
+        source = room.get("source")
+        if not isinstance(source, str) or not source.strip():
+            raise KakaoTerminalRetrievalError("room scope is invalid")
+        normalized = source.strip().lower()
+        if normalized not in sources:
+            sources.append(normalized)
+    return sources or None
+
+
 def validate_explicit_request(value: Mapping[str, Any]) -> dict[str, Any]:
     """Validate optional user scope without making room selection mandatory.
 
@@ -101,6 +123,7 @@ def validate_explicit_request(value: Mapping[str, Any]) -> dict[str, Any]:
         scope.get("sources") if scope is not None else value.get("sources")
     )
     room_values = scope.get("rooms") if scope is not None else value.get("rooms")
+    room_sources = _room_sources(room_values)
     legacy_corpus = value.get("corpus")
     if legacy_corpus is not None:
         if (
@@ -129,6 +152,11 @@ def validate_explicit_request(value: Mapping[str, Any]) -> dict[str, Any]:
         sources = [source.strip().lower() for source in source_values]
     if sources is not None and not sources:
         raise KakaoTerminalRetrievalError("source scope is empty")
+    if room_sources:
+        if sources is None:
+            sources = room_sources
+        elif any(source not in sources for source in room_sources):
+            raise KakaoTerminalRetrievalError("room source conflicts with source scope")
     rooms = _room_ids(room_values)
     return {"query": query, "sources": sources, "rooms": rooms}
 

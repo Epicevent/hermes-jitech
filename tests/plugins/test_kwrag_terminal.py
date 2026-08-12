@@ -205,6 +205,28 @@ def test_explicit_single_room_is_passed_as_the_runtime_corpus() -> None:
     )
 
 
+def test_structured_room_source_is_retained_for_capability_validation() -> None:
+    request = {
+        "query": "find the groupware note",
+        "scope": {"rooms": [{"source": "groupware", "roomId": "room-a"}]},
+    }
+    assert terminal.validate_explicit_request(request) == {
+        "query": request["query"],
+        "sources": ["groupware"],
+        "rooms": ["room-a"],
+    }
+    with pytest.raises(terminal.KakaoTerminalRetrievalError, match="conflicts"):
+        terminal.validate_explicit_request(
+            {
+                "query": "q",
+                "scope": {
+                    "sources": ["kakao"],
+                    "rooms": [{"source": "groupware", "roomId": "room-a"}],
+                },
+            }
+        )
+
+
 def test_ambiguous_room_id_mentions_fail_closed_before_search() -> None:
     runtime = SimpleNamespace(
         application=SimpleNamespace(

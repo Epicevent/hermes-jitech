@@ -103,13 +103,18 @@ def run_conversation_with_approved_retrieval(
             error_category=error_category,
         )
 
-    outcome = agent.run_conversation(
-        user_message,
-        ephemeral_user_context=context,
-        ephemeral_user_context_on_request=_commit_consumption_at_first_request,
-        ephemeral_user_context_on_outcome=_record_first_request_outcome,
-        **kwargs,
-    )
+    previous_handoff_flag = getattr(agent, "_retrieval_evidence_handoff_active", False)
+    agent._retrieval_evidence_handoff_active = True
+    try:
+        outcome = agent.run_conversation(
+            user_message,
+            ephemeral_user_context=context,
+            ephemeral_user_context_on_request=_commit_consumption_at_first_request,
+            ephemeral_user_context_on_outcome=_record_first_request_outcome,
+            **kwargs,
+        )
+    finally:
+        agent._retrieval_evidence_handoff_active = previous_handoff_flag
     if result.consumption_receipt_status != "written":
         raise HermesSlotRetrievalError(
             "Hermes conversation completed before retrieval evidence dispatch"

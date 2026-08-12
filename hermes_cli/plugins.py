@@ -325,6 +325,7 @@ class PluginContext:
         is_async: bool = False,
         description: str = "",
         emoji: str = "",
+        agent_handler: Callable | None = None,
         override: bool = False,
     ) -> None:
         """Register a tool in the global registry **and** track it as plugin-provided.
@@ -346,6 +347,7 @@ class PluginContext:
             is_async=is_async,
             description=description,
             emoji=emoji,
+            agent_handler=agent_handler,
             override=override,
         )
         self._manager._plugin_tool_names.add(name)

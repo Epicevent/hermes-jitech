@@ -62,6 +62,12 @@ def _ra():
     return run_agent
 
 
+def _has_agent_bound_handler(function_name: str) -> bool:
+    """Return whether a registered plugin owns an active-agent tool hook."""
+    from tools.registry import registry
+    return registry.get_agent_handler(function_name) is not None
+
+
 def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
     """Execute multiple tool calls concurrently using a thread pool.
 
@@ -689,11 +695,9 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                     spinner.stop(cute_msg)
                 elif agent._should_emit_quiet_tool_messages():
                     agent._vprint(f"  {cute_msg}")
-        elif function_name == "kwrag_search":
-            # Dashboard turns use the sequential path for a single model
-            # tool call.  Route retrieval through the agent-bound bridge so
-            # the verified result is retained for the provider handoff;
-            # the registry-only handler intentionally rejects without one.
+        elif _has_agent_bound_handler(function_name):
+            # Plugin-owned active-agent tools use the generic registry hook;
+            # the core executor must not identify a bundled plugin by name.
             try:
                 function_result = agent._invoke_tool(
                     function_name,
