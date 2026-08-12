@@ -1914,6 +1914,50 @@ def test_consumer_budgets_complete_canonical_results_with_catch_and_valid_contro
     assert prepared.result_receipt["result_characters"] == full_payload_characters
 
 
+def test_consumer_binds_observed_index_without_admission_pin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Daily mounted-index identity is receipt evidence, not a freshness gate."""
+
+    import kwrag.slot_consumer as slot_consumer
+    from plugins.kwrag_slot.consumer import (
+        HermesSlotRetrievalBinding,
+        HermesSlotRetrievalConsumer,
+    )
+
+    component_digest = load_component_manifest()["component_wheel"]["sha256"]
+    binding = HermesSlotRetrievalBinding.from_mapping({
+        "schema_version": "hermes-kwrag-slot-binding-v1",
+        "enabled": True,
+        "component_digest": component_digest,
+        "runtime_binding_digest": "sha256:" + "c" * 64,
+        "current_index_manifest": "sha256:" + "a" * 64,
+        "current_pipeline_fingerprint": "sha256:" + "b" * 64,
+        "max_result_characters": _fixture_result_character_budget(),
+    })
+    captured: dict[str, object] = {}
+    original_verify = slot_consumer.verify_slot_search_exchange
+
+    def observe_verify(request, response, operation_receipt, **kwargs):
+        captured.update(kwargs)
+        return original_verify(request, response, operation_receipt, **kwargs)
+
+    monkeypatch.setattr(slot_consumer, "verify_slot_search_exchange", observe_verify)
+
+    class Runtime:
+        def search_exchange(self, _request):
+            return _exchange()
+
+    HermesSlotRetrievalConsumer(
+        binding,
+        Runtime(),
+        _test_receipt_sink(tmp_path / "observed-index.jsonl"),
+    ).search(_request())
+
+    assert captured == {"max_result_characters": _fixture_result_character_budget()}
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX platform admission contract")
 def test_non_linux_posix_receipt_preflight_fails_before_retrieval(
     tmp_path: Path,
