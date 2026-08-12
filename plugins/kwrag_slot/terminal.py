@@ -365,10 +365,11 @@ def prepare_approved_retrieval(
                     raise KakaoTerminalRetrievalError(
                         "multi-room scope is not supported by the opened product runtime"
                     )
-                # The current slot API treats an omitted corpus as the whole
-                # validated mounted room set. Never invent a `corpora` field
-                # that an older runtime would reject or silently broaden.
-                producer_request.pop("corpus", None)
+                # The current slot API uses an explicit null corpus for the
+                # whole validated mounted room set. Keep the key present: the
+                # verifier distinguishes `corpus: null` from a malformed
+                # query-only request and rejects the latter.
+                producer_request["corpus"] = None
             identity = runtime.identity
             active_index_id = getattr(identity, "active_index_id", None)
             index_manifest = getattr(identity, "index_manifest", active_index_id)

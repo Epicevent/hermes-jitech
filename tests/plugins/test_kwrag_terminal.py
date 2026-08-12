@@ -163,12 +163,12 @@ def test_prepare_uses_dense_product_runtime_without_ops_or_generation_contracts(
         "run_id",
         "attempt",
         "max_results",
+        "corpus",
     }
     assert producer_request["query"] == _request()["query"]
-    # The opened e608 product runtime has one `corpus` field and defines
-    # omission as the complete mounted room set.  Hermes must not invent a
-    # `corpora` field that the runtime would reject or reinterpret.
-    assert "corpus" not in producer_request
+    # The opened product runtime requires the corpus key and uses null for the
+    # complete mounted room set. Hermes must not invent a `corpora` field.
+    assert producer_request["corpus"] is None
     assert captured["routing_strategy"] == "all_mounted_rooms"
     assert "expected_source_generation" not in producer_request
     assert "expected_index_manifest" not in producer_request
