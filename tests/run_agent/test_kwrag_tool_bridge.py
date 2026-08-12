@@ -1,4 +1,4 @@
-"""Regression guard for the dashboard's agent-bound KWRAG bridge."""
+"""Regression tests for the dashboard's agent-bound KWRAG tool bridge."""
 
 from __future__ import annotations
 
