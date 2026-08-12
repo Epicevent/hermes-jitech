@@ -39,7 +39,7 @@ _SLOT_RE = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
 
 
 class KakaoTerminalRetrievalError(HermesSlotRetrievalError):
-    """The explicit Kakao terminal request cannot be served."""
+    """An explicit slot-local RAG request cannot be served."""
 
 
 def _query(value: Any) -> str:
@@ -64,10 +64,9 @@ def _room_ids(value: Any) -> list[str] | None:
         if isinstance(room, Mapping):
             if set(room) != {"source", "roomId"}:
                 raise KakaoTerminalRetrievalError("room scope is invalid")
-            if room.get("source") != "kakao":
-                raise KakaoTerminalRetrievalError(
-                    "requested source adapter is not available in this runtime"
-                )
+            source = room.get("source")
+            if not isinstance(source, str) or not source.strip():
+                raise KakaoTerminalRetrievalError("room scope is invalid")
             room = room.get("roomId")
         if isinstance(room, str) and room == room.strip() and room:
             normalized.append(room)
@@ -82,8 +81,8 @@ def _room_ids(value: Any) -> list[str] | None:
 def validate_explicit_request(value: Mapping[str, Any]) -> dict[str, Any]:
     """Validate optional user scope without making room selection mandatory.
 
-    ``corpus=kakao`` is retained as a compatibility alias for the old UI's
-    Kakao toggle.  It is a source selector, not a KWRAG room id.
+    ``corpus`` is retained as a compatibility alias for older callers.  It is
+    a source selector, not a room id; new callers should use ``scope``.
     """
 
     if not isinstance(value, Mapping):
@@ -104,11 +103,16 @@ def validate_explicit_request(value: Mapping[str, Any]) -> dict[str, Any]:
     room_values = scope.get("rooms") if scope is not None else value.get("rooms")
     legacy_corpus = value.get("corpus")
     if legacy_corpus is not None:
-        if legacy_corpus != "kakao":
-            raise KakaoTerminalRetrievalError("corpus must be kakao")
-        if source_values is not None and source_values != ["kakao"]:
+        if (
+            not isinstance(legacy_corpus, str)
+            or not legacy_corpus.strip()
+            or len(legacy_corpus.strip()) > 64
+        ):
+            raise KakaoTerminalRetrievalError("corpus source is invalid")
+        legacy_corpus = legacy_corpus.strip().lower()
+        if source_values is not None and source_values != [legacy_corpus]:
             raise KakaoTerminalRetrievalError("source scope conflicts with corpus")
-        source_values = ["kakao"]
+        source_values = [legacy_corpus]
     if source_values is None:
         # Omitted source means the runtime-visible prepared source set.  The
         # current compatibility alias below still narrows legacy `corpus=kakao`.
@@ -288,10 +292,6 @@ def prepare_approved_retrieval(
     """Run one explicit dense/vector/rerank search and verify its result."""
 
     validated = validate_explicit_request(request)
-    if validated["sources"] not in (None, ["kakao"]):
-        raise KakaoTerminalRetrievalError(
-            "requested source adapter is not available in this runtime"
-        )
     producer_request = {
         "schema_version": "kwrag-slot-search-request-v1",
         "query": validated["query"],
@@ -355,6 +355,16 @@ def prepare_approved_retrieval(
         }
         runtime_kwargs["source_root"] = _source_package_root(package)
         with open_runtime(**runtime_kwargs) as runtime:
+            # Source selection is part of the product-neutral request.  The
+            # current embedded wheel may expose only Kakao; in that case it
+            # must fail closed rather than silently search a different source.
+            requested_sources = validated["sources"]
+            if requested_sources is not None and requested_sources != ["kakao"]:
+                if not bool(getattr(runtime, "supports_source_scope", False)):
+                    raise KakaoTerminalRetrievalError(
+                        "requested source adapter is not available in this runtime"
+                    )
+                producer_request["sources"] = requested_sources
             rooms, route_strategy = _route_rooms(
                 validated["query"], validated["rooms"], runtime
             )
@@ -436,11 +446,7 @@ def _native_index_scope(value: Any) -> str | list[str] | None:
     if not normalized or any(not isinstance(source, str) for source in normalized):
         raise KakaoTerminalRetrievalError("index scope sources are invalid")
     normalized = [source.strip().lower() for source in normalized]
-    if any(source != "kakao" for source in normalized):
-        raise KakaoTerminalRetrievalError(
-            "requested source adapter is not available in this runtime"
-        )
-    return "kakao" if len(set(normalized)) == 1 else normalized
+    return normalized[0] if len(set(normalized)) == 1 else normalized
 
 
 def build_index(

@@ -36,7 +36,7 @@ def test_explicit_request_owns_only_query_and_product_corpus() -> None:
         "rooms": None,
     }
     invalid = (
-        {"query": "question", "corpus": "groupware"},
+        {"query": "question", "corpus": ""},
         {**_request(), "expected_source_generation": "sha256:" + "1" * 64},
         {**_request(), "expected_index_manifest": "sha256:" + "2" * 64},
     )
@@ -53,6 +53,13 @@ def test_explicit_request_owns_only_query_and_product_corpus() -> None:
     ) == {
         "query": "one source",
         "sources": ["kakao"],
+        "rooms": None,
+    }
+    assert terminal.validate_explicit_request(
+        {"query": "one source", "scope": {"sources": ["groupware"]}}
+    ) == {
+        "query": "one source",
+        "sources": ["groupware"],
         "rooms": None,
     }
 
