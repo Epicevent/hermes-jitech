@@ -273,7 +273,7 @@ def test_agent_index_build_uses_product_native_scope_api(
     )
     assert result["status"] == "active"
     assert captured == {
-        "scope": "kakao",
+        "scope": {"sources": ["kakao"]},
         "rebuild": True,
     }
     with pytest.raises(terminal.KakaoTerminalRetrievalError, match="exclusions"):

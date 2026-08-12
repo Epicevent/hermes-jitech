@@ -440,7 +440,7 @@ def _validate_index_scope(value: Any, label: str) -> Any:
     return value
 
 
-def _native_index_scope(value: Any) -> str | list[str] | None:
+def _native_index_scope(value: Any) -> dict[str, list[str]] | None:
     """Map the product-facing scope to the current source API.
 
     The current server package indexes sources, while room narrowing belongs
@@ -465,7 +465,9 @@ def _native_index_scope(value: Any) -> str | list[str] | None:
     if not normalized or any(not isinstance(source, str) for source in normalized):
         raise KakaoTerminalRetrievalError("index scope sources are invalid")
     normalized = [source.strip().lower() for source in normalized]
-    return normalized[0] if len(set(normalized)) == 1 else normalized
+    if len(set(normalized)) != len(normalized):
+        raise KakaoTerminalRetrievalError("index scope sources contain duplicates")
+    return {"sources": normalized}
 
 
 def build_index(
