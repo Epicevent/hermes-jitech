@@ -456,7 +456,11 @@ def test_plugin_registers_bounded_index_tools_and_operator_cli() -> None:
     ctx = PluginContext(PluginManifest(name="kwrag_slot"), manager)
     register(ctx)
     assert set(manager._cli_commands) == {"kwrag-slot"}
-    assert manager._plugin_tool_names == {"kwrag_index_build", "kwrag_index_status"}
+    assert manager._plugin_tool_names == {
+        "kwrag_index_build",
+        "kwrag_index_status",
+        "kwrag_search",
+    }
     assert manager._hooks == {}
 
 

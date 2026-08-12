@@ -83,6 +83,46 @@ INDEX_STATUS_SCHEMA = {
     },
 }
 
+SEARCH_SCHEMA = {
+    "name": "kwrag_search",
+    "description": (
+        "Search the active slot-local RAG index for the user's current question. "
+        "Use this only when the user asks for an answer grounded in the indexed "
+        "corpus; the Hermes turn will consume the verified result before the provider."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "The user's original question, unchanged.",
+            },
+            "scope": {
+                "type": "object",
+                "description": "Optional source/room narrowing selected by the caller.",
+                "properties": {
+                    "sources": {"type": "array", "items": {"type": "string"}},
+                    "rooms": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "source": {"type": "string"},
+                                "roomId": {"type": "string"},
+                            },
+                            "required": ["source", "roomId"],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                "additionalProperties": False,
+            },
+        },
+        "required": ["query"],
+        "additionalProperties": False,
+    },
+}
+
 
 def _check_kwrag_available() -> bool:
     """Keep the tools visible; the handler reports a precise unavailable state."""
@@ -118,6 +158,12 @@ def _handle_index_status(_args: dict[str, Any], **_kwargs: Any) -> str:
         return tool_error(f"KWRAG index status failed: {type(exc).__name__}")
 
 
+def _handle_search_without_agent(_args: dict[str, Any], **_kwargs: Any) -> str:
+    """Reject registry-only calls; an active agent owns provider consumption."""
+
+    return tool_error("kwrag_search requires an active Hermes conversation")
+
+
 def register(ctx) -> None:
     ctx.register_tool(
         name="kwrag_index_build",
@@ -134,4 +180,12 @@ def register(ctx) -> None:
         handler=_handle_index_status,
         check_fn=_check_kwrag_available,
         emoji="STS",
+    )
+    ctx.register_tool(
+        name="kwrag_search",
+        toolset="kwrag",
+        schema=SEARCH_SCHEMA,
+        handler=_handle_search_without_agent,
+        check_fn=_check_kwrag_available,
+        emoji="RAG",
     )

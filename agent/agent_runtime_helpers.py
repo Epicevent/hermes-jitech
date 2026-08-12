@@ -1692,6 +1692,38 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
         )
     elif function_name == "delegate_task":
         return agent._dispatch_delegate_task(function_args)
+    elif function_name == "kwrag_search":
+        # Retrieval is a provider-bearing product seam, not a plain registry
+        # result.  Capture the verified result on this exact agent so the
+        # conversation loop can consume it through the existing handoff and
+        # outcome-receipt callbacks before the next provider call.
+        if getattr(agent, "_kwrag_pending_retrieval", None) is not None:
+            return json.dumps({"error": "KWRAG search is already pending"})
+        query = function_args.get("query")
+        request = {"query": query}
+        if "scope" in function_args:
+            request["scope"] = function_args["scope"]
+        try:
+            from plugins.kwrag_slot.terminal import prepare_approved_retrieval
+
+            prepared = prepare_approved_retrieval(request)
+        except Exception as exc:
+            # Do not let an unavailable/empty index turn into an ordinary
+            # provider request.  The caller will surface this as a failed
+            # RAG turn and retain zero provider handoff for this path.
+            return json.dumps(
+                {"error": f"KWRAG search failed: {type(exc).__name__}"},
+                ensure_ascii=False,
+            )
+        agent._kwrag_pending_retrieval = prepared
+        return json.dumps(
+            {
+                "status": "verified",
+                "result_receipt_digest": prepared.result_receipt_digest,
+                "result_receipt_status": prepared.result_receipt_status,
+            },
+            ensure_ascii=False,
+        )
     else:
         return _ra().handle_function_call(
             function_name, function_args, effective_task_id,

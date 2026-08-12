@@ -4807,6 +4807,37 @@ def run_conversation(
                                 pass
                     break
 
+                # A model-requested KWRAG search is the explicit bridge from
+                # the tool call to the existing evidence-consumption seam.
+                # It must never fall through to a clean provider turn without
+                # the verified result and its handoff/outcome callbacks.
+                pending_kwrag = getattr(agent, "_kwrag_pending_retrieval", None)
+                if pending_kwrag is not None:
+                    agent._kwrag_pending_retrieval = None
+                    try:
+                        from plugins.kwrag_slot.terminal import (
+                            dispatch_current_terminal_turn,
+                        )
+
+                        return dispatch_current_terminal_turn(
+                            agent,
+                            user_message,
+                            approved_retrieval=pending_kwrag,
+                            task_id=effective_task_id,
+                            conversation_history=conversation_history,
+                        )
+                    except Exception as exc:
+                        agent._cleanup_task_resources(effective_task_id)
+                        agent._persist_session(messages, conversation_history)
+                        return {
+                            "final_response": None,
+                            "messages": messages,
+                            "api_calls": api_call_count,
+                            "completed": False,
+                            "partial": True,
+                            "error": f"KWRAG retrieval turn failed: {type(exc).__name__}",
+                        }
+
                 # Tool validation, canonical assistant construction, durable
                 # message append, and actual tool execution all succeeded.
                 # This is the first nonterminal point where a clean
