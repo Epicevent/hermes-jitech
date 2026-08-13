@@ -348,6 +348,10 @@ def test_mixed_source_rooms_keep_each_source_during_forwarding(
         "load_component_manifest",
         lambda: {"component_wheel": {"sha256": "sha256:" + "8" * 64}},
     )
+    monkeypatch.setattr(
+        "plugins.kwrag_slot.consumer.load_component_manifest",
+        lambda: {"component_wheel": {"sha256": "sha256:" + "8" * 64}},
+    )
 
     class _Consumer:
         def __init__(self, *_args):
