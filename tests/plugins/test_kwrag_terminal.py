@@ -37,7 +37,6 @@ def test_explicit_request_owns_only_query_and_product_corpus() -> None:
     }
     invalid = (
         {"query": "question", "corpus": ""},
-        {"query": "question", "scope": None},
         {"query": "question", "scope": {}},
         {"query": "question", "scope": {"sources": None}},
         {
@@ -58,6 +57,13 @@ def test_explicit_request_owns_only_query_and_product_corpus() -> None:
         with pytest.raises(terminal.KakaoTerminalRetrievalError):
             terminal.validate_explicit_request(value)
     assert terminal.validate_explicit_request({"query": "all sources"}) == {
+        "query": "all sources",
+        "sources": None,
+        "rooms": None,
+    }
+    assert terminal.validate_explicit_request(
+        {"query": "all sources", "scope": None}
+    ) == {
         "query": "all sources",
         "sources": None,
         "rooms": None,
