@@ -281,19 +281,6 @@ def _runtime_paths(
     )
 
 
-def _source_package_root(source_mount: Path) -> Path:
-    """Resolve `/workspace/nas_docs` to the mounted Kakao package leaf."""
-
-    if (source_mount / "membership.json").is_file():
-        return source_mount
-    nested = source_mount / "kw" / "package"
-    if (nested / "membership.json").is_file():
-        return nested
-    # Keep an explicit test/integration mount root intact when the runtime
-    # itself owns the source-layout validation. Never invent a missing leaf.
-    return source_mount
-
-
 def prepare_approved_retrieval(
     request: Mapping[str, Any],
     *,
@@ -366,7 +353,10 @@ def prepare_approved_retrieval(
             "receipt_path": runtime_receipt_root / "operation-receipts.jsonl",
             "gpu_receipt_path": runtime_receipt_root / "gpu-receipts.jsonl",
         }
-        runtime_kwargs["source_root"] = _source_package_root(package)
+        # ProductRuntime owns source discovery below the mounted product root.
+        # Passing the legacy Kakao package leaf here would hide every other
+        # mounted adapter (for example Groupware) from federated search.
+        runtime_kwargs["source_root"] = package
         with open_runtime(**runtime_kwargs) as runtime:
             requested_sources = validated["sources"]
             requested_rooms = validated["rooms"]

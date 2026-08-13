@@ -90,6 +90,9 @@ def test_prepare_uses_dense_product_runtime_without_ops_or_generation_contracts(
     package_root = tmp_path / "mounted-package"
     workspace_root = tmp_path / "workspace-index"
     socket_path = tmp_path / "gpu.sock"
+    kakao_package = package_root / "kw" / "package"
+    kakao_package.mkdir(parents=True)
+    (kakao_package / "membership.json").write_text("{}", encoding="utf-8")
     captured: dict[str, object] = {}
     identity = SimpleNamespace(
         digest="sha256:" + "6" * 64,
