@@ -95,11 +95,16 @@ def validate_explicit_request(value: Mapping[str, Any]) -> dict[str, Any]:
     if "query" not in value:
         raise KakaoTerminalRetrievalError("query is required")
     query = _query(value["query"])
+    scope_supplied = "scope" in value
     scope = value.get("scope")
-    if scope is not None and not isinstance(scope, Mapping):
+    if scope_supplied and not isinstance(scope, Mapping):
         raise KakaoTerminalRetrievalError("retrieval scope is invalid")
     if scope is not None and set(scope) - {"sources", "rooms"}:
         raise KakaoTerminalRetrievalError("retrieval scope fields are invalid")
+    if scope is not None and any(
+        field in scope and scope[field] is None for field in ("sources", "rooms")
+    ):
+        raise KakaoTerminalRetrievalError("retrieval scope field is invalid")
     source_values = (
         scope.get("sources") if scope is not None else value.get("sources")
     )

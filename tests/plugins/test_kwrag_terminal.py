@@ -37,8 +37,20 @@ def test_explicit_request_owns_only_query_and_product_corpus() -> None:
     }
     invalid = (
         {"query": "question", "corpus": ""},
+        {"query": "question", "scope": None},
         {"query": "question", "scope": {}},
         {"query": "question", "scope": {"sources": None}},
+        {
+            "query": "question",
+            "scope": {"sources": ["kakao"], "rooms": None},
+        },
+        {
+            "query": "question",
+            "scope": {
+                "sources": None,
+                "rooms": [{"source": "kakao", "roomId": "room-a"}],
+            },
+        },
         {**_request(), "expected_source_generation": "sha256:" + "1" * 64},
         {**_request(), "expected_index_manifest": "sha256:" + "2" * 64},
     )
