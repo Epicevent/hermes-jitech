@@ -37,6 +37,19 @@ def test_explicit_request_owns_only_query_and_product_corpus() -> None:
     }
     invalid = (
         {"query": "question", "corpus": ""},
+        {"query": "question", "scope": {}},
+        {"query": "question", "scope": {"sources": None}},
+        {
+            "query": "question",
+            "scope": {"sources": ["kakao"], "rooms": None},
+        },
+        {
+            "query": "question",
+            "scope": {
+                "sources": None,
+                "rooms": [{"source": "kakao", "roomId": "room-a"}],
+            },
+        },
         {**_request(), "expected_source_generation": "sha256:" + "1" * 64},
         {**_request(), "expected_index_manifest": "sha256:" + "2" * 64},
     )
@@ -48,16 +61,26 @@ def test_explicit_request_owns_only_query_and_product_corpus() -> None:
         "sources": None,
         "rooms": None,
     }
-    assert terminal.validate_explicit_request(
-        {"query": "one source", "scope": {"sources": ["kakao"]}}
-    ) == {
+    assert terminal.validate_explicit_request({
+        "query": "all sources",
+        "scope": None,
+    }) == {
+        "query": "all sources",
+        "sources": None,
+        "rooms": None,
+    }
+    assert terminal.validate_explicit_request({
+        "query": "one source",
+        "scope": {"sources": ["kakao"]},
+    }) == {
         "query": "one source",
         "sources": ["kakao"],
         "rooms": None,
     }
-    assert terminal.validate_explicit_request(
-        {"query": "one source", "scope": {"sources": ["groupware"]}}
-    ) == {
+    assert terminal.validate_explicit_request({
+        "query": "one source",
+        "scope": {"sources": ["groupware"]},
+    }) == {
         "query": "one source",
         "sources": ["groupware"],
         "rooms": None,
@@ -90,7 +113,11 @@ def test_prepare_uses_dense_product_runtime_without_ops_or_generation_contracts(
     package_root = tmp_path / "mounted-package"
     workspace_root = tmp_path / "workspace-index"
     socket_path = tmp_path / "gpu.sock"
+    kakao_package = package_root / "kw" / "package"
+    kakao_package.mkdir(parents=True)
+    (kakao_package / "membership.json").write_text("{}", encoding="utf-8")
     captured: dict[str, object] = {}
+    status_calls: list[dict[str, object]] = []
     identity = SimpleNamespace(
         digest="sha256:" + "6" * 64,
         index_manifest="sha256:" + "2" * 64,
@@ -101,7 +128,9 @@ def test_prepare_uses_dense_product_runtime_without_ops_or_generation_contracts(
         def __init__(self) -> None:
             self.identity = identity
             self.application = SimpleNamespace(
-                scope=SimpleNamespace(available_rooms=["room-a", "room-b"])
+                scope=SimpleNamespace(
+                    available_rooms=["room-a", "room-b", "groupware/docs"]
+                )
             )
 
         def __enter__(self):
@@ -114,9 +143,14 @@ def test_prepare_uses_dense_product_runtime_without_ops_or_generation_contracts(
         captured["runtime"] = kwargs
         return _Runtime()
 
+    def index_status(**kwargs):
+        status_calls.append(kwargs)
+        raise AssertionError("explicit storage paths must not read default status")
+
     _install_runtime_module(
         monkeypatch,
         open_product_runtime=open_runtime,
+        index_status=index_status,
     )
     monkeypatch.setattr(terminal, "get_hermes_home", lambda: home)
     monkeypatch.setattr(
@@ -162,6 +196,7 @@ def test_prepare_uses_dense_product_runtime_without_ops_or_generation_contracts(
         "gpu_receipt_path": workspace_root / "receipts" / "gpu-receipts.jsonl",
     }
     producer_request = captured["producer_request"]
+    assert isinstance(producer_request, dict)
     assert set(producer_request) == {
         "schema_version",
         "operation",
@@ -176,10 +211,7 @@ def test_prepare_uses_dense_product_runtime_without_ops_or_generation_contracts(
     assert producer_request["query"] == _request()["query"]
     assert producer_request["schema_version"] == "kwrag-product-cli-request-v1"
     assert producer_request["operation"] == "search"
-    assert producer_request["scope"] == {"sources": ["kakao"], "rooms": [
-        {"source": "kakao", "room_id": "room-a"},
-        {"source": "kakao", "room_id": "room-b"},
-    ]}
+    assert producer_request["scope"] == {"sources": ["kakao"]}
     assert captured["routing_strategy"] == "all_mounted_rooms"
     assert "expected_source_generation" not in producer_request
     assert "expected_index_manifest" not in producer_request
@@ -187,6 +219,98 @@ def test_prepare_uses_dense_product_runtime_without_ops_or_generation_contracts(
     assert binding.current_index_manifest == identity.index_manifest
     assert binding.current_pipeline_fingerprint == identity.pipeline_fingerprint
     assert "binding_path" not in captured["runtime"]
+
+    monkeypatch.setattr(terminal, "_DEFAULT_SOURCE_ROOT", package_root)
+    monkeypatch.setattr(terminal, "_DEFAULT_WORKSPACE_INDEX_ROOT", workspace_root)
+    terminal.prepare_approved_retrieval(
+        _request(),
+        socket_path=socket_path,
+        slot_namespace="oc20",
+    )
+    assert captured["runtime"] == {
+        "source_root": package_root,
+        "workspace_root": workspace_root,
+        "slot_namespace": "oc20",
+        "socket_path": socket_path,
+        "receipt_path": (workspace_root / "receipts" / "operation-receipts.jsonl"),
+        "gpu_receipt_path": workspace_root / "receipts" / "gpu-receipts.jsonl",
+    }
+
+    terminal.prepare_approved_retrieval(
+        {"query": "search every mounted source"},
+        package_root=package_root,
+        workspace_root=workspace_root,
+        socket_path=socket_path,
+        slot_namespace="oc20",
+    )
+    assert "scope" not in captured["producer_request"]
+    assert captured["routing_strategy"] == "all_mounted_sources"
+
+    terminal.prepare_approved_retrieval(
+        {
+            "query": "find the groupware note",
+            "scope": {"rooms": [{"source": "groupware", "roomId": "document-set-a"}]},
+        },
+        package_root=package_root,
+        workspace_root=workspace_root,
+        socket_path=socket_path,
+        slot_namespace="oc20",
+    )
+    assert captured["producer_request"]["scope"] == {
+        "sources": ["groupware"],
+        "rooms": [{"source": "groupware", "room_id": "document-set-a"}],
+    }
+    assert captured["routing_strategy"] == "explicit_room_scope"
+    assert status_calls == []
+
+
+def test_embedded_wheel_registers_product_sources() -> None:
+    with ZipFile(WHEEL) as archive:
+        contract = archive.read("kwrag/product_contract.py").decode("utf-8")
+        mounted_sources = archive.read("kwrag/product_sources.py").decode("utf-8")
+    assert 'source="kakao"' in contract
+    assert 'source="groupware"' in contract
+    assert '"groupware": _GROUPWARE_ADAPTER' in contract
+    assert '"kakao": _KAKAO_ADAPTER' in contract
+    assert 'if source_name == "groupware"' in mounted_sources
+    assert "return LiveGroupwareSource(" in mounted_sources
+
+
+def test_embedded_contract_uses_omitted_scope_for_all_mounted_sources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.syspath_prepend(str(WHEEL))
+    contract = importlib.import_module("kwrag.product_contract")
+
+    normalized = contract.normalize_product_search_request({
+        "schema_version": "kwrag-product-cli-request-v1",
+        "operation": "search",
+        "query": "search every mounted source",
+    })
+
+    assert normalized.scope.sources == ("groupware", "kakao")
+    assert normalized.scope.rooms is None
+    with pytest.raises(contract.ProductContractError, match="scope_invalid"):
+        contract.normalize_product_search_request({
+            "schema_version": "kwrag-product-cli-request-v1",
+            "operation": "search",
+            "query": "search every mounted source",
+            "scope": {},
+        })
+
+
+def test_routing_scope_observation_includes_nested_source_scope() -> None:
+    from plugins.kwrag_slot.consumer import _routing_scope_observation
+
+    assert _routing_scope_observation({
+        "scope": {
+            "sources": ["groupware"],
+            "rooms": [{"source": "groupware", "room_id": "document-set-a"}],
+        }
+    }) == {
+        "sources": ["groupware"],
+        "rooms": [{"source": "groupware", "room_id": "document-set-a"}],
+    }
 
 
 def test_unique_room_id_in_question_becomes_hard_scope() -> None:
@@ -217,18 +341,94 @@ def test_structured_room_source_is_retained_for_capability_validation() -> None:
     assert terminal.validate_explicit_request(request) == {
         "query": request["query"],
         "sources": ["groupware"],
-        "rooms": ["room-a"],
+        "rooms": [{"source": "groupware", "roomId": "room-a"}],
     }
     with pytest.raises(terminal.KakaoTerminalRetrievalError, match="conflicts"):
-        terminal.validate_explicit_request(
-            {
-                "query": "q",
-                "scope": {
-                    "sources": ["kakao"],
-                    "rooms": [{"source": "groupware", "roomId": "room-a"}],
-                },
-            }
-        )
+        terminal.validate_explicit_request({
+            "query": "q",
+            "scope": {
+                "sources": ["kakao"],
+                "rooms": [{"source": "groupware", "roomId": "room-a"}],
+            },
+        })
+
+
+def test_mixed_source_rooms_keep_each_source_during_forwarding(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    captured: dict[str, object] = {}
+    identity = SimpleNamespace(
+        digest="sha256:" + "6" * 64,
+        index_manifest="sha256:" + "2" * 64,
+        pipeline_fingerprint="sha256:" + "7" * 64,
+    )
+
+    class _Runtime:
+        def __init__(self) -> None:
+            self.identity = identity
+            self.application = SimpleNamespace(
+                scope=SimpleNamespace(available_rooms=["kakao-room"])
+            )
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    _install_runtime_module(
+        monkeypatch, open_product_runtime=lambda **_kwargs: _Runtime()
+    )
+    monkeypatch.setattr(terminal, "get_hermes_home", lambda: home)
+    monkeypatch.setattr(
+        terminal,
+        "load_component_manifest",
+        lambda: {"component_wheel": {"sha256": "sha256:" + "8" * 64}},
+    )
+    monkeypatch.setattr(
+        "plugins.kwrag_slot.consumer.load_component_manifest",
+        lambda: {"component_wheel": {"sha256": "sha256:" + "8" * 64}},
+    )
+
+    class _Consumer:
+        def __init__(self, *_args):
+            pass
+
+        def search(self, request, **kwargs):
+            captured["request"] = request
+            captured["strategy"] = kwargs["routing_strategy"]
+            return SimpleNamespace()
+
+    monkeypatch.setattr(terminal, "HermesSlotRetrievalConsumer", _Consumer)
+    monkeypatch.setattr(terminal, "FileConsumptionReceiptSink", lambda path: path)
+
+    terminal.prepare_approved_retrieval(
+        {
+            "query": "compare sources",
+            "scope": {
+                "sources": ["kakao", "groupware"],
+                "rooms": [
+                    {"source": "groupware", "roomId": "document-set-a"},
+                    {"source": "kakao", "roomId": "kakao-room"},
+                ],
+            },
+        },
+        package_root=tmp_path / "mounted-package",
+        workspace_root=tmp_path / "workspace-index",
+        socket_path=tmp_path / "gpu.sock",
+        slot_namespace="oc20",
+    )
+
+    assert captured["request"]["scope"] == {
+        "sources": ["kakao", "groupware"],
+        "rooms": [
+            {"source": "groupware", "room_id": "document-set-a"},
+            {"source": "kakao", "room_id": "kakao-room"},
+        ],
+    }
+    assert captured["strategy"] == "explicit_room_scope"
 
 
 def test_ambiguous_room_id_mentions_fail_closed_before_search() -> None:
@@ -285,26 +485,66 @@ def test_agent_index_build_uses_product_native_scope_api(
 
 def test_missing_active_index_fails_before_runtime_open(tmp_path, monkeypatch) -> None:
     opened = False
+    status_scopes = []
 
     def open_runtime(**_kwargs):
         nonlocal opened
         opened = True
         raise AssertionError("runtime must not open without an active index")
 
+    def index_status(*, scope=None):
+        status_scopes.append(scope)
+        return {"status": "unbuilt"}
+
     _install_runtime_module(
         monkeypatch,
-        index_status=lambda: {"status": "unbuilt"},
+        index_status=index_status,
         open_product_runtime=open_runtime,
     )
     with pytest.raises(terminal.KakaoTerminalRetrievalError, match="index_required"):
         terminal.prepare_approved_retrieval(
             _request(),
-            package_root=tmp_path / "nas_docs",
-            workspace_root=tmp_path / "workspace",
-            socket_path=tmp_path / "gpu.sock",
-            slot_namespace="oc20",
         )
     assert opened is False
+    assert status_scopes == [{"sources": ["kakao"]}]
+
+
+def test_partial_explicit_source_scope_fails_before_runtime_open(
+    tmp_path, monkeypatch
+) -> None:
+    opened = False
+    status_scopes = []
+
+    def open_runtime(**_kwargs):
+        nonlocal opened
+        opened = True
+        raise AssertionError("runtime must not open for a partial explicit scope")
+
+    def index_status(*, scope=None):
+        status_scopes.append(scope)
+        return {
+            "status": "ready",
+            "source_status": "partial",
+            "available_source_count": 1,
+            "unavailable_source_count": 1,
+        }
+
+    _install_runtime_module(
+        monkeypatch,
+        index_status=index_status,
+        open_product_runtime=open_runtime,
+    )
+    with pytest.raises(
+        terminal.KakaoTerminalRetrievalError, match="rag_backend_unavailable"
+    ):
+        terminal.prepare_approved_retrieval(
+            {
+                "query": "search both sources",
+                "scope": {"sources": ["kakao", "groupware"]},
+            },
+        )
+    assert opened is False
+    assert status_scopes == [{"sources": ["kakao", "groupware"]}]
 
 
 def test_dispatch_uses_existing_consumption_and_provider_seam(
@@ -422,7 +662,7 @@ def test_real_embedded_dense_runtime_reaches_verified_hermes_result(
         monkeypatch.setattr("kwrag.live_kakao._require_readonly", lambda _path: None)
         rebuild_workspace_dense_index(
             package_root=package,
-        workspace_root=workspace,
+            workspace_root=workspace,
             slot_namespace="oc20",
             gpu=client,
             allow_nonproduction=True,

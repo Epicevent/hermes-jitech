@@ -7,18 +7,18 @@ import subprocess
 
 
 COMPONENT_DIGEST = (
-    "sha256:3ed2916bff5c7aef0add17cb46b4f00f31979065d7c864f989de42dea748ae90"
+    "sha256:b5f9d73d5f17c15f1bd6bd0647932bb58bc0058f7ce45130f082c25f05bab947"
 )
 MANIFEST_DIGEST = (
-    "sha256:80fba294e72800015de4edf6a4e8fc3a18b7ec2f80000920a5451c354966e48e"
+    "sha256:56ea22263b0ed937cc348b4f25c1d211e14d7f365609ab47aae39e6f046c8093"
 )
 CONTRACT_DIGEST = (
     "sha256:ccf826f0fe6f7edc36b6d5eacdee87277859d2f6dae3a4ea4cab5f51cba183db"
 )
 SOURCE_ARCHIVE_DIGEST = (
-    "sha256:1f67c0385bebdbf6570eaa462e3a9c5f665bd1efa0dbd3e1e35b8c8bb69557c5"
+    "sha256:dbcc232747f78313b25f16e021cc9e393c5e927596c53f5518ad167ffd27e1ae"
 )
-SOURCE_REVISION = "96a05184b64513f6b51700d587102b184df90a8f"
+SOURCE_REVISION = "67e60f540492711bb1f79d43c5c41b6e9c2a243b"
 LABEL_PREFIX = "com.epicevent.hermes.kwrag."
 
 
@@ -33,6 +33,25 @@ def _inspect_labels(image: str) -> dict[str, str]:
     labels = json.loads(result.stdout)
     assert isinstance(labels, dict)
     return labels
+
+
+def test_image_includes_groupware_pdf_extractor(built_image) -> None:
+    result = subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--entrypoint",
+            "/usr/bin/test",
+            built_image,
+            "-x",
+            "/usr/bin/pdftotext",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_image_binds_product_component_without_ops_runtime_contract(

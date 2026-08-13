@@ -50,7 +50,7 @@ def _query(value: Any) -> str:
     return value
 
 
-def _room_ids(value: Any) -> list[str] | None:
+def _room_selectors(value: Any) -> list[dict[str, str]] | None:
     if value is None:
         return None
     if (
@@ -59,7 +59,7 @@ def _room_ids(value: Any) -> list[str] | None:
         or not 1 <= len(value) <= 64
     ):
         raise KakaoTerminalRetrievalError("room scope is invalid")
-    normalized: list[str] = []
+    normalized: list[dict[str, str]] = []
     for room in value:
         if isinstance(room, Mapping):
             if set(room) != {"source", "roomId"}:
@@ -67,37 +67,18 @@ def _room_ids(value: Any) -> list[str] | None:
             source = room.get("source")
             if not isinstance(source, str) or not source.strip():
                 raise KakaoTerminalRetrievalError("room scope is invalid")
-            room = room.get("roomId")
-        if isinstance(room, str) and room == room.strip() and room:
-            normalized.append(room)
-    rooms = normalized
-    if len(rooms) != len(value) or any(not room for room in rooms):
-        raise KakaoTerminalRetrievalError("room scope is invalid")
-    if len(set(rooms)) != len(rooms):
-        raise KakaoTerminalRetrievalError("room scope contains duplicates")
-    return rooms
-
-
-def _room_sources(value: Any) -> list[str] | None:
-    """Extract and validate source identity carried by structured rooms.
-
-    Bare room IDs retain the current runtime's default-source semantics.  A
-    structured room is different: its source is caller intent and must not be
-    discarded before the source capability check runs.
-    """
-    if value is None:
-        return None
-    sources: list[str] = []
-    for room in value:
-        if not isinstance(room, Mapping):
-            continue
-        source = room.get("source")
-        if not isinstance(source, str) or not source.strip():
+            room_id = room.get("roomId")
+            normalized_source = source.strip().lower()
+        else:
+            room_id = room
+            normalized_source = "kakao"
+        if not isinstance(room_id, str) or room_id != room_id.strip() or not room_id:
             raise KakaoTerminalRetrievalError("room scope is invalid")
-        normalized = source.strip().lower()
-        if normalized not in sources:
-            sources.append(normalized)
-    return sources or None
+        normalized.append({"source": normalized_source, "roomId": room_id})
+    identities = [(room["source"], room["roomId"]) for room in normalized]
+    if len(set(identities)) != len(identities):
+        raise KakaoTerminalRetrievalError("room scope contains duplicates")
+    return normalized
 
 
 def validate_explicit_request(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -119,11 +100,18 @@ def validate_explicit_request(value: Mapping[str, Any]) -> dict[str, Any]:
         raise KakaoTerminalRetrievalError("retrieval scope is invalid")
     if scope is not None and set(scope) - {"sources", "rooms"}:
         raise KakaoTerminalRetrievalError("retrieval scope fields are invalid")
-    source_values = (
-        scope.get("sources") if scope is not None else value.get("sources")
-    )
+    if scope is not None and any(
+        field in scope and scope[field] is None for field in ("sources", "rooms")
+    ):
+        raise KakaoTerminalRetrievalError("retrieval scope field is invalid")
+    source_values = scope.get("sources") if scope is not None else value.get("sources")
     room_values = scope.get("rooms") if scope is not None else value.get("rooms")
-    room_sources = _room_sources(room_values)
+    rooms = _room_selectors(room_values)
+    room_sources = (
+        list(dict.fromkeys(room["source"] for room in rooms))
+        if rooms is not None
+        else None
+    )
     legacy_corpus = value.get("corpus")
     if legacy_corpus is not None:
         if (
@@ -144,7 +132,10 @@ def validate_explicit_request(value: Mapping[str, Any]) -> dict[str, Any]:
         not isinstance(source_values, Sequence)
         or isinstance(source_values, (str, bytes))
         or not 1 <= len(source_values) <= 16
-        or any(not isinstance(source, str) or not source.strip() for source in source_values)
+        or any(
+            not isinstance(source, str) or not source.strip()
+            for source in source_values
+        )
         or len(set(source_values)) != len(source_values)
     ):
         raise KakaoTerminalRetrievalError("source scope is invalid")
@@ -157,7 +148,8 @@ def validate_explicit_request(value: Mapping[str, Any]) -> dict[str, Any]:
             sources = room_sources
         elif any(source not in sources for source in room_sources):
             raise KakaoTerminalRetrievalError("room source conflicts with source scope")
-    rooms = _room_ids(room_values)
+    if scope is not None and sources is None and rooms is None:
+        raise KakaoTerminalRetrievalError("retrieval scope is empty")
     return {"query": query, "sources": sources, "rooms": rooms}
 
 
@@ -188,17 +180,26 @@ def _route_rooms(
     requested_rooms: list[str] | None,
     runtime: Any,
 ) -> tuple[list[str], str]:
-    available = _available_rooms(runtime)
+    # The product runtime exposes one encoded catalog for every mounted
+    # source. Kakao room ids are the only unqualified entries; other sources
+    # use ``source/room`` and must never be relabelled as Kakao selectors.
+    available = [room for room in _available_rooms(runtime) if "/" not in room]
+    if not available:
+        raise KakaoTerminalRetrievalError("mounted Kakao room catalog is unavailable")
     available_set = set(available)
     if requested_rooms is not None:
         if set(requested_rooms) - available_set:
-            raise KakaoTerminalRetrievalError("requested Kakao room is outside the mount")
+            raise KakaoTerminalRetrievalError(
+                "requested Kakao room is outside the mount"
+            )
         return requested_rooms, "explicit_room_scope"
 
     mentioned = [
         room
         for room in available
-        if re.search(rf"(?<![A-Za-z0-9_-]){re.escape(room)}(?![A-Za-z0-9_-])", query, re.I)
+        if re.search(
+            rf"(?<![A-Za-z0-9_-]){re.escape(room)}(?![A-Za-z0-9_-])", query, re.I
+        )
     ]
     if len(mentioned) > 1:
         raise KakaoTerminalRetrievalError(
@@ -213,8 +214,10 @@ def _route_rooms(
     route = getattr(runtime, "route_rooms", None)
     if callable(route):
         routed = list(route(query, limit=3))
-        if routed and len(routed) <= _MAX_ROUTED_ROOMS and all(
-            isinstance(room, str) and room in available_set for room in routed
+        if (
+            routed
+            and len(routed) <= _MAX_ROUTED_ROOMS
+            and all(isinstance(room, str) and room in available_set for room in routed)
         ):
             return list(dict.fromkeys(routed)), "internal_room_router"
 
@@ -296,19 +299,6 @@ def _runtime_paths(
     )
 
 
-def _source_package_root(source_mount: Path) -> Path:
-    """Resolve `/workspace/nas_docs` to the mounted Kakao package leaf."""
-
-    if (source_mount / "membership.json").is_file():
-        return source_mount
-    nested = source_mount / "kw" / "package"
-    if (nested / "membership.json").is_file():
-        return nested
-    # Keep an explicit test/integration mount root intact when the runtime
-    # itself owns the source-layout validation. Never invent a missing leaf.
-    return source_mount
-
-
 def prepare_approved_retrieval(
     request: Mapping[str, Any],
     *,
@@ -320,7 +310,7 @@ def prepare_approved_retrieval(
     """Run one explicit dense/vector/rerank search and verify its result."""
 
     validated = validate_explicit_request(request)
-    producer_request = {
+    producer_request: dict[str, Any] = {
         "schema_version": "kwrag-product-cli-request-v1",
         "operation": "search",
         "query": validated["query"],
@@ -329,7 +319,6 @@ def prepare_approved_retrieval(
         "run_id": str(uuid.uuid4()),
         "attempt": 1,
         "max_results": _MAX_RESULTS,
-        "scope": {"sources": ["kakao"]},
     }
     try:
         from kwrag import product_runtime
@@ -343,28 +332,43 @@ def prepare_approved_retrieval(
             "product-native KWRAG search API is unavailable"
         )
     status_reader = getattr(product_runtime, "index_status", None)
-    # The production helper owns its default mount.  Tests and embedding
-    # callers may provide an explicit runtime root, in which case the
-    # context-free status function can inspect `/workspace/nas_docs` before
-    # the supplied root is opened. A status failure is therefore advisory
-    # until the explicitly bound runtime is opened; a reported unbuilt or
-    # invalid state remains a hard failure.
+    # The production helper owns its default mount. Tests and embedding
+    # callers may override any runtime coordinate, in which case this
+    # context-free status function would inspect a different layout or socket.
+    # Let the explicitly bound runtime validate those coordinates instead.
     explicit_runtime_paths = any(
         value is not None
         for value in (package_root, workspace_root, socket_path, slot_namespace)
     )
-    if callable(status_reader):
+    if callable(status_reader) and not explicit_runtime_paths:
+        status_scope: dict[str, Any] | None = None
+        if validated["sources"] is not None or validated["rooms"] is not None:
+            status_scope = {}
+            if validated["sources"] is not None:
+                status_scope["sources"] = list(validated["sources"])
+            if validated["rooms"] is not None:
+                status_scope["rooms"] = [
+                    {"source": room["source"], "room_id": room["roomId"]}
+                    for room in validated["rooms"]
+                ]
         try:
-            status = status_reader()
+            status = (
+                status_reader()
+                if status_scope is None
+                else status_reader(scope=status_scope)
+            )
         except Exception as exc:
-            if not explicit_runtime_paths:
-                raise KakaoTerminalRetrievalError("rag_backend_unavailable") from exc
-            status = None
+            raise KakaoTerminalRetrievalError("rag_backend_unavailable") from exc
         if isinstance(status, Mapping):
             status_name = status.get("status")
             if status_name == "unbuilt":
                 raise KakaoTerminalRetrievalError("index_required")
             if status_name in {"unavailable", "invalid"}:
+                raise KakaoTerminalRetrievalError("rag_backend_unavailable")
+            if status_scope is not None and (
+                status.get("source_status") != "available"
+                or status.get("unavailable_source_count") != 0
+            ):
                 raise KakaoTerminalRetrievalError("rag_backend_unavailable")
 
     package, workspace, socket, slot, root = _runtime_paths(
@@ -382,23 +386,44 @@ def prepare_approved_retrieval(
             "receipt_path": runtime_receipt_root / "operation-receipts.jsonl",
             "gpu_receipt_path": runtime_receipt_root / "gpu-receipts.jsonl",
         }
-        runtime_kwargs["source_root"] = _source_package_root(package)
+        # ProductRuntime owns source discovery below the mounted product root.
+        # Passing the legacy Kakao package leaf here would hide every other
+        # mounted adapter (for example Groupware) from federated search.
+        runtime_kwargs["source_root"] = package
         with open_runtime(**runtime_kwargs) as runtime:
-            # Source selection is part of the product-neutral request.  The
-            # current embedded wheel may expose only Kakao; in that case it
-            # must fail closed rather than silently search a different source.
             requested_sources = validated["sources"]
-            if requested_sources is not None and requested_sources != ["kakao"]:
-                raise KakaoTerminalRetrievalError(
-                    "requested source adapter is not available in this runtime"
-                )
-            rooms, route_strategy = _route_rooms(
-                validated["query"], validated["rooms"], runtime
-            )
-            if rooms:
-                producer_request["scope"]["rooms"] = [
-                    {"source": "kakao", "room_id": room} for room in rooms
+            requested_rooms = validated["rooms"]
+            if requested_sources is not None:
+                producer_request["scope"] = {"sources": list(requested_sources)}
+            if requested_rooms is not None:
+                # Validate the Kakao subset against its mounted room catalog,
+                # while preserving every source-qualified selector exactly.
+                kakao_rooms = [
+                    room["roomId"]
+                    for room in requested_rooms
+                    if room["source"] == "kakao"
                 ]
+                if kakao_rooms:
+                    _route_rooms(validated["query"], kakao_rooms, runtime)
+                producer_request["scope"]["rooms"] = [
+                    {"source": room["source"], "room_id": room["roomId"]}
+                    for room in requested_rooms
+                ]
+                route_strategy = "explicit_room_scope"
+            elif requested_sources == ["kakao"]:
+                rooms, route_strategy = _route_rooms(validated["query"], None, runtime)
+                if route_strategy != "all_mounted_rooms":
+                    producer_request["scope"]["rooms"] = [
+                        {"source": "kakao", "room_id": room} for room in rooms
+                    ]
+            elif requested_sources is None:
+                # No caller scope means federated search across the exact
+                # source adapters opened by the mounted product runtime. Do
+                # not send an empty scope: the product contract defines an
+                # omitted scope as all mounted sources.
+                route_strategy = "all_mounted_sources"
+            else:
+                route_strategy = "source_wide_scope"
             identity = runtime.identity
             active_index_id = getattr(identity, "active_index_id", None)
             index_manifest = getattr(identity, "index_manifest", active_index_id)
@@ -522,7 +547,9 @@ def index_status(
         from kwrag import product_runtime
     except ImportError:
         product_runtime = None
-    status_fn = getattr(product_runtime, "index_status", None) if product_runtime else None
+    status_fn = (
+        getattr(product_runtime, "index_status", None) if product_runtime else None
+    )
     if not callable(status_fn):
         raise KakaoTerminalRetrievalError(
             "product-native index status API is unavailable"
