@@ -104,9 +104,7 @@ def validate_explicit_request(value: Mapping[str, Any]) -> dict[str, Any]:
         field in scope and scope[field] is None for field in ("sources", "rooms")
     ):
         raise KakaoTerminalRetrievalError("retrieval scope field is invalid")
-    source_values = (
-        scope.get("sources") if scope is not None else value.get("sources")
-    )
+    source_values = scope.get("sources") if scope is not None else value.get("sources")
     room_values = scope.get("rooms") if scope is not None else value.get("rooms")
     rooms = _room_selectors(room_values)
     room_sources = (
@@ -134,7 +132,10 @@ def validate_explicit_request(value: Mapping[str, Any]) -> dict[str, Any]:
         not isinstance(source_values, Sequence)
         or isinstance(source_values, (str, bytes))
         or not 1 <= len(source_values) <= 16
-        or any(not isinstance(source, str) or not source.strip() for source in source_values)
+        or any(
+            not isinstance(source, str) or not source.strip()
+            for source in source_values
+        )
         or len(set(source_values)) != len(source_values)
     ):
         raise KakaoTerminalRetrievalError("source scope is invalid")
@@ -188,13 +189,17 @@ def _route_rooms(
     available_set = set(available)
     if requested_rooms is not None:
         if set(requested_rooms) - available_set:
-            raise KakaoTerminalRetrievalError("requested Kakao room is outside the mount")
+            raise KakaoTerminalRetrievalError(
+                "requested Kakao room is outside the mount"
+            )
         return requested_rooms, "explicit_room_scope"
 
     mentioned = [
         room
         for room in available
-        if re.search(rf"(?<![A-Za-z0-9_-]){re.escape(room)}(?![A-Za-z0-9_-])", query, re.I)
+        if re.search(
+            rf"(?<![A-Za-z0-9_-]){re.escape(room)}(?![A-Za-z0-9_-])", query, re.I
+        )
     ]
     if len(mentioned) > 1:
         raise KakaoTerminalRetrievalError(
@@ -209,8 +214,10 @@ def _route_rooms(
     route = getattr(runtime, "route_rooms", None)
     if callable(route):
         routed = list(route(query, limit=3))
-        if routed and len(routed) <= _MAX_ROUTED_ROOMS and all(
-            isinstance(room, str) and room in available_set for room in routed
+        if (
+            routed
+            and len(routed) <= _MAX_ROUTED_ROOMS
+            and all(isinstance(room, str) and room in available_set for room in routed)
         ):
             return list(dict.fromkeys(routed)), "internal_room_router"
 
@@ -326,11 +333,14 @@ def prepare_approved_retrieval(
         )
     status_reader = getattr(product_runtime, "index_status", None)
     # The production helper owns its default mount. Tests and embedding
-    # callers may provide an explicit source or Workspace root, in which case
-    # this context-free status function would inspect an unrelated layout.
-    # Let the explicitly bound runtime validate those paths instead.
-    explicit_storage_paths = package_root is not None or workspace_root is not None
-    if callable(status_reader) and not explicit_storage_paths:
+    # callers may override any runtime coordinate, in which case this
+    # context-free status function would inspect a different layout or socket.
+    # Let the explicitly bound runtime validate those coordinates instead.
+    explicit_runtime_paths = any(
+        value is not None
+        for value in (package_root, workspace_root, socket_path, slot_namespace)
+    )
+    if callable(status_reader) and not explicit_runtime_paths:
         status_scope: dict[str, Any] | None = None
         if validated["sources"] is not None or validated["rooms"] is not None:
             status_scope = {}
@@ -537,7 +547,9 @@ def index_status(
         from kwrag import product_runtime
     except ImportError:
         product_runtime = None
-    status_fn = getattr(product_runtime, "index_status", None) if product_runtime else None
+    status_fn = (
+        getattr(product_runtime, "index_status", None) if product_runtime else None
+    )
     if not callable(status_fn):
         raise KakaoTerminalRetrievalError(
             "product-native index status API is unavailable"

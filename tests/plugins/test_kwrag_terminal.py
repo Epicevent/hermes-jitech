@@ -61,23 +61,26 @@ def test_explicit_request_owns_only_query_and_product_corpus() -> None:
         "sources": None,
         "rooms": None,
     }
-    assert terminal.validate_explicit_request(
-        {"query": "all sources", "scope": None}
-    ) == {
+    assert terminal.validate_explicit_request({
+        "query": "all sources",
+        "scope": None,
+    }) == {
         "query": "all sources",
         "sources": None,
         "rooms": None,
     }
-    assert terminal.validate_explicit_request(
-        {"query": "one source", "scope": {"sources": ["kakao"]}}
-    ) == {
+    assert terminal.validate_explicit_request({
+        "query": "one source",
+        "scope": {"sources": ["kakao"]},
+    }) == {
         "query": "one source",
         "sources": ["kakao"],
         "rooms": None,
     }
-    assert terminal.validate_explicit_request(
-        {"query": "one source", "scope": {"sources": ["groupware"]}}
-    ) == {
+    assert terminal.validate_explicit_request({
+        "query": "one source",
+        "scope": {"sources": ["groupware"]},
+    }) == {
         "query": "one source",
         "sources": ["groupware"],
         "rooms": None,
@@ -217,6 +220,22 @@ def test_prepare_uses_dense_product_runtime_without_ops_or_generation_contracts(
     assert binding.current_pipeline_fingerprint == identity.pipeline_fingerprint
     assert "binding_path" not in captured["runtime"]
 
+    monkeypatch.setattr(terminal, "_DEFAULT_SOURCE_ROOT", package_root)
+    monkeypatch.setattr(terminal, "_DEFAULT_WORKSPACE_INDEX_ROOT", workspace_root)
+    terminal.prepare_approved_retrieval(
+        _request(),
+        socket_path=socket_path,
+        slot_namespace="oc20",
+    )
+    assert captured["runtime"] == {
+        "source_root": package_root,
+        "workspace_root": workspace_root,
+        "slot_namespace": "oc20",
+        "socket_path": socket_path,
+        "receipt_path": (workspace_root / "receipts" / "operation-receipts.jsonl"),
+        "gpu_receipt_path": workspace_root / "receipts" / "gpu-receipts.jsonl",
+    }
+
     terminal.prepare_approved_retrieval(
         {"query": "search every mounted source"},
         package_root=package_root,
@@ -230,9 +249,7 @@ def test_prepare_uses_dense_product_runtime_without_ops_or_generation_contracts(
     terminal.prepare_approved_retrieval(
         {
             "query": "find the groupware note",
-            "scope": {
-                "rooms": [{"source": "groupware", "roomId": "document-set-a"}]
-            },
+            "scope": {"rooms": [{"source": "groupware", "roomId": "document-set-a"}]},
         },
         package_root=package_root,
         workspace_root=workspace_root,
@@ -265,40 +282,32 @@ def test_embedded_contract_uses_omitted_scope_for_all_mounted_sources(
     monkeypatch.syspath_prepend(str(WHEEL))
     contract = importlib.import_module("kwrag.product_contract")
 
-    normalized = contract.normalize_product_search_request(
-        {
-            "schema_version": "kwrag-product-cli-request-v1",
-            "operation": "search",
-            "query": "search every mounted source",
-        }
-    )
+    normalized = contract.normalize_product_search_request({
+        "schema_version": "kwrag-product-cli-request-v1",
+        "operation": "search",
+        "query": "search every mounted source",
+    })
 
     assert normalized.scope.sources == ("groupware", "kakao")
     assert normalized.scope.rooms is None
     with pytest.raises(contract.ProductContractError, match="scope_invalid"):
-        contract.normalize_product_search_request(
-            {
-                "schema_version": "kwrag-product-cli-request-v1",
-                "operation": "search",
-                "query": "search every mounted source",
-                "scope": {},
-            }
-        )
+        contract.normalize_product_search_request({
+            "schema_version": "kwrag-product-cli-request-v1",
+            "operation": "search",
+            "query": "search every mounted source",
+            "scope": {},
+        })
 
 
 def test_routing_scope_observation_includes_nested_source_scope() -> None:
     from plugins.kwrag_slot.consumer import _routing_scope_observation
 
-    assert _routing_scope_observation(
-        {
-            "scope": {
-                "sources": ["groupware"],
-                "rooms": [
-                    {"source": "groupware", "room_id": "document-set-a"}
-                ],
-            }
+    assert _routing_scope_observation({
+        "scope": {
+            "sources": ["groupware"],
+            "rooms": [{"source": "groupware", "room_id": "document-set-a"}],
         }
-    ) == {
+    }) == {
         "sources": ["groupware"],
         "rooms": [{"source": "groupware", "room_id": "document-set-a"}],
     }
@@ -335,15 +344,13 @@ def test_structured_room_source_is_retained_for_capability_validation() -> None:
         "rooms": [{"source": "groupware", "roomId": "room-a"}],
     }
     with pytest.raises(terminal.KakaoTerminalRetrievalError, match="conflicts"):
-        terminal.validate_explicit_request(
-            {
-                "query": "q",
-                "scope": {
-                    "sources": ["kakao"],
-                    "rooms": [{"source": "groupware", "roomId": "room-a"}],
-                },
-            }
-        )
+        terminal.validate_explicit_request({
+            "query": "q",
+            "scope": {
+                "sources": ["kakao"],
+                "rooms": [{"source": "groupware", "roomId": "room-a"}],
+            },
+        })
 
 
 def test_mixed_source_rooms_keep_each_source_during_forwarding(
@@ -371,7 +378,9 @@ def test_mixed_source_rooms_keep_each_source_during_forwarding(
         def __exit__(self, *_args):
             return None
 
-    _install_runtime_module(monkeypatch, open_product_runtime=lambda **_kwargs: _Runtime())
+    _install_runtime_module(
+        monkeypatch, open_product_runtime=lambda **_kwargs: _Runtime()
+    )
     monkeypatch.setattr(terminal, "get_hermes_home", lambda: home)
     monkeypatch.setattr(
         terminal,
@@ -653,7 +662,7 @@ def test_real_embedded_dense_runtime_reaches_verified_hermes_result(
         monkeypatch.setattr("kwrag.live_kakao._require_readonly", lambda _path: None)
         rebuild_workspace_dense_index(
             package_root=package,
-        workspace_root=workspace,
+            workspace_root=workspace,
             slot_namespace="oc20",
             gpu=client,
             allow_nonproduction=True,
