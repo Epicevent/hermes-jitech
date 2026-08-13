@@ -50,7 +50,7 @@ def _query(value: Any) -> str:
     return value
 
 
-def _room_ids(value: Any) -> list[str] | None:
+def _room_selectors(value: Any) -> list[dict[str, str]] | None:
     if value is None:
         return None
     if (
@@ -59,7 +59,7 @@ def _room_ids(value: Any) -> list[str] | None:
         or not 1 <= len(value) <= 64
     ):
         raise KakaoTerminalRetrievalError("room scope is invalid")
-    normalized: list[str] = []
+    normalized: list[dict[str, str]] = []
     for room in value:
         if isinstance(room, Mapping):
             if set(room) != {"source", "roomId"}:
@@ -67,37 +67,18 @@ def _room_ids(value: Any) -> list[str] | None:
             source = room.get("source")
             if not isinstance(source, str) or not source.strip():
                 raise KakaoTerminalRetrievalError("room scope is invalid")
-            room = room.get("roomId")
-        if isinstance(room, str) and room == room.strip() and room:
-            normalized.append(room)
-    rooms = normalized
-    if len(rooms) != len(value) or any(not room for room in rooms):
-        raise KakaoTerminalRetrievalError("room scope is invalid")
-    if len(set(rooms)) != len(rooms):
-        raise KakaoTerminalRetrievalError("room scope contains duplicates")
-    return rooms
-
-
-def _room_sources(value: Any) -> list[str] | None:
-    """Extract and validate source identity carried by structured rooms.
-
-    Bare room IDs retain the current runtime's default-source semantics.  A
-    structured room is different: its source is caller intent and must not be
-    discarded before the source capability check runs.
-    """
-    if value is None:
-        return None
-    sources: list[str] = []
-    for room in value:
-        if not isinstance(room, Mapping):
-            continue
-        source = room.get("source")
-        if not isinstance(source, str) or not source.strip():
+            room_id = room.get("roomId")
+            normalized_source = source.strip().lower()
+        else:
+            room_id = room
+            normalized_source = "kakao"
+        if not isinstance(room_id, str) or room_id != room_id.strip() or not room_id:
             raise KakaoTerminalRetrievalError("room scope is invalid")
-        normalized = source.strip().lower()
-        if normalized not in sources:
-            sources.append(normalized)
-    return sources or None
+        normalized.append({"source": normalized_source, "roomId": room_id})
+    identities = [(room["source"], room["roomId"]) for room in normalized]
+    if len(set(identities)) != len(identities):
+        raise KakaoTerminalRetrievalError("room scope contains duplicates")
+    return normalized
 
 
 def validate_explicit_request(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -123,7 +104,12 @@ def validate_explicit_request(value: Mapping[str, Any]) -> dict[str, Any]:
         scope.get("sources") if scope is not None else value.get("sources")
     )
     room_values = scope.get("rooms") if scope is not None else value.get("rooms")
-    room_sources = _room_sources(room_values)
+    rooms = _room_selectors(room_values)
+    room_sources = (
+        list(dict.fromkeys(room["source"] for room in rooms))
+        if rooms is not None
+        else None
+    )
     legacy_corpus = value.get("corpus")
     if legacy_corpus is not None:
         if (
@@ -157,7 +143,6 @@ def validate_explicit_request(value: Mapping[str, Any]) -> dict[str, Any]:
             sources = room_sources
         elif any(source not in sources for source in room_sources):
             raise KakaoTerminalRetrievalError("room source conflicts with source scope")
-    rooms = _room_ids(room_values)
     return {"query": query, "sources": sources, "rooms": rooms}
 
 
@@ -320,7 +305,7 @@ def prepare_approved_retrieval(
     """Run one explicit dense/vector/rerank search and verify its result."""
 
     validated = validate_explicit_request(request)
-    producer_request = {
+    producer_request: dict[str, Any] = {
         "schema_version": "kwrag-product-cli-request-v1",
         "operation": "search",
         "query": validated["query"],
@@ -329,10 +314,6 @@ def prepare_approved_retrieval(
         "run_id": str(uuid.uuid4()),
         "attempt": 1,
         "max_results": _MAX_RESULTS,
-        # Omitted sources means every adapter currently exposed by the
-        # opened product runtime.  A caller-provided source list is retained
-        # as a hard scope; never silently narrow a multi-source turn to Kakao.
-        "scope": {},
     }
     try:
         from kwrag import product_runtime
@@ -390,26 +371,22 @@ def prepare_approved_retrieval(
             requested_sources = validated["sources"]
             requested_rooms = validated["rooms"]
             if requested_sources is not None:
-                producer_request["scope"]["sources"] = list(requested_sources)
+                producer_request["scope"] = {"sources": list(requested_sources)}
             if requested_rooms is not None:
-                # Structured rooms already bind their source during request
-                # validation. Bare room IDs retain the legacy Kakao meaning.
-                # The runtime performs the final mounted-index membership
-                # check for every source-qualified room.
-                room_source = (
-                    requested_sources[0]
-                    if requested_sources is not None and len(requested_sources) == 1
-                    else "kakao"
-                )
-                if room_source == "kakao":
-                    rooms, route_strategy = _route_rooms(
-                        validated["query"], requested_rooms, runtime
-                    )
-                else:
-                    rooms, route_strategy = requested_rooms, "explicit_room_scope"
-                producer_request["scope"]["rooms"] = [
-                    {"source": room_source, "room_id": room} for room in rooms
+                # Validate the Kakao subset against its mounted room catalog,
+                # while preserving every source-qualified selector exactly.
+                kakao_rooms = [
+                    room["roomId"]
+                    for room in requested_rooms
+                    if room["source"] == "kakao"
                 ]
+                if kakao_rooms:
+                    _route_rooms(validated["query"], kakao_rooms, runtime)
+                producer_request["scope"]["rooms"] = [
+                    {"source": room["source"], "room_id": room["roomId"]}
+                    for room in requested_rooms
+                ]
+                route_strategy = "explicit_room_scope"
             elif requested_sources == ["kakao"]:
                 rooms, route_strategy = _route_rooms(validated["query"], None, runtime)
                 producer_request["scope"]["rooms"] = [
@@ -418,7 +395,8 @@ def prepare_approved_retrieval(
             elif requested_sources is None:
                 # No caller scope means federated search across the exact
                 # source adapters opened by the mounted product runtime. Do
-                # not reinterpret source-qualified rooms as Kakao rooms.
+                # not send an empty scope: the product contract defines an
+                # omitted scope as all mounted sources.
                 route_strategy = "all_mounted_sources"
             else:
                 route_strategy = "source_wide_scope"

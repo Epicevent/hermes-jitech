@@ -1018,6 +1018,22 @@ def _digest(value: object, field: str) -> str:
     return text
 
 
+def _routing_scope_observation(request: Mapping[str, Any]) -> dict[str, Any]:
+    """Project the exact caller scope without storing query or result content."""
+
+    selected_sources = request.get("sources")
+    selected_rooms = request.get("corpora")
+    if selected_rooms is None:
+        selected_rooms = request.get("corpus")
+    scope = request.get("scope")
+    if isinstance(scope, Mapping):
+        if selected_sources is None:
+            selected_sources = scope.get("sources")
+        if selected_rooms is None:
+            selected_rooms = scope.get("rooms")
+    return {"sources": selected_sources, "rooms": selected_rooms}
+
+
 @dataclass(frozen=True)
 class HermesSlotRetrievalBinding:
     enabled: bool
@@ -1483,20 +1499,8 @@ class HermesSlotRetrievalConsumer:
             exchange.operation_receipt,
             **verification_kwargs,
         )
-        selected_rooms = request.get("corpora")
-        if selected_rooms is None:
-            selected_rooms = request.get("corpus")
-        if selected_rooms is None:
-            scope = request.get("scope")
-            if isinstance(scope, Mapping):
-                selected_rooms = scope.get("rooms")
         routing_scope_digest = "sha256:" + hashlib.sha256(
-            canonical_json_bytes(
-                {
-                    "sources": request.get("sources"),
-                    "rooms": selected_rooms,
-                }
-            )
+            canonical_json_bytes(_routing_scope_observation(request))
         ).hexdigest()
         receipt = {
             "schema_version": "hermes-kwrag-result-receipt-v1",

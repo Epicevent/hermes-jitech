@@ -195,7 +195,7 @@ def test_prepare_uses_dense_product_runtime_without_ops_or_generation_contracts(
         socket_path=socket_path,
         slot_namespace="oc20",
     )
-    assert captured["producer_request"]["scope"] == {}
+    assert "scope" not in captured["producer_request"]
     assert captured["routing_strategy"] == "all_mounted_sources"
 
     terminal.prepare_approved_retrieval(
@@ -229,6 +229,51 @@ def test_embedded_wheel_registers_product_sources() -> None:
     assert "return LiveGroupwareSource(" in mounted_sources
 
 
+def test_embedded_contract_uses_omitted_scope_for_all_mounted_sources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.syspath_prepend(str(WHEEL))
+    contract = importlib.import_module("kwrag.product_contract")
+
+    normalized = contract.normalize_product_search_request(
+        {
+            "schema_version": "kwrag-product-cli-request-v1",
+            "operation": "search",
+            "query": "search every mounted source",
+        }
+    )
+
+    assert normalized.scope.sources == ("groupware", "kakao")
+    assert normalized.scope.rooms is None
+    with pytest.raises(contract.ProductContractError, match="scope_invalid"):
+        contract.normalize_product_search_request(
+            {
+                "schema_version": "kwrag-product-cli-request-v1",
+                "operation": "search",
+                "query": "search every mounted source",
+                "scope": {},
+            }
+        )
+
+
+def test_routing_scope_observation_includes_nested_source_scope() -> None:
+    from plugins.kwrag_slot.consumer import _routing_scope_observation
+
+    assert _routing_scope_observation(
+        {
+            "scope": {
+                "sources": ["groupware"],
+                "rooms": [
+                    {"source": "groupware", "room_id": "document-set-a"}
+                ],
+            }
+        }
+    ) == {
+        "sources": ["groupware"],
+        "rooms": [{"source": "groupware", "room_id": "document-set-a"}],
+    }
+
+
 def test_unique_room_id_in_question_becomes_hard_scope() -> None:
     runtime = SimpleNamespace(
         application=SimpleNamespace(
@@ -257,7 +302,7 @@ def test_structured_room_source_is_retained_for_capability_validation() -> None:
     assert terminal.validate_explicit_request(request) == {
         "query": request["query"],
         "sources": ["groupware"],
-        "rooms": ["room-a"],
+        "rooms": [{"source": "groupware", "roomId": "room-a"}],
     }
     with pytest.raises(terminal.KakaoTerminalRetrievalError, match="conflicts"):
         terminal.validate_explicit_request(
@@ -269,6 +314,78 @@ def test_structured_room_source_is_retained_for_capability_validation() -> None:
                 },
             }
         )
+
+
+def test_mixed_source_rooms_keep_each_source_during_forwarding(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    captured: dict[str, object] = {}
+    identity = SimpleNamespace(
+        digest="sha256:" + "6" * 64,
+        index_manifest="sha256:" + "2" * 64,
+        pipeline_fingerprint="sha256:" + "7" * 64,
+    )
+
+    class _Runtime:
+        def __init__(self) -> None:
+            self.identity = identity
+            self.application = SimpleNamespace(
+                scope=SimpleNamespace(available_rooms=["kakao-room"])
+            )
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    _install_runtime_module(monkeypatch, open_product_runtime=lambda **_kwargs: _Runtime())
+    monkeypatch.setattr(terminal, "get_hermes_home", lambda: home)
+    monkeypatch.setattr(
+        terminal,
+        "load_component_manifest",
+        lambda: {"component_wheel": {"sha256": "sha256:" + "8" * 64}},
+    )
+
+    class _Consumer:
+        def __init__(self, *_args):
+            pass
+
+        def search(self, request, **kwargs):
+            captured["request"] = request
+            captured["strategy"] = kwargs["routing_strategy"]
+            return SimpleNamespace()
+
+    monkeypatch.setattr(terminal, "HermesSlotRetrievalConsumer", _Consumer)
+    monkeypatch.setattr(terminal, "FileConsumptionReceiptSink", lambda path: path)
+
+    terminal.prepare_approved_retrieval(
+        {
+            "query": "compare sources",
+            "scope": {
+                "sources": ["kakao", "groupware"],
+                "rooms": [
+                    {"source": "groupware", "roomId": "document-set-a"},
+                    {"source": "kakao", "roomId": "kakao-room"},
+                ],
+            },
+        },
+        package_root=tmp_path / "mounted-package",
+        workspace_root=tmp_path / "workspace-index",
+        socket_path=tmp_path / "gpu.sock",
+        slot_namespace="oc20",
+    )
+
+    assert captured["request"]["scope"] == {
+        "sources": ["kakao", "groupware"],
+        "rooms": [
+            {"source": "groupware", "room_id": "document-set-a"},
+            {"source": "kakao", "room_id": "kakao-room"},
+        ],
+    }
+    assert captured["strategy"] == "explicit_room_scope"
 
 
 def test_ambiguous_room_id_mentions_fail_closed_before_search() -> None:
