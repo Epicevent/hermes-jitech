@@ -7,18 +7,18 @@ import subprocess
 
 
 COMPONENT_DIGEST = (
-    "sha256:4c16d6d44ca8bc2da87c6253afed20a76b8b04af4b1b90bf3c1955399dbdb6de"
+    "sha256:3ed2916bff5c7aef0add17cb46b4f00f31979065d7c864f989de42dea748ae90"
 )
 MANIFEST_DIGEST = (
-    "sha256:cff1def194356214f1d544d420cdbad0db7dce27513b4efa922e0cb1a9952c52"
+    "sha256:80fba294e72800015de4edf6a4e8fc3a18b7ec2f80000920a5451c354966e48e"
 )
 CONTRACT_DIGEST = (
     "sha256:ccf826f0fe6f7edc36b6d5eacdee87277859d2f6dae3a4ea4cab5f51cba183db"
 )
 SOURCE_ARCHIVE_DIGEST = (
-    "sha256:81e97e2c3699007b1a48bda98d9bb17ee8312c3bc2708250fb6c9b52c21d82a6"
+    "sha256:1f67c0385bebdbf6570eaa462e3a9c5f665bd1efa0dbd3e1e35b8c8bb69557c5"
 )
-SOURCE_REVISION = "0d72c1834c7e5545930e90ad6921cd64f7fc0aaf"
+SOURCE_REVISION = "96a05184b64513f6b51700d587102b184df90a8f"
 LABEL_PREFIX = "com.epicevent.hermes.kwrag."
 
 
@@ -94,7 +94,7 @@ def test_image_binds_product_component_without_ops_runtime_contract(
             "python",
             built_image,
             "-c",
-            "from kwrag.product_runtime import open_kakao_product_runtime; print('ok')",
+            "from kwrag.product_runtime import open_product_runtime; print('ok')",
         ],
         capture_output=True,
         text=True,

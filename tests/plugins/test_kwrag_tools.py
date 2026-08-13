@@ -78,6 +78,10 @@ def test_plugin_registers_agent_tools_and_cli() -> None:
         "kwrag_index_status",
         "kwrag_search",
     }
+    search_registration = next(
+        item for item in context.tools if item["name"] == "kwrag_search"
+    )
+    assert search_registration["agent_handler"] is tools._handle_search_with_agent
     assert len(context.commands) == 1
 
 
@@ -90,6 +94,7 @@ def test_dashboard_api_toolset_exposes_only_explicit_index_controls() -> None:
 
 def test_kwrag_search_tool_captures_verified_result_for_provider_seam(monkeypatch) -> None:
     from agent.agent_runtime_helpers import invoke_tool
+    from tools.registry import registry
 
     prepared = SimpleNamespace(
         result_receipt_digest="sha256:" + "a" * 64,
@@ -103,6 +108,11 @@ def test_kwrag_search_tool_captures_verified_result_for_provider_seam(monkeypatc
 
     monkeypatch.setattr(
         "plugins.kwrag_slot.terminal.prepare_approved_retrieval", prepare
+    )
+    monkeypatch.setattr(
+        registry,
+        "get_agent_handler",
+        lambda name: tools._handle_search_with_agent if name == "kwrag_search" else None,
     )
     agent = SimpleNamespace(_kwrag_pending_retrieval=None, _memory_manager=None)
     encoded = invoke_tool(
