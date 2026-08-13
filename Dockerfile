@@ -161,7 +161,7 @@ RUN uv sync --frozen --no-install-project --extra all --extra messaging --extra 
 # automatic invocation or provider policy.
 COPY vendor/kwrag/kwrag_product_service-0.5.0-py3-none-any.whl /tmp/kwrag_product_service-0.5.0-py3-none-any.whl
 RUN printf '%s  %s\n' \
-        '8b97e30d2ac6e7ed44c70fdd2a8075406e01b68be9c9068262987d769c1b98ed' \
+        'b5f9d73d5f17c15f1bd6bd0647932bb58bc0058f7ce45130f082c25f05bab947' \
         '/tmp/kwrag_product_service-0.5.0-py3-none-any.whl' \
         > /tmp/kwrag_product_service.sha256 && \
     sha256sum -c /tmp/kwrag_product_service.sha256 && \
@@ -170,11 +170,11 @@ RUN printf '%s  %s\n' \
     rm /tmp/kwrag_product_service-0.5.0-py3-none-any.whl
 
 LABEL com.epicevent.hermes.kwrag.schema="hermes-kwrag-product-component/v1" \
-        com.epicevent.hermes.kwrag.component-digest="sha256:8b97e30d2ac6e7ed44c70fdd2a8075406e01b68be9c9068262987d769c1b98ed" \
+        com.epicevent.hermes.kwrag.component-digest="sha256:b5f9d73d5f17c15f1bd6bd0647932bb58bc0058f7ce45130f082c25f05bab947" \
         com.epicevent.hermes.kwrag.contract-digest="sha256:ccf826f0fe6f7edc36b6d5eacdee87277859d2f6dae3a4ea4cab5f51cba183db" \
-        com.epicevent.hermes.kwrag.component-manifest-digest="sha256:ab6fd5b5e5d03bf601f0edcfcb1967dc41ad1ee184982cb1c7412994d6682643" \
-        com.epicevent.hermes.kwrag.source-archive-digest="sha256:d2c178439144bafe5edef9b385fc7c6c0c7070a140732eb18ef41862de6c00eb" \
-      com.epicevent.hermes.kwrag.source-revision="5f3a35e462ca2ef155b67f77a799b11e5f08b39a" \
+        com.epicevent.hermes.kwrag.component-manifest-digest="sha256:56ea22263b0ed937cc348b4f25c1d211e14d7f365609ab47aae39e6f046c8093" \
+        com.epicevent.hermes.kwrag.source-archive-digest="sha256:dbcc232747f78313b25f16e021cc9e393c5e927596c53f5518ad167ffd27e1ae" \
+      com.epicevent.hermes.kwrag.source-revision="67e60f540492711bb1f79d43c5c41b6e9c2a243b" \
       com.epicevent.hermes.kwrag.transport="in_process" \
       com.epicevent.hermes.kwrag.default-enabled="false" \
       com.epicevent.hermes.kwrag.host-port-count="0" \
