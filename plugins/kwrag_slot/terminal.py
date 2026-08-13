@@ -362,6 +362,11 @@ def prepare_approved_retrieval(
                 raise KakaoTerminalRetrievalError("index_required")
             if status_name in {"unavailable", "invalid"}:
                 raise KakaoTerminalRetrievalError("rag_backend_unavailable")
+            if status_scope is not None and (
+                status.get("source_status") != "available"
+                or status.get("unavailable_source_count") != 0
+            ):
+                raise KakaoTerminalRetrievalError("rag_backend_unavailable")
 
     package, workspace, socket, slot, root = _runtime_paths(
         package_root=package_root,

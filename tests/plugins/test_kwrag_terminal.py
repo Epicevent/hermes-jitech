@@ -142,7 +142,11 @@ def test_prepare_uses_dense_product_runtime_without_ops_or_generation_contracts(
 
     def index_status(**kwargs):
         status_calls.append(kwargs)
-        return {"status": "active"}
+        return {
+            "status": "active",
+            "source_status": "available",
+            "unavailable_source_count": 0,
+        }
 
     _install_runtime_module(
         monkeypatch,
@@ -516,6 +520,48 @@ def test_missing_active_index_fails_before_runtime_open(tmp_path, monkeypatch) -
         )
     assert opened is False
     assert status_scopes == [{"sources": ["kakao"]}]
+
+
+def test_partial_explicit_source_scope_fails_before_runtime_open(
+    tmp_path, monkeypatch
+) -> None:
+    opened = False
+    status_scopes = []
+
+    def open_runtime(**_kwargs):
+        nonlocal opened
+        opened = True
+        raise AssertionError("runtime must not open for a partial explicit scope")
+
+    def index_status(*, scope=None):
+        status_scopes.append(scope)
+        return {
+            "status": "ready",
+            "source_status": "partial",
+            "available_source_count": 1,
+            "unavailable_source_count": 1,
+        }
+
+    _install_runtime_module(
+        monkeypatch,
+        index_status=index_status,
+        open_product_runtime=open_runtime,
+    )
+    with pytest.raises(
+        terminal.KakaoTerminalRetrievalError, match="rag_backend_unavailable"
+    ):
+        terminal.prepare_approved_retrieval(
+            {
+                "query": "search both sources",
+                "scope": {"sources": ["kakao", "groupware"]},
+            },
+            package_root=tmp_path / "nas_docs",
+            workspace_root=tmp_path / "workspace",
+            socket_path=tmp_path / "gpu.sock",
+            slot_namespace="oc20",
+        )
+    assert opened is False
+    assert status_scopes == [{"sources": ["kakao", "groupware"]}]
 
 
 def test_dispatch_uses_existing_consumption_and_provider_seam(
