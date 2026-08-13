@@ -143,6 +143,8 @@ def validate_explicit_request(value: Mapping[str, Any]) -> dict[str, Any]:
             sources = room_sources
         elif any(source not in sources for source in room_sources):
             raise KakaoTerminalRetrievalError("room source conflicts with source scope")
+    if scope is not None and sources is None and rooms is None:
+        raise KakaoTerminalRetrievalError("retrieval scope is empty")
     return {"query": query, "sources": sources, "rooms": rooms}
 
 

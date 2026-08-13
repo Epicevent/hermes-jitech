@@ -37,6 +37,8 @@ def test_explicit_request_owns_only_query_and_product_corpus() -> None:
     }
     invalid = (
         {"query": "question", "corpus": ""},
+        {"query": "question", "scope": {}},
+        {"query": "question", "scope": {"sources": None}},
         {**_request(), "expected_source_generation": "sha256:" + "1" * 64},
         {**_request(), "expected_index_manifest": "sha256:" + "2" * 64},
     )
@@ -94,6 +96,7 @@ def test_prepare_uses_dense_product_runtime_without_ops_or_generation_contracts(
     kakao_package.mkdir(parents=True)
     (kakao_package / "membership.json").write_text("{}", encoding="utf-8")
     captured: dict[str, object] = {}
+    status_calls: list[dict[str, object]] = []
     identity = SimpleNamespace(
         digest="sha256:" + "6" * 64,
         index_manifest="sha256:" + "2" * 64,
@@ -120,7 +123,7 @@ def test_prepare_uses_dense_product_runtime_without_ops_or_generation_contracts(
         return _Runtime()
 
     def index_status(**kwargs):
-        captured.setdefault("status_calls", []).append(kwargs)
+        status_calls.append(kwargs)
         return {"status": "active"}
 
     _install_runtime_module(
@@ -172,6 +175,7 @@ def test_prepare_uses_dense_product_runtime_without_ops_or_generation_contracts(
         "gpu_receipt_path": workspace_root / "receipts" / "gpu-receipts.jsonl",
     }
     producer_request = captured["producer_request"]
+    assert isinstance(producer_request, dict)
     assert set(producer_request) == {
         "schema_version",
         "operation",
@@ -225,7 +229,7 @@ def test_prepare_uses_dense_product_runtime_without_ops_or_generation_contracts(
         "rooms": [{"source": "groupware", "room_id": "document-set-a"}],
     }
     assert captured["routing_strategy"] == "explicit_room_scope"
-    assert captured["status_calls"] == [
+    assert status_calls == [
         {"scope": {"sources": ["kakao"]}},
         {},
         {
