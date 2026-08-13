@@ -325,17 +325,12 @@ def prepare_approved_retrieval(
             "product-native KWRAG search API is unavailable"
         )
     status_reader = getattr(product_runtime, "index_status", None)
-    # The production helper owns its default mount.  Tests and embedding
-    # callers may provide an explicit runtime root, in which case the
-    # context-free status function can inspect `/workspace/nas_docs` before
-    # the supplied root is opened. A status failure is therefore advisory
-    # until the explicitly bound runtime is opened; a reported unbuilt or
-    # invalid state remains a hard failure.
-    explicit_runtime_paths = any(
-        value is not None
-        for value in (package_root, workspace_root, socket_path, slot_namespace)
-    )
-    if callable(status_reader):
+    # The production helper owns its default mount. Tests and embedding
+    # callers may provide an explicit source or Workspace root, in which case
+    # this context-free status function would inspect an unrelated layout.
+    # Let the explicitly bound runtime validate those paths instead.
+    explicit_storage_paths = package_root is not None or workspace_root is not None
+    if callable(status_reader) and not explicit_storage_paths:
         status_scope: dict[str, Any] | None = None
         if validated["sources"] is not None or validated["rooms"] is not None:
             status_scope = {}
@@ -353,9 +348,7 @@ def prepare_approved_retrieval(
                 else status_reader(scope=status_scope)
             )
         except Exception as exc:
-            if not explicit_runtime_paths:
-                raise KakaoTerminalRetrievalError("rag_backend_unavailable") from exc
-            status = None
+            raise KakaoTerminalRetrievalError("rag_backend_unavailable") from exc
         if isinstance(status, Mapping):
             status_name = status.get("status")
             if status_name == "unbuilt":
@@ -409,9 +402,10 @@ def prepare_approved_retrieval(
                 route_strategy = "explicit_room_scope"
             elif requested_sources == ["kakao"]:
                 rooms, route_strategy = _route_rooms(validated["query"], None, runtime)
-                producer_request["scope"]["rooms"] = [
-                    {"source": "kakao", "room_id": room} for room in rooms
-                ]
+                if route_strategy != "all_mounted_rooms":
+                    producer_request["scope"]["rooms"] = [
+                        {"source": "kakao", "room_id": room} for room in rooms
+                    ]
             elif requested_sources is None:
                 # No caller scope means federated search across the exact
                 # source adapters opened by the mounted product runtime. Do

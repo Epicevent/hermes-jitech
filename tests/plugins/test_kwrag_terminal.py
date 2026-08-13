@@ -142,11 +142,7 @@ def test_prepare_uses_dense_product_runtime_without_ops_or_generation_contracts(
 
     def index_status(**kwargs):
         status_calls.append(kwargs)
-        return {
-            "status": "active",
-            "source_status": "available",
-            "unavailable_source_count": 0,
-        }
+        raise AssertionError("explicit storage paths must not read default status")
 
     _install_runtime_module(
         monkeypatch,
@@ -212,10 +208,7 @@ def test_prepare_uses_dense_product_runtime_without_ops_or_generation_contracts(
     assert producer_request["query"] == _request()["query"]
     assert producer_request["schema_version"] == "kwrag-product-cli-request-v1"
     assert producer_request["operation"] == "search"
-    assert producer_request["scope"] == {"sources": ["kakao"], "rooms": [
-        {"source": "kakao", "room_id": "room-a"},
-        {"source": "kakao", "room_id": "room-b"},
-    ]}
+    assert producer_request["scope"] == {"sources": ["kakao"]}
     assert captured["routing_strategy"] == "all_mounted_rooms"
     assert "expected_source_generation" not in producer_request
     assert "expected_index_manifest" not in producer_request
@@ -251,18 +244,7 @@ def test_prepare_uses_dense_product_runtime_without_ops_or_generation_contracts(
         "rooms": [{"source": "groupware", "room_id": "document-set-a"}],
     }
     assert captured["routing_strategy"] == "explicit_room_scope"
-    assert status_calls == [
-        {"scope": {"sources": ["kakao"]}},
-        {},
-        {
-            "scope": {
-                "sources": ["groupware"],
-                "rooms": [
-                    {"source": "groupware", "room_id": "document-set-a"}
-                ],
-            }
-        },
-    ]
+    assert status_calls == []
 
 
 def test_embedded_wheel_registers_product_sources() -> None:
@@ -513,10 +495,6 @@ def test_missing_active_index_fails_before_runtime_open(tmp_path, monkeypatch) -
     with pytest.raises(terminal.KakaoTerminalRetrievalError, match="index_required"):
         terminal.prepare_approved_retrieval(
             _request(),
-            package_root=tmp_path / "nas_docs",
-            workspace_root=tmp_path / "workspace",
-            socket_path=tmp_path / "gpu.sock",
-            slot_namespace="oc20",
         )
     assert opened is False
     assert status_scopes == [{"sources": ["kakao"]}]
@@ -555,10 +533,6 @@ def test_partial_explicit_source_scope_fails_before_runtime_open(
                 "query": "search both sources",
                 "scope": {"sources": ["kakao", "groupware"]},
             },
-            package_root=tmp_path / "nas_docs",
-            workspace_root=tmp_path / "workspace",
-            socket_path=tmp_path / "gpu.sock",
-            slot_namespace="oc20",
         )
     assert opened is False
     assert status_scopes == [{"sources": ["kakao", "groupware"]}]
