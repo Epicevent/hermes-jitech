@@ -329,7 +329,10 @@ def prepare_approved_retrieval(
         "run_id": str(uuid.uuid4()),
         "attempt": 1,
         "max_results": _MAX_RESULTS,
-        "scope": {"sources": ["kakao"]},
+        # Omitted sources means every adapter currently exposed by the
+        # opened product runtime.  A caller-provided source list is retained
+        # as a hard scope; never silently narrow a multi-source turn to Kakao.
+        "scope": {},
     }
     try:
         from kwrag import product_runtime
@@ -384,20 +387,20 @@ def prepare_approved_retrieval(
         }
         runtime_kwargs["source_root"] = _source_package_root(package)
         with open_runtime(**runtime_kwargs) as runtime:
-            # Source selection is part of the product-neutral request.  The
-            # current embedded wheel may expose only Kakao; in that case it
-            # must fail closed rather than silently search a different source.
             requested_sources = validated["sources"]
-            if requested_sources is not None and requested_sources != ["kakao"]:
-                raise KakaoTerminalRetrievalError(
-                    "requested source adapter is not available in this runtime"
-                )
+            if requested_sources is not None:
+                producer_request["scope"]["sources"] = list(requested_sources)
             rooms, route_strategy = _route_rooms(
                 validated["query"], validated["rooms"], runtime
             )
             if rooms:
+                room_source = (
+                    requested_sources[0]
+                    if requested_sources is not None and len(requested_sources) == 1
+                    else "kakao"
+                )
                 producer_request["scope"]["rooms"] = [
-                    {"source": "kakao", "room_id": room} for room in rooms
+                    {"source": room_source, "room_id": room} for room in rooms
                 ]
             identity = runtime.identity
             active_index_id = getattr(identity, "active_index_id", None)
