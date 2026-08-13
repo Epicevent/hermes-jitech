@@ -173,7 +173,12 @@ def _route_rooms(
     requested_rooms: list[str] | None,
     runtime: Any,
 ) -> tuple[list[str], str]:
-    available = _available_rooms(runtime)
+    # The product runtime exposes one encoded catalog for every mounted
+    # source. Kakao room ids are the only unqualified entries; other sources
+    # use ``source/room`` and must never be relabelled as Kakao selectors.
+    available = [room for room in _available_rooms(runtime) if "/" not in room]
+    if not available:
+        raise KakaoTerminalRetrievalError("mounted Kakao room catalog is unavailable")
     available_set = set(available)
     if requested_rooms is not None:
         if set(requested_rooms) - available_set:
@@ -325,8 +330,22 @@ def prepare_approved_retrieval(
         for value in (package_root, workspace_root, socket_path, slot_namespace)
     )
     if callable(status_reader):
+        status_scope: dict[str, Any] | None = None
+        if validated["sources"] is not None or validated["rooms"] is not None:
+            status_scope = {}
+            if validated["sources"] is not None:
+                status_scope["sources"] = list(validated["sources"])
+            if validated["rooms"] is not None:
+                status_scope["rooms"] = [
+                    {"source": room["source"], "room_id": room["roomId"]}
+                    for room in validated["rooms"]
+                ]
         try:
-            status = status_reader()
+            status = (
+                status_reader()
+                if status_scope is None
+                else status_reader(scope=status_scope)
+            )
         except Exception as exc:
             if not explicit_runtime_paths:
                 raise KakaoTerminalRetrievalError("rag_backend_unavailable") from exc

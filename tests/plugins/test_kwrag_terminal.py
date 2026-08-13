@@ -104,7 +104,9 @@ def test_prepare_uses_dense_product_runtime_without_ops_or_generation_contracts(
         def __init__(self) -> None:
             self.identity = identity
             self.application = SimpleNamespace(
-                scope=SimpleNamespace(available_rooms=["room-a", "room-b"])
+                scope=SimpleNamespace(
+                    available_rooms=["room-a", "room-b", "groupware/docs"]
+                )
             )
 
         def __enter__(self):
@@ -117,9 +119,14 @@ def test_prepare_uses_dense_product_runtime_without_ops_or_generation_contracts(
         captured["runtime"] = kwargs
         return _Runtime()
 
+    def index_status(**kwargs):
+        captured.setdefault("status_calls", []).append(kwargs)
+        return {"status": "active"}
+
     _install_runtime_module(
         monkeypatch,
         open_product_runtime=open_runtime,
+        index_status=index_status,
     )
     monkeypatch.setattr(terminal, "get_hermes_home", lambda: home)
     monkeypatch.setattr(
@@ -218,6 +225,18 @@ def test_prepare_uses_dense_product_runtime_without_ops_or_generation_contracts(
         "rooms": [{"source": "groupware", "room_id": "document-set-a"}],
     }
     assert captured["routing_strategy"] == "explicit_room_scope"
+    assert captured["status_calls"] == [
+        {"scope": {"sources": ["kakao"]}},
+        {},
+        {
+            "scope": {
+                "sources": ["groupware"],
+                "rooms": [
+                    {"source": "groupware", "room_id": "document-set-a"}
+                ],
+            }
+        },
+    ]
 
 
 def test_embedded_wheel_registers_product_sources() -> None:
@@ -449,15 +468,20 @@ def test_agent_index_build_uses_product_native_scope_api(
 
 def test_missing_active_index_fails_before_runtime_open(tmp_path, monkeypatch) -> None:
     opened = False
+    status_scopes = []
 
     def open_runtime(**_kwargs):
         nonlocal opened
         opened = True
         raise AssertionError("runtime must not open without an active index")
 
+    def index_status(*, scope=None):
+        status_scopes.append(scope)
+        return {"status": "unbuilt"}
+
     _install_runtime_module(
         monkeypatch,
-        index_status=lambda: {"status": "unbuilt"},
+        index_status=index_status,
         open_product_runtime=open_runtime,
     )
     with pytest.raises(terminal.KakaoTerminalRetrievalError, match="index_required"):
@@ -469,6 +493,7 @@ def test_missing_active_index_fails_before_runtime_open(tmp_path, monkeypatch) -
             slot_namespace="oc20",
         )
     assert opened is False
+    assert status_scopes == [{"sources": ["kakao"]}]
 
 
 def test_dispatch_uses_existing_consumption_and_provider_seam(
