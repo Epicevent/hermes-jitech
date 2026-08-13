@@ -35,6 +35,25 @@ def _inspect_labels(image: str) -> dict[str, str]:
     return labels
 
 
+def test_image_includes_groupware_pdf_extractor(built_image) -> None:
+    result = subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--entrypoint",
+            "/usr/bin/test",
+            built_image,
+            "-x",
+            "/usr/bin/pdftotext",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_image_binds_product_component_without_ops_runtime_contract(
     built_image,
 ) -> None:
