@@ -390,9 +390,16 @@ def prepare_approved_retrieval(
             requested_sources = validated["sources"]
             if requested_sources is not None:
                 producer_request["scope"]["sources"] = list(requested_sources)
-            rooms, route_strategy = _route_rooms(
-                validated["query"], validated["rooms"], runtime
-            )
+            # Room routing is currently a Kakao-specific narrowing signal.
+            # Never project Kakao room IDs onto a non-Kakao source request;
+            # other adapters retain their source-wide scope until they expose
+            # a source-qualified room catalog.
+            if requested_sources is not None and "kakao" not in requested_sources:
+                rooms, route_strategy = [], "source_wide_scope"
+            else:
+                rooms, route_strategy = _route_rooms(
+                    validated["query"], validated["rooms"], runtime
+                )
             if rooms:
                 room_source = (
                     requested_sources[0]
