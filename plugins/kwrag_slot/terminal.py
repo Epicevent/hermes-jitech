@@ -388,27 +388,40 @@ def prepare_approved_retrieval(
         runtime_kwargs["source_root"] = _source_package_root(package)
         with open_runtime(**runtime_kwargs) as runtime:
             requested_sources = validated["sources"]
+            requested_rooms = validated["rooms"]
             if requested_sources is not None:
                 producer_request["scope"]["sources"] = list(requested_sources)
-            # Room routing is currently a Kakao-specific narrowing signal.
-            # Never project Kakao room IDs onto a non-Kakao source request;
-            # other adapters retain their source-wide scope until they expose
-            # a source-qualified room catalog.
-            if requested_sources is not None and "kakao" not in requested_sources:
-                rooms, route_strategy = [], "source_wide_scope"
-            else:
-                rooms, route_strategy = _route_rooms(
-                    validated["query"], validated["rooms"], runtime
-                )
-            if rooms:
+            if requested_rooms is not None:
+                # Structured rooms already bind their source during request
+                # validation. Bare room IDs retain the legacy Kakao meaning.
+                # The runtime performs the final mounted-index membership
+                # check for every source-qualified room.
                 room_source = (
                     requested_sources[0]
                     if requested_sources is not None and len(requested_sources) == 1
                     else "kakao"
                 )
+                if room_source == "kakao":
+                    rooms, route_strategy = _route_rooms(
+                        validated["query"], requested_rooms, runtime
+                    )
+                else:
+                    rooms, route_strategy = requested_rooms, "explicit_room_scope"
                 producer_request["scope"]["rooms"] = [
                     {"source": room_source, "room_id": room} for room in rooms
                 ]
+            elif requested_sources == ["kakao"]:
+                rooms, route_strategy = _route_rooms(validated["query"], None, runtime)
+                producer_request["scope"]["rooms"] = [
+                    {"source": "kakao", "room_id": room} for room in rooms
+                ]
+            elif requested_sources is None:
+                # No caller scope means federated search across the exact
+                # source adapters opened by the mounted product runtime. Do
+                # not reinterpret source-qualified rooms as Kakao rooms.
+                route_strategy = "all_mounted_sources"
+            else:
+                route_strategy = "source_wide_scope"
             identity = runtime.identity
             active_index_id = getattr(identity, "active_index_id", None)
             index_manifest = getattr(identity, "index_manifest", active_index_id)

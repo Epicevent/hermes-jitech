@@ -188,6 +188,46 @@ def test_prepare_uses_dense_product_runtime_without_ops_or_generation_contracts(
     assert binding.current_pipeline_fingerprint == identity.pipeline_fingerprint
     assert "binding_path" not in captured["runtime"]
 
+    terminal.prepare_approved_retrieval(
+        {"query": "search every mounted source"},
+        package_root=package_root,
+        workspace_root=workspace_root,
+        socket_path=socket_path,
+        slot_namespace="oc20",
+    )
+    assert captured["producer_request"]["scope"] == {}
+    assert captured["routing_strategy"] == "all_mounted_sources"
+
+    terminal.prepare_approved_retrieval(
+        {
+            "query": "find the groupware note",
+            "scope": {
+                "rooms": [{"source": "groupware", "roomId": "document-set-a"}]
+            },
+        },
+        package_root=package_root,
+        workspace_root=workspace_root,
+        socket_path=socket_path,
+        slot_namespace="oc20",
+    )
+    assert captured["producer_request"]["scope"] == {
+        "sources": ["groupware"],
+        "rooms": [{"source": "groupware", "room_id": "document-set-a"}],
+    }
+    assert captured["routing_strategy"] == "explicit_room_scope"
+
+
+def test_embedded_wheel_registers_product_sources() -> None:
+    with ZipFile(WHEEL) as archive:
+        contract = archive.read("kwrag/product_contract.py").decode("utf-8")
+        mounted_sources = archive.read("kwrag/product_sources.py").decode("utf-8")
+    assert 'source="kakao"' in contract
+    assert 'source="groupware"' in contract
+    assert '"groupware": _GROUPWARE_ADAPTER' in contract
+    assert '"kakao": _KAKAO_ADAPTER' in contract
+    assert 'if source_name == "groupware"' in mounted_sources
+    assert "return LiveGroupwareSource(" in mounted_sources
+
 
 def test_unique_room_id_in_question_becomes_hard_scope() -> None:
     runtime = SimpleNamespace(
