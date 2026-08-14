@@ -176,3 +176,67 @@ def test_explicit_index_request_executes_handler_and_appends_content_free_tool_t
         "status": "active",
         "build_id": "b1",
     }
+
+
+
+def test_explicit_index_parser_rejects_explanations_and_substring_sources() -> None:
+    assert tools.explicit_index_build_args("What is an index?") is None
+    assert tools.explicit_index_build_args("Explain why the index failed") is None
+    assert tools.explicit_index_build_args("Build the RAG index for profile records") == {
+        "rebuild": True,
+    }
+    assert tools.explicit_index_build_args("Index the corpus") == {
+        "rebuild": True,
+    }
+
+
+def test_explicit_index_bridge_emits_standard_lifecycle_and_failure() -> None:
+    events = []
+
+    class Agent:
+        def tool_progress_callback(self, *args, **kwargs):
+            events.append(("progress", args, kwargs))
+
+        def tool_start_callback(self, *args):
+            events.append(("start", args))
+
+        def tool_complete_callback(self, *args):
+            events.append(("complete", args))
+
+        def _invoke_tool(self, *args):
+            return json.dumps({"error": "gpu unavailable"})
+
+    messages = [{"role": "user", "content": "index the corpus"}]
+    assert tools.execute_explicit_index_build(
+        Agent(), messages[0]["content"], messages, "task-1"
+    )
+    assert [event[0] for event in events] == [
+        "progress",
+        "start",
+        "progress",
+        "complete",
+    ]
+    assert events[2][2]["is_error"] is True
+
+
+def test_plugin_registers_generic_pre_user_turn_hook() -> None:
+    from plugins.kwrag_slot import register
+
+    class Context:
+        def __init__(self):
+            self.hooks = []
+            self.tools = []
+            self.commands = []
+
+        def register_hook(self, name, callback):
+            self.hooks.append((name, callback))
+
+        def register_tool(self, **kwargs):
+            self.tools.append(kwargs)
+
+        def register_cli_command(self, **kwargs):
+            self.commands.append(kwargs)
+
+    context = Context()
+    register(context)
+    assert [name for name, _ in context.hooks] == ["pre_user_turn"]
