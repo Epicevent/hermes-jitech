@@ -932,6 +932,16 @@ def run_conversation(
     current_turn_user_idx = len(messages) - 1
     agent._persist_user_message_idx = current_turn_user_idx
 
+    # Explicit index/build instructions are product actions, not generic code-search prompts.
+    try:
+        from plugins.kwrag_slot.tools import execute_explicit_index_build
+
+        execute_explicit_index_build(
+            agent, original_user_message, messages, effective_task_id
+        )
+    except Exception as exc:
+        logger.warning("explicit KWRAG index bridge failed: %s", exc)
+
     def _compress_context_for_current_turn(
         messages_to_compress: list[dict[str, Any]],
         compression_system_message: str | None,
