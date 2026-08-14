@@ -1,6 +1,3 @@
-Exit code: 0
-Wall time: 1 seconds
-Output:
 """The Hermes agent can explicitly ask its slot to build and inspect an index."""
 
 from __future__ import annotations
