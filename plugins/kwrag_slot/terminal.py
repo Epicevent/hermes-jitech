@@ -239,19 +239,34 @@ def _route_source_rooms(
             )
         return requested_rooms, "explicit_room_scope"
 
-    mentioned: list[dict[str, str]] = []
+    # Prefer an explicit source-qualified mention.  Otherwise the same room
+    # id in two mounted sources must remain ambiguous and fail closed.
+    qualified_mentions: list[dict[str, str]] = []
     for room in available:
         room_id = room["roomId"]
+        source_key = f"{room['source']}/{room_id}"
         if re.search(
-            rf"(?<![A-Za-z0-9_-]){re.escape(room_id)}(?![A-Za-z0-9_-])",
-            query,
-            re.I,
-        ) or re.search(
-            rf"(?<![A-Za-z0-9_-]){re.escape(_room_key(room))}(?![A-Za-z0-9_-])",
+            rf"(?<![A-Za-z0-9_-]){re.escape(source_key)}(?![A-Za-z0-9_-])",
             query,
             re.I,
         ):
-            mentioned.append(room)
+            qualified_mentions.append(room)
+    if len(qualified_mentions) > 1:
+        raise HermesTerminalRetrievalError(
+            "product room mention is ambiguous; choose one room"
+        )
+    if qualified_mentions:
+        return qualified_mentions, "internal_room_hint"
+
+    mentioned = [
+        room
+        for room in available
+        if re.search(
+            rf"(?<![A-Za-z0-9_-]){re.escape(room['roomId'])}(?![A-Za-z0-9_-])",
+            query,
+            re.I,
+        )
+    ]
     if len(mentioned) > 1:
         raise HermesTerminalRetrievalError(
             "product room mention is ambiguous; choose one room"
