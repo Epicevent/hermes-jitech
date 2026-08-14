@@ -129,7 +129,12 @@ def test_prepare_uses_dense_product_runtime_without_ops_or_generation_contracts(
             self.identity = identity
             self.application = SimpleNamespace(
                 scope=SimpleNamespace(
-                    available_rooms=["room-a", "room-b", "groupware/docs"]
+                    available_rooms=[
+                        "room-a",
+                        "room-b",
+                        "groupware/docs",
+                        "groupware/document-set-a",
+                    ]
                 )
             )
 
@@ -401,7 +406,9 @@ def test_mixed_source_rooms_keep_each_source_during_forwarding(
         def __init__(self) -> None:
             self.identity = identity
             self.application = SimpleNamespace(
-                scope=SimpleNamespace(available_rooms=["kakao-room"])
+                scope=SimpleNamespace(
+                    available_rooms=["kakao-room", "groupware/document-set-a"]
+                )
             )
 
         def __enter__(self):
@@ -807,3 +814,4 @@ def test_real_embedded_dense_runtime_reaches_verified_hermes_result(
         stage["stage_id"] for stage in operation_receipt["pipeline_evidence"]["stages"]
     ] == ["query_embedding", "dense_index_search", "candidate_rerank"]
     assert "source_generation" not in json.dumps(operation_receipt)
+
