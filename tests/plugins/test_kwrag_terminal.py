@@ -285,6 +285,29 @@ def test_prepare_uses_dense_product_runtime_without_ops_or_generation_contracts(
         "rooms": [{"source": "groupware", "room_id": "document-set-a"}],
     }
     assert captured["routing_strategy"] == "explicit_room_scope"
+
+    terminal.prepare_approved_retrieval(
+        {"query": "find docs"},
+        package_root=package_root,
+        workspace_root=workspace_root,
+        socket_path=socket_path,
+        slot_namespace="oc20",
+    )
+    assert captured["producer_request"]["scope"] == {
+        "sources": ["groupware"],
+        "rooms": [{"source": "groupware", "room_id": "docs"}],
+    }
+    assert captured["routing_strategy"] == "internal_room_id_hint"
+
+    terminal.prepare_approved_retrieval(
+        {"query": "search the groupware records"},
+        package_root=package_root,
+        workspace_root=workspace_root,
+        socket_path=socket_path,
+        slot_namespace="oc20",
+    )
+    assert captured["producer_request"]["scope"] == {"sources": ["groupware"]}
+    assert captured["routing_strategy"] == "internal_source_hint"
     assert status_calls == []
 
 
@@ -363,12 +386,34 @@ def test_groupware_only_catalog_does_not_force_a_kakao_scope() -> None:
         )
     )
     assert terminal._available_kakao_rooms(runtime) == []
+    assert terminal._available_product_rooms(runtime) == [
+        {"source": "groupware", "roomId": "document-set-a"}
+    ]
     assert (
         terminal._mentioned_kakao_rooms(
             "find document-set-a", terminal._available_kakao_rooms(runtime)
         )
         == []
     )
+    assert terminal._mentioned_product_rooms(
+        "find document-set-a", terminal._available_product_rooms(runtime)
+    ) == [{"source": "groupware", "roomId": "document-set-a"}]
+
+
+def test_unique_groupware_room_hint_is_a_hard_scope() -> None:
+    runtime = SimpleNamespace(
+        application=SimpleNamespace(
+            scope=SimpleNamespace(
+                available_rooms=["groupware/document-set-a"]
+            )
+        )
+    )
+    assert terminal._mentioned_product_rooms(
+        "find the document-set-a approval", terminal._available_product_rooms(runtime)
+    ) == [{"source": "groupware", "roomId": "document-set-a"}]
+    assert terminal._mentioned_product_sources(
+        "search the groupware records", ["groupware"]
+    ) == ["groupware"]
 
 
 def test_explicit_single_room_is_passed_as_the_runtime_corpus() -> None:
