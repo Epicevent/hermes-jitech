@@ -132,3 +132,46 @@ def test_kwrag_search_tool_captures_verified_result_for_provider_seam(monkeypatc
         "scope": {"sources": ["kakao"]},
     }
     assert agent._kwrag_pending_retrieval is prepared
+
+
+def test_explicit_index_request_maps_to_fixed_tool_and_source_scope() -> None:
+    assert tools.explicit_index_build_args("?꾩옱 蹂댁씠??肄뷀띁?ㅻ? ?몃뜳?깊빐") == {
+        "rebuild": True,
+    }
+    assert tools.explicit_index_build_args("groupware ?뚯뒪留??몃뜳??媛깆떊??) == {
+        "rebuild": True,
+        "scope": {"sources": ["groupware"]},
+    }
+    assert tools.explicit_index_build_args("?꾩옱 ?몃뜳???곹깭留??뚮젮以?) is None
+    assert tools.explicit_index_build_args("kwrag_index_status瑜??몄텧??) is None
+
+
+def test_explicit_index_request_executes_handler_and_appends_content_free_tool_turn(
+    monkeypatch,
+) -> None:
+    captured = {}
+
+    class Agent:
+        tool_progress_callback = None
+
+        def _invoke_tool(self, name, args, task_id, call_id, messages):
+            captured.update(
+                name=name, args=args, task_id=task_id, call_id=call_id
+            )
+            return json.dumps({"status": "active", "build_id": "b1"})
+
+    messages = [{"role": "user", "content": "groupware瑜??몃뜳?깊빐"}]
+    assert tools.execute_explicit_index_build(
+        Agent(), messages[0]["content"], messages, "task-1"
+    )
+    assert captured["name"] == "kwrag_index_build"
+    assert captured["args"] == {
+        "rebuild": True,
+        "scope": {"sources": ["groupware"]},
+    }
+    assert messages[-2]["role"] == "assistant"
+    assert messages[-2]["tool_calls"][0]["function"]["name"] == "kwrag_index_build"
+    assert json.loads(messages[-1]["content"]) == {
+        "status": "active",
+        "build_id": "b1",
+    }
