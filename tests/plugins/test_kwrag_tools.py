@@ -64,6 +64,10 @@ def test_plugin_registers_agent_tools_and_cli() -> None:
         def __init__(self):
             self.tools = []
             self.commands = []
+            self.hooks = []
+
+        def register_hook(self, name, callback):
+            self.hooks.append((name, callback))
 
         def register_tool(self, **kwargs):
             self.tools.append(kwargs)
@@ -73,6 +77,7 @@ def test_plugin_registers_agent_tools_and_cli() -> None:
 
     context = Context()
     register(context)
+    assert [name for name, _ in context.hooks] == ["pre_user_turn"]
     assert {item["name"] for item in context.tools} == {
         "kwrag_index_build",
         "kwrag_index_status",
