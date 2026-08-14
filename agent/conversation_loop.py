@@ -932,15 +932,20 @@ def run_conversation(
     current_turn_user_idx = len(messages) - 1
     agent._persist_user_message_idx = current_turn_user_idx
 
-    # Explicit index/build instructions are product actions, not generic code-search prompts.
+    # Let loaded plugins observe explicit user-turn actions through the generic host hook.
+    # The core loop does not import or privilege a specific plugin.
     try:
-        from plugins.kwrag_slot.tools import execute_explicit_index_build
+        from hermes_cli.plugins import invoke_hook as _invoke_hook
 
-        execute_explicit_index_build(
-            agent, original_user_message, messages, effective_task_id
+        _invoke_hook(
+            "pre_user_turn",
+            agent=agent,
+            user_message=original_user_message,
+            messages=messages,
+            effective_task_id=effective_task_id,
         )
     except Exception as exc:
-        logger.warning("explicit KWRAG index bridge failed: %s", exc)
+        logger.warning("pre_user_turn hook dispatch failed: %s", exc)
 
     def _compress_context_for_current_turn(
         messages_to_compress: list[dict[str, Any]],
