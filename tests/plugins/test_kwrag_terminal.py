@@ -389,6 +389,13 @@ def test_groupware_only_catalog_does_not_force_a_kakao_scope() -> None:
     assert terminal._available_product_rooms(runtime) == [
         {"source": "groupware", "roomId": "document-set-a"}
     ]
+
+
+def test_source_qualified_kakao_room_is_supported() -> None:
+    runtime = SimpleNamespace(available_rooms=["kakao/room-a"])
+    assert terminal._available_product_rooms(runtime) == [
+        {"source": "kakao", "roomId": "room-a"}
+    ]
     assert (
         terminal._mentioned_kakao_rooms(
             "find document-set-a", terminal._available_kakao_rooms(runtime)

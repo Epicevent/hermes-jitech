@@ -191,7 +191,7 @@ def _decode_product_room(value: str) -> dict[str, str]:
         # Legacy unqualified room ids are Kakao's compatibility spelling.
         return {"source": "kakao", "roomId": value}
     source, room_id = value.split("/", 1)
-    if not source or not room_id or "/" in room_id or source.lower() == "kakao":
+    if not source or not room_id or "/" in room_id:
         raise KakaoTerminalRetrievalError("mounted product room catalog is invalid")
     return {"source": source.lower(), "roomId": room_id}
 
