@@ -3348,7 +3348,7 @@ def _(rid, params: dict) -> dict:
 
             raw_kwrag_request = kwrag_request
             normalized_kwrag_request = validate_explicit_request(raw_kwrag_request)
-            # Keep the legacy `corpus=kakao` wire shape for the TUI gateway.
+            # Keep the legacy `corpus=<source>` wire shape for TUI callers.
             # The product-native API gateway uses the generic sources/rooms
             # projection, but existing TUI callers and their dispatch seam
             # still consume the compatibility alias.
