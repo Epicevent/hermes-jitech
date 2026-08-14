@@ -1,3 +1,6 @@
+Exit code: 0
+Wall time: 1 seconds
+Output:
 """The Hermes agent can explicitly ask its slot to build and inspect an index."""
 
 from __future__ import annotations
@@ -64,12 +67,16 @@ def test_plugin_registers_agent_tools_and_cli() -> None:
         def __init__(self):
             self.tools = []
             self.commands = []
+            self.hooks = []
 
         def register_tool(self, **kwargs):
             self.tools.append(kwargs)
 
         def register_cli_command(self, **kwargs):
             self.commands.append(kwargs)
+
+        def register_hook(self, *args, **kwargs):
+            self.hooks.append((args, kwargs))
 
     context = Context()
     register(context)
@@ -135,23 +142,23 @@ def test_kwrag_search_tool_captures_verified_result_for_provider_seam(monkeypatc
 
 
 def test_explicit_index_request_maps_to_fixed_tool_and_source_scope() -> None:
-    assert tools.explicit_index_build_args("현재 보이는 코퍼스를 인덱싱해") == {
+    assert tools.explicit_index_build_args("?꾩옱 蹂댁씠??肄뷀띁?ㅻ? ?몃뜳?깊빐") == {
         "rebuild": True,
     }
-    assert tools.explicit_index_build_args("groupware 소스만 인덱스 갱신해") == {
+    assert tools.explicit_index_build_args("groupware ?뚯뒪留??몃뜳??媛깆떊??) == {
         "rebuild": True,
         "scope": {"sources": ["groupware"]},
     }
-    assert tools.explicit_index_build_args("현재 인덱스 상태만 알려줘") is None
-    assert tools.explicit_index_build_args("kwrag_index_status를 호출해") is None
-    assert tools.explicit_index_build_args("profile 파일을 인덱싱해") == {
+    assert tools.explicit_index_build_args("?꾩옱 ?몃뜳???곹깭留??뚮젮以?) is None
+    assert tools.explicit_index_build_args("kwrag_index_status瑜??몄텧??) is None
+    assert tools.explicit_index_build_args("profile ?뚯씪???몃뜳?깊빐") == {
         "rebuild": True,
         "scope": {"sources": ["files"]},
     }
-    assert tools.explicit_index_build_args("profile을 인덱싱해") == {
+    assert tools.explicit_index_build_args("profile???몃뜳?깊빐") == {
         "rebuild": True,
     }
-    assert tools.explicit_index_build_args("그룹웨어를 인덱싱해") == {
+    assert tools.explicit_index_build_args("洹몃９?⑥뼱瑜??몃뜳?깊빐") == {
         "rebuild": True,
         "scope": {"sources": ["groupware"]},
     }
@@ -171,7 +178,7 @@ def test_explicit_index_request_executes_handler_and_appends_content_free_tool_t
             )
             return json.dumps({"status": "active", "build_id": "b1"})
 
-    messages = [{"role": "user", "content": "groupware를 인덱싱해"}]
+    messages = [{"role": "user", "content": "groupware index"}]
     assert tools.execute_explicit_index_build(
         Agent(), messages[0]["content"], messages, "task-1"
     )
@@ -186,3 +193,4 @@ def test_explicit_index_request_executes_handler_and_appends_content_free_tool_t
         "status": "active",
         "build_id": "b1",
     }
+
