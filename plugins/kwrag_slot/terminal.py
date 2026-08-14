@@ -175,25 +175,13 @@ def _available_rooms(runtime: Any) -> list[str]:
     raise KakaoTerminalRetrievalError("mounted Kakao room catalog is unavailable")
 
 
-def _route_rooms(
-    query: str,
-    requested_rooms: list[str] | None,
-    runtime: Any,
-) -> tuple[list[str], str]:
-    # The product runtime exposes one encoded catalog for every mounted
-    # source. Kakao room ids are the only unqualified entries; other sources
-    # use ``source/room`` and must never be relabelled as Kakao selectors.
-    available = [room for room in _available_rooms(runtime) if "/" not in room]
-    if not available:
-        raise KakaoTerminalRetrievalError("mounted Kakao room catalog is unavailable")
-    available_set = set(available)
-    if requested_rooms is not None:
-        if set(requested_rooms) - available_set:
-            raise KakaoTerminalRetrievalError(
-                "requested Kakao room is outside the mount"
-            )
-        return requested_rooms, "explicit_room_scope"
+def _available_kakao_rooms(runtime: Any) -> list[str]:
+    """Return only the unqualified Kakao room ids from the mounted catalog."""
 
+    return [room for room in _available_rooms(runtime) if "/" not in room]
+
+
+def _mentioned_kakao_rooms(query: str, available: Sequence[str]) -> list[str]:
     mentioned = [
         room
         for room in available
@@ -205,6 +193,29 @@ def _route_rooms(
         raise KakaoTerminalRetrievalError(
             "Kakao room mention is ambiguous; choose one room"
         )
+    return mentioned
+
+
+def _route_rooms(
+    query: str,
+    requested_rooms: list[str] | None,
+    runtime: Any,
+) -> tuple[list[str], str]:
+    # The product runtime exposes one encoded catalog for every mounted
+    # source. Kakao room ids are the only unqualified entries; other sources
+    # use ``source/room`` and must never be relabelled as Kakao selectors.
+    available = _available_kakao_rooms(runtime)
+    if not available:
+        raise KakaoTerminalRetrievalError("mounted Kakao room catalog is unavailable")
+    available_set = set(available)
+    if requested_rooms is not None:
+        if set(requested_rooms) - available_set:
+            raise KakaoTerminalRetrievalError(
+                "requested Kakao room is outside the mount"
+            )
+        return requested_rooms, "explicit_room_scope"
+
+    mentioned = _mentioned_kakao_rooms(query, available)
     if mentioned:
         return mentioned, "internal_room_id_hint"
 
@@ -417,11 +428,27 @@ def prepare_approved_retrieval(
                         {"source": "kakao", "room_id": room} for room in rooms
                     ]
             elif requested_sources is None:
-                # No caller scope means federated search across the exact
-                # source adapters opened by the mounted product runtime. Do
-                # not send an empty scope: the product contract defines an
-                # omitted scope as all mounted sources.
-                route_strategy = "all_mounted_sources"
+                # The browser intentionally omits scope.  Preserve federated
+                # search by default, but honor one exact Kakao room id named
+                # in the original question as a hard scope.  Do not invoke an
+                # inferred room atlas here: without an explicit source that
+                # would silently exclude other mounted source adapters.
+                mentioned_rooms = _mentioned_kakao_rooms(
+                    validated["query"], _available_kakao_rooms(runtime)
+                )
+                if mentioned_rooms:
+                    producer_request["scope"] = {
+                        "sources": ["kakao"],
+                        "rooms": [
+                            {"source": "kakao", "room_id": room}
+                            for room in mentioned_rooms
+                        ],
+                    }
+                    route_strategy = "internal_room_id_hint"
+                else:
+                    # Do not send an empty scope: the product contract defines
+                    # an omitted scope as all mounted sources.
+                    route_strategy = "all_mounted_sources"
             else:
                 route_strategy = "source_wide_scope"
             identity = runtime.identity

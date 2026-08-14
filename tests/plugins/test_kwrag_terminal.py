@@ -247,6 +247,30 @@ def test_prepare_uses_dense_product_runtime_without_ops_or_generation_contracts(
     assert captured["routing_strategy"] == "all_mounted_sources"
 
     terminal.prepare_approved_retrieval(
+        {"query": "what happened in room-a?"},
+        package_root=package_root,
+        workspace_root=workspace_root,
+        socket_path=socket_path,
+        slot_namespace="oc20",
+    )
+    assert captured["producer_request"]["scope"] == {
+        "sources": ["kakao"],
+        "rooms": [{"source": "kakao", "room_id": "room-a"}],
+    }
+    assert captured["routing_strategy"] == "internal_room_id_hint"
+
+    last_request = captured["producer_request"]
+    with pytest.raises(terminal.KakaoTerminalRetrievalError, match="ambiguous"):
+        terminal.prepare_approved_retrieval(
+            {"query": "compare room-a with room-b"},
+            package_root=package_root,
+            workspace_root=workspace_root,
+            socket_path=socket_path,
+            slot_namespace="oc20",
+        )
+    assert captured["producer_request"] is last_request
+
+    terminal.prepare_approved_retrieval(
         {
             "query": "find the groupware note",
             "scope": {"rooms": [{"source": "groupware", "roomId": "document-set-a"}]},
@@ -318,6 +342,32 @@ def test_unique_room_id_in_question_becomes_hard_scope() -> None:
         application=SimpleNamespace(
             scope=SimpleNamespace(available_rooms=["room-a", "room-b"])
         )
+    )
+    assert terminal._mentioned_kakao_rooms(
+        "what happened in room-a?",
+        terminal._available_kakao_rooms(runtime),
+    ) == ["room-a"]
+    assert (
+        terminal._mentioned_kakao_rooms(
+            "search every mounted source",
+            terminal._available_kakao_rooms(runtime),
+        )
+        == []
+    )
+
+
+def test_groupware_only_catalog_does_not_force_a_kakao_scope() -> None:
+    runtime = SimpleNamespace(
+        application=SimpleNamespace(
+            scope=SimpleNamespace(available_rooms=["groupware/document-set-a"])
+        )
+    )
+    assert terminal._available_kakao_rooms(runtime) == []
+    assert (
+        terminal._mentioned_kakao_rooms(
+            "find document-set-a", terminal._available_kakao_rooms(runtime)
+        )
+        == []
     )
 
 
