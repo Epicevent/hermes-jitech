@@ -142,23 +142,23 @@ def test_kwrag_search_tool_captures_verified_result_for_provider_seam(monkeypatc
 
 
 def test_explicit_index_request_maps_to_fixed_tool_and_source_scope() -> None:
-    assert tools.explicit_index_build_args("?꾩옱 蹂댁씠??肄뷀띁?ㅻ? ?몃뜳?깊빐") == {
+    assert tools.explicit_index_build_args("index the visible corpus") == {
         "rebuild": True,
     }
-    assert tools.explicit_index_build_args("groupware ?뚯뒪留??몃뜳??媛깆떊??) == {
+    assert tools.explicit_index_build_args("groupware index refresh") == {
         "rebuild": True,
         "scope": {"sources": ["groupware"]},
     }
-    assert tools.explicit_index_build_args("?꾩옱 ?몃뜳???곹깭留??뚮젮以?) is None
-    assert tools.explicit_index_build_args("kwrag_index_status瑜??몄텧??) is None
-    assert tools.explicit_index_build_args("profile ?뚯씪???몃뜳?깊빐") == {
+    assert tools.explicit_index_build_args("show index status") is None
+    assert tools.explicit_index_build_args("call kwrag_index_status") is None
+    assert tools.explicit_index_build_args("index profile files") == {
         "rebuild": True,
         "scope": {"sources": ["files"]},
     }
-    assert tools.explicit_index_build_args("profile???몃뜳?깊빐") == {
+    assert tools.explicit_index_build_args("index profile") == {
         "rebuild": True,
     }
-    assert tools.explicit_index_build_args("洹몃９?⑥뼱瑜??몃뜳?깊빐") == {
+    assert tools.explicit_index_build_args("index groupware") == {
         "rebuild": True,
         "scope": {"sources": ["groupware"]},
     }
