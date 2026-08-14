@@ -128,6 +128,7 @@ SEARCH_SCHEMA = {
 
 
 _INDEX_REQUEST_MARKERS = (
+    "index",
     "indexing",
     "reindex",
     "re-index",
