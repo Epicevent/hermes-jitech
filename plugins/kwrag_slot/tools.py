@@ -8,10 +8,13 @@ only supplies the caller's optional scope and returns content-free status.
 
 from __future__ import annotations
 
+import json
+import re
+import uuid
 from typing import Any
 
 from plugins.kwrag_slot.terminal import (
-    KakaoTerminalRetrievalError,
+    HermesTerminalRetrievalError,
     build_index,
     index_status,
 )
@@ -124,6 +127,158 @@ SEARCH_SCHEMA = {
 }
 
 
+_INDEX_REQUEST_MARKERS = (
+    "index",
+    "indexing",
+    "reindex",
+    "re-index",
+    "refresh the index",
+    "build the index",
+    "인덱스",
+    "인덱싱",
+    "재인덱스",
+    "인덱스를 만들어",
+    "인덱스를 갱신",
+    "인덱스 갱신",
+)
+_INDEX_REQUEST_ACTIONS = (
+    "build",
+    "refresh",
+    "rebuild",
+    "create",
+    "make",
+    "update",
+    "index",
+    "run",
+    "해",
+    "만들",
+    "갱신",
+    "생성",
+)
+_INDEX_STATUS_WORDS = (
+    "status",
+    "상태",
+    "available",
+    "있어",
+    "몇 개",
+    "how many",
+)
+_SOURCE_HINTS = (
+    ("groupware", "groupware"),
+    ("그룹웨어", "groupware"),
+    ("kakao", "kakao"),
+    ("카카오워크", "kakao"),
+    ("카카오", "kakao"),
+    ("whatsapp", "whatsapp"),
+    ("왓츠앱", "whatsapp"),
+    ("files", "files"),
+    ("file", "files"),
+    ("파일", "files"),
+)
+
+
+def explicit_index_build_args(user_message: Any) -> dict[str, Any] | None:
+    """Return build arguments only for a clear user indexing instruction.
+
+    This is intentionally a small lexical bridge for the product action that
+    the user explicitly requested.  It must not infer retrieval for ordinary
+    questions or decide whether a turn should use RAG.  A source word is an
+    optional hard scope; otherwise the mounted source set is used by KWRAG.
+    """
+
+    if not isinstance(user_message, str):
+        return None
+    text = re.sub(r"\s+", " ", user_message.strip().lower())
+    if not text or not any(marker in text for marker in _INDEX_REQUEST_MARKERS):
+        return None
+    if any(status_word in text for status_word in _INDEX_STATUS_WORDS):
+        return None
+    if not any(action in text for action in _INDEX_REQUEST_ACTIONS):
+        return None
+
+    source = None
+    for candidate, source_name in _SOURCE_HINTS:
+        matched = (
+            candidate in text
+            if not candidate.isascii()
+            else bool(
+                re.search(rf"(?<!\w){re.escape(candidate)}(?!\w)", text)
+            )
+        )
+        if matched:
+            source = source_name
+            break
+    args: dict[str, Any] = {"rebuild": True}
+    if source:
+        args["scope"] = {"sources": [source]}
+    return args
+
+
+def execute_explicit_index_build(
+    agent: Any,
+    user_message: Any,
+    messages: list[dict[str, Any]],
+    effective_task_id: str,
+) -> bool:
+    """Execute a clear indexing instruction through the product tool handler.
+
+    The synthetic assistant/tool messages make the action observable in the
+    same conversation turn while preserving the existing provider loop.  No
+    shell or generic execute-code fallback is introduced.
+    """
+
+    args = explicit_index_build_args(user_message)
+    if args is None:
+        return False
+    call_id = f"kwrag-index-{uuid.uuid4().hex}"
+    if getattr(agent, "tool_progress_callback", None):
+        try:
+            agent.tool_progress_callback(
+                "tool.started", "kwrag_index_build", "building the mounted RAG index", args
+            )
+        except Exception:
+            pass
+    try:
+        result = agent._invoke_tool(
+            "kwrag_index_build", args, effective_task_id, call_id, messages
+        )
+    except Exception as exc:  # pragma: no cover - final product boundary
+        result = tool_error(f"KWRAG index build failed: {type(exc).__name__}")
+    messages.append(
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": "kwrag_index_build",
+                        "arguments": json.dumps(args, ensure_ascii=False),
+                    },
+                }
+            ],
+        }
+    )
+    messages.append(
+        {
+            "role": "tool",
+            "name": "kwrag_index_build",
+            "tool_call_id": call_id,
+            "content": result,
+        }
+    )
+    if getattr(agent, "tool_progress_callback", None):
+        try:
+            agent.tool_progress_callback(
+                "tool.completed", "kwrag_index_build", None, None,
+                duration=0.0, is_error=False, result=result,
+            )
+        except Exception:
+            pass
+    return True
+
+
 def _check_kwrag_available() -> bool:
     """Keep the tools visible; the handler reports a precise unavailable state."""
 
@@ -143,7 +298,7 @@ def _handle_index_build(args: dict[str, Any], **_kwargs: Any) -> str:
             rebuild=args.get("rebuild", False),
         )
         return tool_result(result)
-    except KakaoTerminalRetrievalError as exc:
+    except HermesTerminalRetrievalError as exc:
         return tool_error(str(exc))
     except Exception as exc:  # pragma: no cover - final product boundary
         return tool_error(f"KWRAG index build failed: {type(exc).__name__}")
@@ -152,7 +307,7 @@ def _handle_index_build(args: dict[str, Any], **_kwargs: Any) -> str:
 def _handle_index_status(_args: dict[str, Any], **_kwargs: Any) -> str:
     try:
         return tool_result(index_status())
-    except KakaoTerminalRetrievalError as exc:
+    except HermesTerminalRetrievalError as exc:
         return tool_error(str(exc))
     except Exception as exc:  # pragma: no cover - final product boundary
         return tool_error(f"KWRAG index status failed: {type(exc).__name__}")

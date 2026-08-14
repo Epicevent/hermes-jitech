@@ -1,8 +1,8 @@
 """Thin caller adapter from one explicit Hermes turn to product-native RAG.
 
-KWRAG owns the live mounted Kakao source, disposable Workspace index, KURE
+KWRAG owns the live mounted source adapters, disposable Workspace index, KURE
 query embedding, vector search, BGE reranking, and operation receipt. Hermes
-owns only the explicit query/corpus request, verified result consumption, and
+owns only the explicit query/scope request, verified result consumption, and
 the existing provider handoff. No ops command, capsule, frozen generation, or
 caller-supplied index identity participates in this path.
 """
@@ -38,8 +38,13 @@ _SLOT_ENV = "JITECH_KWRAG_SLOT_NAMESPACE"
 _SLOT_RE = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
 
 
-class KakaoTerminalRetrievalError(HermesSlotRetrievalError):
+class HermesTerminalRetrievalError(HermesSlotRetrievalError):
     """An explicit slot-local RAG request cannot be served."""
+
+
+# Keep the historical symbol for callers and receipts produced by the first
+# source-specific adapter revision.  New code raises the source-neutral type.
+KakaoTerminalRetrievalError = HermesTerminalRetrievalError
 
 
 def _query(value: Any) -> str:
@@ -126,7 +131,7 @@ def validate_explicit_request(value: Mapping[str, Any]) -> dict[str, Any]:
         source_values = [legacy_corpus]
     if source_values is None:
         # Omitted source means the runtime-visible prepared source set.  The
-        # current compatibility alias below still narrows legacy `corpus=kakao`.
+        # The compatibility alias below still narrows a legacy `corpus` value.
         sources = None
     elif (
         not isinstance(source_values, Sequence)
@@ -154,7 +159,10 @@ def validate_explicit_request(value: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _available_rooms(runtime: Any) -> list[str]:
-    candidates = [getattr(runtime, "available_rooms", None)]
+    candidates = [
+        getattr(runtime, "available_room_names", None),
+        getattr(runtime, "available_rooms", None),
+    ]
     scope = getattr(getattr(runtime, "application", None), "scope", None)
     if scope is not None:
         candidates.append(getattr(scope, "available_rooms", None))
@@ -172,7 +180,104 @@ def _available_rooms(runtime: Any) -> list[str]:
         rooms = list(candidate)
         if rooms and all(isinstance(room, str) and room for room in rooms):
             return sorted(set(rooms))
-    raise KakaoTerminalRetrievalError("mounted Kakao room catalog is unavailable")
+    raise HermesTerminalRetrievalError(
+        "mounted product room catalog is unavailable"
+    )
+
+
+def _available_source_rooms(runtime: Any) -> list[dict[str, str]]:
+    """Decode the runtime's source-qualified room catalog.
+
+    Legacy entries are intentionally unqualified in the product contract.
+    Every source-qualified adapter publishes ``source/room`` so a room name
+    can never be silently attributed to the wrong source.
+    """
+
+    selectors: list[dict[str, str]] = []
+    for encoded in _available_rooms(runtime):
+        if "/" in encoded:
+            source, room_id = encoded.split("/", 1)
+            if source and room_id:
+                selectors.append({"source": source, "roomId": room_id})
+        else:
+            selectors.append({"source": "kakao", "roomId": encoded})
+    if not selectors:
+        raise HermesTerminalRetrievalError(
+            "mounted product room catalog is unavailable"
+        )
+    return sorted(selectors, key=lambda room: (room["source"], room["roomId"]))
+
+
+def _room_key(room: Mapping[str, str]) -> str:
+    return (
+        room["roomId"]
+        if room["source"] == "kakao"
+        else f"{room['source']}/{room['roomId']}"
+    )
+
+
+def _route_source_rooms(
+    query: str,
+    requested_rooms: list[dict[str, str]] | None,
+    runtime: Any,
+    *,
+    allowed_sources: Sequence[str] | None = None,
+) -> tuple[list[dict[str, str]] | None, str]:
+    """Resolve one explicit or uniquely mentioned room across all sources."""
+
+    available = _available_source_rooms(runtime)
+    allowed = set(allowed_sources) if allowed_sources is not None else None
+    if allowed is not None:
+        available = [room for room in available if room["source"] in allowed]
+    available_by_key = {_room_key(room): room for room in available}
+
+    if requested_rooms is not None:
+        requested_keys = {_room_key(room) for room in requested_rooms}
+        if not requested_keys <= set(available_by_key):
+            raise HermesTerminalRetrievalError(
+                "requested product room is outside the mount"
+            )
+        return requested_rooms, "explicit_room_scope"
+
+    mentioned: list[dict[str, str]] = []
+    for room in available:
+        room_id = room["roomId"]
+        if re.search(
+            rf"(?<![A-Za-z0-9_-]){re.escape(room_id)}(?![A-Za-z0-9_-])",
+            query,
+            re.I,
+        ) or re.search(
+            rf"(?<![A-Za-z0-9_-]){re.escape(_room_key(room))}(?![A-Za-z0-9_-])",
+            query,
+            re.I,
+        ):
+            mentioned.append(room)
+    if len(mentioned) > 1:
+        raise HermesTerminalRetrievalError(
+            "product room mention is ambiguous; choose one room"
+        )
+    if mentioned:
+        return mentioned, "internal_room_hint"
+
+    route = getattr(runtime, "route_rooms", None)
+    if callable(route):
+        routed = list(route(query, limit=3))
+        routed_rooms = [
+            available_by_key[value]
+            for value in routed
+            if isinstance(value, str) and value in available_by_key
+        ]
+        if (
+            routed
+            and len(routed_rooms) == len(routed)
+            and len(routed_rooms) <= _MAX_ROUTED_ROOMS
+        ):
+            unique = {
+                (room["source"], room["roomId"]): room
+                for room in routed_rooms
+            }
+            return list(unique.values()), "internal_room_router"
+    return None, "all_mounted_sources"
 
 
 def _route_rooms(
@@ -396,15 +501,14 @@ def prepare_approved_retrieval(
             if requested_sources is not None:
                 producer_request["scope"] = {"sources": list(requested_sources)}
             if requested_rooms is not None:
-                # Validate the Kakao subset against its mounted room catalog,
-                # while preserving every source-qualified selector exactly.
-                kakao_rooms = [
-                    room["roomId"]
-                    for room in requested_rooms
-                    if room["source"] == "kakao"
-                ]
-                if kakao_rooms:
-                    _route_rooms(validated["query"], kakao_rooms, runtime)
+                # Validate every source-qualified selector against the live
+                # mounted catalog before the backend sees the request.
+                _route_source_rooms(
+                    validated["query"],
+                    requested_rooms,
+                    runtime,
+                    allowed_sources=requested_sources,
+                )
                 producer_request["scope"]["rooms"] = [
                     {"source": room["source"], "room_id": room["roomId"]}
                     for room in requested_rooms
@@ -416,14 +520,32 @@ def prepare_approved_retrieval(
                     producer_request["scope"]["rooms"] = [
                         {"source": "kakao", "room_id": room} for room in rooms
                     ]
+            elif requested_sources is not None:
+                rooms, route_strategy = _route_source_rooms(
+                    validated["query"],
+                    None,
+                    runtime,
+                    allowed_sources=requested_sources,
+                )
+                if route_strategy == "all_mounted_sources":
+                    route_strategy = "source_wide_scope"
+                if rooms:
+                    producer_request["scope"]["rooms"] = [
+                        {"source": room["source"], "room_id": room["roomId"]}
+                        for room in rooms
+                    ]
             elif requested_sources is None:
-                # No caller scope means federated search across the exact
-                # source adapters opened by the mounted product runtime. Do
-                # not send an empty scope: the product contract defines an
-                # omitted scope as all mounted sources.
-                route_strategy = "all_mounted_sources"
-            else:
-                route_strategy = "source_wide_scope"
+                rooms, route_strategy = _route_source_rooms(
+                    validated["query"], None, runtime
+                )
+                if rooms:
+                    producer_request["scope"] = {
+                        "sources": sorted({room["source"] for room in rooms}),
+                        "rooms": [
+                            {"source": room["source"], "room_id": room["roomId"]}
+                            for room in rooms
+                        ],
+                    }
             identity = runtime.identity
             active_index_id = getattr(identity, "active_index_id", None)
             index_manifest = getattr(identity, "index_manifest", active_index_id)

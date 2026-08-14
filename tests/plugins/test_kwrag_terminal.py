@@ -316,9 +316,29 @@ def test_routing_scope_observation_includes_nested_source_scope() -> None:
 def test_unique_room_id_in_question_becomes_hard_scope() -> None:
     runtime = SimpleNamespace(
         application=SimpleNamespace(
-            scope=SimpleNamespace(available_rooms=["room-a", "room-b"])
+            scope=SimpleNamespace(
+                available_rooms=["room-a", "groupware/document-set-a"]
+            )
         )
     )
+    assert terminal._route_source_rooms(
+        "find document-set-a", None, runtime
+    ) == (
+        [{"source": "groupware", "roomId": "document-set-a"}],
+        "internal_room_hint",
+    )
+
+
+def test_ambiguous_cross_source_room_name_fails_closed() -> None:
+    runtime = SimpleNamespace(
+        application=SimpleNamespace(
+            scope=SimpleNamespace(
+                available_rooms=["same-room", "groupware/same-room"]
+            )
+        )
+    )
+    with pytest.raises(terminal.HermesTerminalRetrievalError, match="ambiguous"):
+        terminal._route_source_rooms("compare same-room", None, runtime)
 
 
 def test_explicit_single_room_is_passed_as_the_runtime_corpus() -> None:
@@ -429,6 +449,74 @@ def test_mixed_source_rooms_keep_each_source_during_forwarding(
         ],
     }
     assert captured["strategy"] == "explicit_room_scope"
+
+
+def test_unscoped_unique_groupware_room_is_forwarded_as_hard_scope(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    captured: dict[str, object] = {}
+    identity = SimpleNamespace(
+        digest="sha256:" + "6" * 64,
+        index_manifest="sha256:" + "2" * 64,
+        pipeline_fingerprint="sha256:" + "7" * 64,
+    )
+
+    class _Runtime:
+        def __init__(self) -> None:
+            self.identity = identity
+            self.application = SimpleNamespace(
+                scope=SimpleNamespace(
+                    available_rooms=["kakao-room", "groupware/document-set-a"]
+                )
+            )
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    _install_runtime_module(
+        monkeypatch, open_product_runtime=lambda **_kwargs: _Runtime()
+    )
+    monkeypatch.setattr(terminal, "get_hermes_home", lambda: home)
+    monkeypatch.setattr(
+        terminal,
+        "load_component_manifest",
+        lambda: {"component_wheel": {"sha256": "sha256:" + "8" * 64}},
+    )
+    monkeypatch.setattr(
+        "plugins.kwrag_slot.consumer.load_component_manifest",
+        lambda: {"component_wheel": {"sha256": "sha256:" + "8" * 64}},
+    )
+
+    class _Consumer:
+        def __init__(self, *_args):
+            pass
+
+        def search(self, request, **kwargs):
+            captured["request"] = request
+            captured["strategy"] = kwargs["routing_strategy"]
+            return SimpleNamespace()
+
+    monkeypatch.setattr(terminal, "HermesSlotRetrievalConsumer", _Consumer)
+    monkeypatch.setattr(terminal, "FileConsumptionReceiptSink", lambda path: path)
+
+    terminal.prepare_approved_retrieval(
+        {"query": "find document-set-a"},
+        package_root=tmp_path / "mounted-package",
+        workspace_root=tmp_path / "workspace-index",
+        socket_path=tmp_path / "gpu.sock",
+        slot_namespace="oc20",
+    )
+
+    assert captured["request"]["scope"] == {
+        "sources": ["groupware"],
+        "rooms": [{"source": "groupware", "room_id": "document-set-a"}],
+    }
+    assert captured["strategy"] == "internal_room_hint"
 
 
 def test_ambiguous_room_id_mentions_fail_closed_before_search() -> None:

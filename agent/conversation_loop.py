@@ -932,6 +932,19 @@ def run_conversation(
     current_turn_user_idx = len(messages) - 1
     agent._persist_user_message_idx = current_turn_user_idx
 
+    # A clear user request to build/refresh the mounted RAG index is a product
+    # action, not a suggestion for the model to improvise with execute_code or
+    # file tools.  Route only that explicit action through the fixed KWRAG
+    # handler; ordinary questions retain the normal model tool surface.
+    try:
+        from plugins.kwrag_slot.tools import execute_explicit_index_build
+
+        execute_explicit_index_build(
+            agent, original_user_message, messages, effective_task_id
+        )
+    except Exception as exc:
+        logger.warning("explicit KWRAG index bridge failed: %s", exc)
+
     def _compress_context_for_current_turn(
         messages_to_compress: list[dict[str, Any]],
         compression_system_message: str | None,
