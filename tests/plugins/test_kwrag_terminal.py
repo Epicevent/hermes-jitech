@@ -329,6 +329,18 @@ def test_unique_room_id_in_question_becomes_hard_scope() -> None:
     )
 
 
+def test_source_qualified_room_mention_disambiguates_shared_room_id() -> None:
+    runtime = SimpleNamespace(
+        available_room_names=["team", "groupware/team"]
+    )
+    assert terminal._route_source_rooms(
+        "find groupware/team", None, runtime
+    ) == (
+        [{"source": "groupware", "roomId": "team"}],
+        "internal_room_hint",
+    )
+
+
 def test_ambiguous_cross_source_room_name_fails_closed() -> None:
     runtime = SimpleNamespace(
         application=SimpleNamespace(
