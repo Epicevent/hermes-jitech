@@ -247,30 +247,6 @@ def test_prepare_uses_dense_product_runtime_without_ops_or_generation_contracts(
     assert captured["routing_strategy"] == "all_mounted_sources"
 
     terminal.prepare_approved_retrieval(
-        {"query": "what happened in room-a?"},
-        package_root=package_root,
-        workspace_root=workspace_root,
-        socket_path=socket_path,
-        slot_namespace="oc20",
-    )
-    assert captured["producer_request"]["scope"] == {
-        "sources": ["kakao"],
-        "rooms": [{"source": "kakao", "room_id": "room-a"}],
-    }
-    assert captured["routing_strategy"] == "internal_room_id_hint"
-
-    last_request = captured["producer_request"]
-    with pytest.raises(terminal.KakaoTerminalRetrievalError, match="ambiguous"):
-        terminal.prepare_approved_retrieval(
-            {"query": "compare room-a with room-b"},
-            package_root=package_root,
-            workspace_root=workspace_root,
-            socket_path=socket_path,
-            slot_namespace="oc20",
-        )
-    assert captured["producer_request"] is last_request
-
-    terminal.prepare_approved_retrieval(
         {
             "query": "find the groupware note",
             "scope": {"rooms": [{"source": "groupware", "roomId": "document-set-a"}]},
@@ -285,29 +261,6 @@ def test_prepare_uses_dense_product_runtime_without_ops_or_generation_contracts(
         "rooms": [{"source": "groupware", "room_id": "document-set-a"}],
     }
     assert captured["routing_strategy"] == "explicit_room_scope"
-
-    terminal.prepare_approved_retrieval(
-        {"query": "find docs"},
-        package_root=package_root,
-        workspace_root=workspace_root,
-        socket_path=socket_path,
-        slot_namespace="oc20",
-    )
-    assert captured["producer_request"]["scope"] == {
-        "sources": ["groupware"],
-        "rooms": [{"source": "groupware", "room_id": "docs"}],
-    }
-    assert captured["routing_strategy"] == "internal_room_id_hint"
-
-    terminal.prepare_approved_retrieval(
-        {"query": "search the groupware records"},
-        package_root=package_root,
-        workspace_root=workspace_root,
-        socket_path=socket_path,
-        slot_namespace="oc20",
-    )
-    assert captured["producer_request"]["scope"] == {"sources": ["groupware"]}
-    assert captured["routing_strategy"] == "internal_source_hint"
     assert status_calls == []
 
 
@@ -363,61 +316,29 @@ def test_routing_scope_observation_includes_nested_source_scope() -> None:
 def test_unique_room_id_in_question_becomes_hard_scope() -> None:
     runtime = SimpleNamespace(
         application=SimpleNamespace(
-            scope=SimpleNamespace(available_rooms=["room-a", "room-b"])
-        )
-    )
-    assert terminal._mentioned_kakao_rooms(
-        "what happened in room-a?",
-        terminal._available_kakao_rooms(runtime),
-    ) == ["room-a"]
-    assert (
-        terminal._mentioned_kakao_rooms(
-            "search every mounted source",
-            terminal._available_kakao_rooms(runtime),
-        )
-        == []
-    )
-
-
-def test_groupware_only_catalog_does_not_force_a_kakao_scope() -> None:
-    runtime = SimpleNamespace(
-        application=SimpleNamespace(
-            scope=SimpleNamespace(available_rooms=["groupware/document-set-a"])
-        )
-    )
-    assert terminal._available_kakao_rooms(runtime) == []
-    assert terminal._available_product_rooms(runtime) == [
-        {"source": "groupware", "roomId": "document-set-a"}
-    ]
-
-
-def test_source_qualified_kakao_room_is_supported() -> None:
-    runtime = SimpleNamespace(available_rooms=["kakao/room-a"])
-    assert terminal._available_product_rooms(runtime) == [
-        {"source": "kakao", "roomId": "room-a"}
-    ]
-    assert (
-        terminal._mentioned_kakao_rooms(
-            "find document-set-a", terminal._available_kakao_rooms(runtime)
-        )
-        == []
-    )
-
-
-def test_unique_groupware_room_hint_is_a_hard_scope() -> None:
-    runtime = SimpleNamespace(
-        application=SimpleNamespace(
             scope=SimpleNamespace(
-                available_rooms=["groupware/document-set-a"]
+                available_rooms=["room-a", "groupware/document-set-a"]
             )
         )
     )
-    assert terminal._mentioned_product_rooms(
-        "find the document-set-a approval", terminal._available_product_rooms(runtime)
-    ) == [{"source": "groupware", "roomId": "document-set-a"}]
-    assert terminal._mentioned_product_sources(
-        "search the groupware records", ["groupware"]
-    ) == ["groupware"]
+    assert terminal._route_source_rooms(
+        "find document-set-a", None, runtime
+    ) == (
+        [{"source": "groupware", "roomId": "document-set-a"}],
+        "internal_room_hint",
+    )
+
+
+def test_ambiguous_cross_source_room_name_fails_closed() -> None:
+    runtime = SimpleNamespace(
+        application=SimpleNamespace(
+            scope=SimpleNamespace(
+                available_rooms=["same-room", "groupware/same-room"]
+            )
+        )
+    )
+    with pytest.raises(terminal.HermesTerminalRetrievalError, match="ambiguous"):
+        terminal._route_source_rooms("compare same-room", None, runtime)
 
 
 def test_explicit_single_room_is_passed_as_the_runtime_corpus() -> None:
@@ -528,6 +449,74 @@ def test_mixed_source_rooms_keep_each_source_during_forwarding(
         ],
     }
     assert captured["strategy"] == "explicit_room_scope"
+
+
+def test_unscoped_unique_groupware_room_is_forwarded_as_hard_scope(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    captured: dict[str, object] = {}
+    identity = SimpleNamespace(
+        digest="sha256:" + "6" * 64,
+        index_manifest="sha256:" + "2" * 64,
+        pipeline_fingerprint="sha256:" + "7" * 64,
+    )
+
+    class _Runtime:
+        def __init__(self) -> None:
+            self.identity = identity
+            self.application = SimpleNamespace(
+                scope=SimpleNamespace(
+                    available_rooms=["kakao-room", "groupware/document-set-a"]
+                )
+            )
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    _install_runtime_module(
+        monkeypatch, open_product_runtime=lambda **_kwargs: _Runtime()
+    )
+    monkeypatch.setattr(terminal, "get_hermes_home", lambda: home)
+    monkeypatch.setattr(
+        terminal,
+        "load_component_manifest",
+        lambda: {"component_wheel": {"sha256": "sha256:" + "8" * 64}},
+    )
+    monkeypatch.setattr(
+        "plugins.kwrag_slot.consumer.load_component_manifest",
+        lambda: {"component_wheel": {"sha256": "sha256:" + "8" * 64}},
+    )
+
+    class _Consumer:
+        def __init__(self, *_args):
+            pass
+
+        def search(self, request, **kwargs):
+            captured["request"] = request
+            captured["strategy"] = kwargs["routing_strategy"]
+            return SimpleNamespace()
+
+    monkeypatch.setattr(terminal, "HermesSlotRetrievalConsumer", _Consumer)
+    monkeypatch.setattr(terminal, "FileConsumptionReceiptSink", lambda path: path)
+
+    terminal.prepare_approved_retrieval(
+        {"query": "find document-set-a"},
+        package_root=tmp_path / "mounted-package",
+        workspace_root=tmp_path / "workspace-index",
+        socket_path=tmp_path / "gpu.sock",
+        slot_namespace="oc20",
+    )
+
+    assert captured["request"]["scope"] == {
+        "sources": ["groupware"],
+        "rooms": [{"source": "groupware", "room_id": "document-set-a"}],
+    }
+    assert captured["strategy"] == "internal_room_hint"
 
 
 def test_ambiguous_room_id_mentions_fail_closed_before_search() -> None:
