@@ -154,7 +154,16 @@ def validate_explicit_request(value: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _available_rooms(runtime: Any) -> list[str]:
-    candidates = [getattr(runtime, "available_rooms", None)]
+    """Return the room/corpus names exposed by the opened product runtime."""
+
+    # ``available_room_names`` is the source-neutral product API.  The other
+    # candidates are compatibility surfaces used by older embedded runtimes
+    # and the focused caller tests; none of them grant access or select a
+    # source outside the already-open mounted runtime.
+    candidates = [
+        getattr(runtime, "available_room_names", None),
+        getattr(runtime, "available_rooms", None),
+    ]
     scope = getattr(getattr(runtime, "application", None), "scope", None)
     if scope is not None:
         candidates.append(getattr(scope, "available_rooms", None))
@@ -172,13 +181,45 @@ def _available_rooms(runtime: Any) -> list[str]:
         rooms = list(candidate)
         if rooms and all(isinstance(room, str) and room for room in rooms):
             return sorted(set(rooms))
-    raise KakaoTerminalRetrievalError("mounted Kakao room catalog is unavailable")
+    raise KakaoTerminalRetrievalError("mounted product room catalog is unavailable")
+
+
+def _decode_product_room(value: str) -> dict[str, str]:
+    """Decode the product runtime's stable source/room spelling."""
+
+    if "/" not in value:
+        # Legacy unqualified room ids are Kakao's compatibility spelling.
+        return {"source": "kakao", "roomId": value}
+    source, room_id = value.split("/", 1)
+    if not source or not room_id or "/" in room_id:
+        raise KakaoTerminalRetrievalError("mounted product room catalog is invalid")
+    return {"source": source.lower(), "roomId": room_id}
+
+
+def _available_product_rooms(runtime: Any) -> list[dict[str, str]]:
+    """Return source-qualified rooms from the runtime-visible mount."""
+
+    rooms = [_decode_product_room(value) for value in _available_rooms(runtime)]
+    identities = {(room["source"], room["roomId"]) for room in rooms}
+    if len(identities) != len(rooms):
+        raise KakaoTerminalRetrievalError("mounted product room catalog is invalid")
+    return rooms
+
+
+def _available_product_sources(
+    available: Sequence[Mapping[str, str]],
+) -> list[str]:
+    return sorted({room["source"] for room in available})
 
 
 def _available_kakao_rooms(runtime: Any) -> list[str]:
     """Return only the unqualified Kakao room ids from the mounted catalog."""
 
-    return [room for room in _available_rooms(runtime) if "/" not in room]
+    return [
+        room["roomId"]
+        for room in _available_product_rooms(runtime)
+        if room["source"] == "kakao"
+    ]
 
 
 def _mentioned_kakao_rooms(query: str, available: Sequence[str]) -> list[str]:
@@ -194,6 +235,41 @@ def _mentioned_kakao_rooms(query: str, available: Sequence[str]) -> list[str]:
             "Kakao room mention is ambiguous; choose one room"
         )
     return mentioned
+
+
+def _mentioned_product_rooms(
+    query: str, available: Sequence[Mapping[str, str]]
+) -> list[dict[str, str]]:
+    """Resolve one unambiguous natural-language room hint across sources."""
+
+    mentioned = [
+        dict(room)
+        for room in available
+        if re.search(
+            rf"(?<![A-Za-z0-9_-]){re.escape(room['roomId'])}(?![A-Za-z0-9_-])",
+            query,
+            re.I,
+        )
+    ]
+    if len(mentioned) > 1:
+        raise KakaoTerminalRetrievalError(
+            "product room mention is ambiguous; choose one room"
+        )
+    return mentioned
+
+
+def _mentioned_product_sources(query: str, available: Sequence[str]) -> list[str]:
+    """Return every source name explicitly mentioned in the original query."""
+
+    return [
+        source
+        for source in available
+        if re.search(
+            rf"(?<![A-Za-z0-9_-]){re.escape(source)}(?![A-Za-z0-9_-])",
+            query,
+            re.I,
+        )
+    ]
 
 
 def _route_rooms(
@@ -428,27 +504,39 @@ def prepare_approved_retrieval(
                         {"source": "kakao", "room_id": room} for room in rooms
                     ]
             elif requested_sources is None:
-                # The browser intentionally omits scope.  Preserve federated
-                # search by default, but honor one exact Kakao room id named
-                # in the original question as a hard scope.  Do not invoke an
-                # inferred room atlas here: without an explicit source that
-                # would silently exclude other mounted source adapters.
-                mentioned_rooms = _mentioned_kakao_rooms(
-                    validated["query"], _available_kakao_rooms(runtime)
+                # The browser intentionally omits scope. Preserve federated
+                # search by default, but honor one exact room id named in the
+                # original question as a hard scope for any mounted source.
+                # Do not infer a source when there is no unique room match.
+                available_rooms = _available_product_rooms(runtime)
+                mentioned_rooms = _mentioned_product_rooms(
+                    validated["query"], available_rooms
                 )
                 if mentioned_rooms:
+                    mentioned = mentioned_rooms[0]
                     producer_request["scope"] = {
-                        "sources": ["kakao"],
+                        "sources": [mentioned["source"]],
                         "rooms": [
-                            {"source": "kakao", "room_id": room}
-                            for room in mentioned_rooms
+                            {
+                                "source": mentioned["source"],
+                                "room_id": mentioned["roomId"],
+                            }
                         ],
                     }
                     route_strategy = "internal_room_id_hint"
                 else:
-                    # Do not send an empty scope: the product contract defines
-                    # an omitted scope as all mounted sources.
-                    route_strategy = "all_mounted_sources"
+                    mentioned_sources = _mentioned_product_sources(
+                        validated["query"], _available_product_sources(available_rooms)
+                    )
+                    if mentioned_sources:
+                        producer_request["scope"] = {
+                            "sources": mentioned_sources,
+                        }
+                        route_strategy = "internal_source_hint"
+                    else:
+                        # Do not send an empty scope: the product contract
+                        # defines an omitted scope as all mounted sources.
+                        route_strategy = "all_mounted_sources"
             else:
                 route_strategy = "source_wide_scope"
             identity = runtime.identity
