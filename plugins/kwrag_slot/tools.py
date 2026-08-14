@@ -128,7 +128,6 @@ SEARCH_SCHEMA = {
 
 
 _INDEX_REQUEST_MARKERS = (
-    "index",
     "indexing",
     "reindex",
     "re-index",
@@ -155,7 +154,7 @@ _INDEX_REQUEST_ACTIONS = (
     "갱신",
     "생성",
 )
-_INDEX_STATUS_WORDS = (
+_INDEX_DIRECTIVE_RE = re.compile(\n    r"^\\s*(?:re-?index|index)\\s+(?:this|the|current|mounted|visible|my|our)\\b"\n)\n_INDEX_STATUS_WORDS = (
     "status",
     "상태",
     "available",
@@ -175,11 +174,14 @@ def explicit_index_build_args(user_message: Any) -> dict[str, Any] | None:
         return None
     if any(status_word in text for status_word in _INDEX_STATUS_WORDS):
         return None
-    if not any(action in text for action in _INDEX_REQUEST_ACTIONS):
+    if not (
+        any(action in text for action in _INDEX_REQUEST_ACTIONS)
+        or _INDEX_DIRECTIVE_RE.search(text)
+    ):
         return None
     source = None
     for candidate in ("groupware", "kakao", "whatsapp", "files", "file"):
-        if candidate in text:
+        if re.search(rf"(?<![a-z0-9]){re.escape(candidate)}(?![a-z0-9])", text):
             source = "files" if candidate == "file" else candidate
             break
     args: dict[str, Any] = {"rebuild": True}
@@ -200,11 +202,19 @@ def execute_explicit_index_build(
     if args is None:
         return False
     call_id = f"kwrag-index-{uuid.uuid4().hex}"
-    if getattr(agent, "tool_progress_callback", None):
+    progress_callback = getattr(agent, "tool_progress_callback", None)
+    start_callback = getattr(agent, "tool_start_callback", None)
+    complete_callback = getattr(agent, "tool_complete_callback", None)
+    if progress_callback:
         try:
-            agent.tool_progress_callback(
+            progress_callback(
                 "tool.started", "kwrag_index_build", "building the mounted RAG index", args
             )
+        except Exception:
+            pass
+    if start_callback:
+        try:
+            start_callback(call_id, "kwrag_index_build", args)
         except Exception:
             pass
     try:
@@ -213,6 +223,12 @@ def execute_explicit_index_build(
         )
     except Exception as exc:  # pragma: no cover - final product boundary
         result = tool_error(f"KWRAG index build failed: {type(exc).__name__}")
+    result = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
+    try:
+        result_payload = json.loads(result)
+    except (TypeError, ValueError):
+        result_payload = None
+    is_error = isinstance(result_payload, dict) and bool(result_payload.get("error"))
     messages.append(
         {
             "role": "assistant",
@@ -237,12 +253,17 @@ def execute_explicit_index_build(
             "content": result,
         }
     )
-    if getattr(agent, "tool_progress_callback", None):
+    if progress_callback:
         try:
-            agent.tool_progress_callback(
+            progress_callback(
                 "tool.completed", "kwrag_index_build", None, None,
-                duration=0.0, is_error=False, result=result,
+                duration=0.0, is_error=is_error, result=result,
             )
+        except Exception:
+            pass
+    if complete_callback:
+        try:
+            complete_callback(call_id, "kwrag_index_build", args, result)
         except Exception:
             pass
     return True
