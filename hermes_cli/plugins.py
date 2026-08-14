@@ -127,6 +127,7 @@ _install_plugin_debug_handler()
 
 VALID_HOOKS: Set[str] = {
     "pre_tool_call",
+    "pre_user_turn",
     "post_tool_call",
     "transform_terminal_output",
     "transform_tool_result",

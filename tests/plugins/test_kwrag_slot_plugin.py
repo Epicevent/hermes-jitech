@@ -461,7 +461,7 @@ def test_plugin_registers_bounded_index_tools_and_operator_cli() -> None:
         "kwrag_index_status",
         "kwrag_search",
     }
-    assert manager._hooks == {}
+    assert set(manager._hooks) == {"pre_user_turn"}
 
 
 def test_bundled_status_cli_is_available_without_enabling_retrieval() -> None:
