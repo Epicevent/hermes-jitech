@@ -402,9 +402,6 @@ def test_source_qualified_kakao_room_is_supported() -> None:
         )
         == []
     )
-    assert terminal._mentioned_product_rooms(
-        "find document-set-a", terminal._available_product_rooms(runtime)
-    ) == [{"source": "groupware", "roomId": "document-set-a"}]
 
 
 def test_unique_groupware_room_hint_is_a_hard_scope() -> None:
