@@ -147,14 +147,16 @@ _INDEX_REQUEST_ACTIONS = (
     "create",
     "make",
     "update",
-    "index",
     "run",
     "해",
     "만들",
     "갱신",
     "생성",
 )
-_INDEX_DIRECTIVE_RE = re.compile(\n    r"^\\s*(?:re-?index|index)\\s+(?:this|the|current|mounted|visible|my|our)\\b"\n)\n_INDEX_STATUS_WORDS = (
+_INDEX_DIRECTIVE_RE = re.compile(
+    r"^\s*(?:re-?index|index)\s+(?:this|the|current|mounted|visible|my|our)\b"
+)
+_INDEX_STATUS_WORDS = (
     "status",
     "상태",
     "available",
@@ -169,7 +171,7 @@ def explicit_index_build_args(user_message: Any) -> dict[str, Any] | None:
 
     if not isinstance(user_message, str):
         return None
-    text = re.sub(r"\\s+", " ", user_message.strip().lower())
+    text = re.sub(r"\s+", " ", user_message.strip().lower())
     if not text or not any(marker in text for marker in _INDEX_REQUEST_MARKERS):
         return None
     if any(status_word in text for status_word in _INDEX_STATUS_WORDS):
