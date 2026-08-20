@@ -11,6 +11,26 @@ from plugins.kwrag_slot import period_records
 
 NOW = datetime(2026, 8, 20, 3, 0, tzinfo=timezone.utc)
 
+PARITY_BATCH_IDS = [
+    "batch-0001-cfa9dd7d41697ad2",
+    "batch-0002-17475dfc0a4d9a62",
+    "batch-0003-4ce32e9fb856128a",
+    "batch-0004-3cb2dc222b83dc1a",
+    "batch-0005-911d23943c2fefec",
+    "batch-0006-aae62f8e5ae119ba",
+]
+PARITY_COVERAGE_DIGESTS = [
+    "sha256:85f8deccbea3013193ea0429cbb0b04d177bb6e788009dece2a8cf1c24f6956d",
+    "sha256:8d2472f588961ba8b988c630f6255205537a509e716844df936f995d0f756d09",
+    "sha256:c0299b81ee97956d2b2f5d49af7a6f0a367764dc5f004c86b5bd92af533e7f00",
+    "sha256:8edc19cb79670da5e7495e26ab86b06405fede6195309347081019e53443e7bb",
+    "sha256:d9ea92ddf65c9c964ca042925a3af362b860d3530b406c0a99da70f9ef06d53f",
+    "sha256:2491084d35cfab52af6f2357ebb142c4afb9d1e3a2e931d8cd583e89bf2ab8d1",
+]
+PARITY_FIRST_STABLE_ID = (
+    "sha256:5d5e8cd6cc6224b143fa03ae5c8aaa332e022e32486f181569c41cd8ef223598"
+)
+
 
 MESSAGE_DDL = """
 CREATE TABLE messages (
@@ -162,6 +182,7 @@ def test_1001_records_are_deterministically_batched_paged_and_reconciled(tmp_pat
         "unsafe_attachment_references": 0,
     }
     assert len(first["batches"]) == 6
+    assert [batch["batch_id"] for batch in first["batches"]] == PARITY_BATCH_IDS
     assert [batch["batch_id"] for batch in first["batches"]] == [
         batch["batch_id"] for batch in second["batches"]
     ]
@@ -183,8 +204,9 @@ def test_1001_records_are_deterministically_batched_paged_and_reconciled(tmp_pat
     assert "batch_coverage_digest" not in first_page
     record = first_page["records"][0]
     assert record["message_id"] == "message-0000"
-    assert record["stable_message_id"].startswith("sha256:")
+    assert record["stable_message_id"] == PARITY_FIRST_STABLE_ID
     assert record["attachments"][0]["nas_reference"].startswith("attachments/")
+    assert [item["coverage_digest"] for item in coverage] == PARITY_COVERAGE_DIGESTS
 
 
 def test_membership_is_a_hard_room_filter(tmp_path: Path) -> None:
