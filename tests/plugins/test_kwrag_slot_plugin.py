@@ -457,6 +457,7 @@ def test_plugin_registers_bounded_index_tools_and_operator_cli() -> None:
     register(ctx)
     assert set(manager._cli_commands) == {"kwrag-slot"}
     assert manager._plugin_tool_names == {
+        "jitech_kakaowork_period_records",
         "kwrag_index_build",
         "kwrag_index_status",
         "kwrag_search",
