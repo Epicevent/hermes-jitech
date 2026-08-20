@@ -1,8 +1,8 @@
-"""Caller-explicit, in-process KWRAG product integration for Hermes.
+"""Slot-bounded Kakao evidence and KWRAG integration for Hermes.
 
-The plugin registers bounded model tools for explicit index build/status and
-verified search requests plus the legacy CLI/status surface. Its only turn hook
-handles a clear user-issued index instruction through the generic host hook
+The plugin registers fixed index build/status, verified search, and exhaustive
+weekly Kakao record operations plus the legacy CLI/status surface. Its only turn
+hook handles a clear user-issued index instruction through the generic host hook
 surface; it registers no shell tool, automatic retrieval policy, or operations-tool
 admission contract.
 """
@@ -32,8 +32,8 @@ def register(ctx) -> None:
         handler_fn=kwrag_slot_command,
         description=(
             "Build identity and explicit Workspace indexing for the embedded "
-            "KWRAG component. Model tools remain bounded to explicit index "
-            "build/status and verified search, and expose no shell, hook, or "
-            "runtime admission policy."
+            "KWRAG component. Model tools include fixed weekly Kakao period "
+            "enumeration and remain bounded to the slot's mounted membership; "
+            "they expose no shell or runtime admission policy."
         ),
     )

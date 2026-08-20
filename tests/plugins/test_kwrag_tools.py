@@ -15,6 +15,13 @@ def test_index_tools_have_fixed_product_surface() -> None:
     assert "query" not in tools.INDEX_BUILD_SCHEMA["parameters"]["properties"]
     assert tools.SEARCH_SCHEMA["name"] == "kwrag_search"
     assert tools.SEARCH_SCHEMA["parameters"]["required"] == ["query"]
+    assert tools.PERIOD_RECORDS_SCHEMA["name"] == "jitech_kakaowork_period_records"
+    properties = tools.PERIOD_RECORDS_SCHEMA["parameters"]["properties"]
+    assert "path" not in properties
+    assert "user_id" not in properties
+    assert "sql" not in properties
+    assert "start" not in properties
+    assert "end" not in properties
 
 
 def test_index_build_tool_delegates_explicit_scope_without_raw_content(monkeypatch) -> None:
@@ -82,6 +89,7 @@ def test_plugin_registers_agent_tools_and_cli() -> None:
         "kwrag_index_build",
         "kwrag_index_status",
         "kwrag_search",
+        "jitech_kakaowork_period_records",
     }
     search_registration = next(
         item for item in context.tools if item["name"] == "kwrag_search"
@@ -94,7 +102,12 @@ def test_dashboard_api_toolset_exposes_only_explicit_index_controls() -> None:
     from toolsets import resolve_toolset
 
     tools_for_dashboard = set(resolve_toolset("hermes-api-server"))
-    assert {"kwrag_index_build", "kwrag_index_status", "kwrag_search"} <= tools_for_dashboard
+    assert {
+        "kwrag_index_build",
+        "kwrag_index_status",
+        "kwrag_search",
+        "jitech_kakaowork_period_records",
+    } <= tools_for_dashboard
 
 
 def test_kwrag_search_tool_captures_verified_result_for_provider_seam(monkeypatch) -> None:
