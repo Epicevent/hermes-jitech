@@ -667,15 +667,11 @@ def manifest(
             "text_utf8_bytes": _BATCH_MAX_UTF8_BYTES,
             "page_messages": _PAGE_MAX_MESSAGES,
         },
-        "batches": [
-            {
-                "batch_id": batch.batch_id,
-                "message_count": len(batch.messages),
-                "text_utf8_bytes": batch.text_utf8_bytes,
-                "page_count": (len(batch.messages) + _PAGE_MAX_MESSAGES - 1) // _PAGE_MAX_MESSAGES,
-            }
-            for batch in snapshot.batches
-        ],
+        # Model-facing manifests must stay below the tool-result budget.  The
+        # reader already reports counts and cursors page by page, so repeating
+        # per-batch counts here only risks truncating the authoritative ID set.
+        "batch_count": len(snapshot.batches),
+        "batches": [batch.batch_id for batch in snapshot.batches],
         "snapshot_token": _snapshot_token(snapshot),
     }
 
