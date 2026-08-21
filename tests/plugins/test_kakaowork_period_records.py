@@ -186,6 +186,15 @@ def test_1001_records_are_deterministically_batched_paged_and_reconciled(tmp_pat
     assert [batch["batch_id"] for batch in first["batches"]] == [
         batch["batch_id"] for batch in second["batches"]
     ]
+    assert all(
+        set(batch) == {
+            "batch_id",
+            "message_count",
+            "text_utf8_bytes",
+            "page_count",
+        }
+        for batch in first["batches"]
+    )
     assert max(batch["message_count"] for batch in first["batches"]) == 200
     coverage = _coverage(first, tmp_path)
     reconciled = period_records.reconcile(
