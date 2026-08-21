@@ -110,23 +110,23 @@ def _insert_message(
 
 def _coverage(manifest: dict, source_root: Path) -> list[dict[str, str]]:
     result: list[dict[str, str]] = []
-    for batch in manifest["batches"]:
+    for batch_id in manifest["batches"]:
         cursor = None
         returned = 0
         while True:
             page = period_records.read_batch(
                 manifest["snapshot_token"],
-                batch["batch_id"],
+                batch_id,
                 cursor,
                 source_root=source_root,
             )
             returned += page["returned_count"]
             cursor = page["next_cursor"]
             if cursor is None:
-                assert returned == batch["message_count"]
+                assert returned == page["batch_total_count"]
                 result.append(
                     {
-                        "batch_id": batch["batch_id"],
+                        "batch_id": batch_id,
                         "coverage_digest": page["batch_coverage_digest"],
                     }
                 )
@@ -181,21 +181,10 @@ def test_1001_records_are_deterministically_batched_paged_and_reconciled(tmp_pat
         "decrypt_failures": 0,
         "unsafe_attachment_references": 0,
     }
+    assert first["batch_count"] == 6
     assert len(first["batches"]) == 6
-    assert [batch["batch_id"] for batch in first["batches"]] == PARITY_BATCH_IDS
-    assert [batch["batch_id"] for batch in first["batches"]] == [
-        batch["batch_id"] for batch in second["batches"]
-    ]
-    assert all(
-        set(batch) == {
-            "batch_id",
-            "message_count",
-            "text_utf8_bytes",
-            "page_count",
-        }
-        for batch in first["batches"]
-    )
-    assert max(batch["message_count"] for batch in first["batches"]) == 200
+    assert first["batches"] == PARITY_BATCH_IDS
+    assert first["batches"] == second["batches"]
     coverage = _coverage(first, tmp_path)
     reconciled = period_records.reconcile(
         first["snapshot_token"], coverage, source_root=tmp_path
@@ -207,7 +196,7 @@ def test_1001_records_are_deterministically_batched_paged_and_reconciled(tmp_pat
     assert reconciled["uncovered_messages"] == 0
 
     first_page = period_records.read_batch(
-        first["snapshot_token"], first["batches"][0]["batch_id"], source_root=tmp_path
+        first["snapshot_token"], first["batches"][0], source_root=tmp_path
     )
     assert first_page["returned_count"] == 50
     assert "batch_coverage_digest" not in first_page
@@ -216,6 +205,29 @@ def test_1001_records_are_deterministically_batched_paged_and_reconciled(tmp_pat
     assert record["stable_message_id"] == PARITY_FIRST_STABLE_ID
     assert record["attachments"][0]["nas_reference"].startswith("attachments/")
     assert [item["coverage_digest"] for item in coverage] == PARITY_COVERAGE_DIGESTS
+
+
+def test_sparse_weekly_manifest_keeps_complete_batch_ids_within_model_budget(tmp_path: Path) -> None:
+    rooms = [f"room-{index:02d}" for index in range(15)]
+    package = _package(tmp_path, rooms)
+    end = int(NOW.timestamp())
+    for day in range(7):
+        for room_index, room in enumerate(rooms):
+            _insert_message(
+                package,
+                room=room,
+                message_id=f"message-{day:02d}-{room_index:02d}",
+                sent_time=end - 60 - day * 86_400 - room_index,
+                text="업무",
+            )
+
+    result = period_records.manifest("rolling_7d", source_root=tmp_path, now=NOW)
+    encoded = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+
+    assert result["batch_count"] == 105
+    assert len(result["batches"]) == 105
+    assert all(isinstance(batch_id, str) for batch_id in result["batches"])
+    assert len(encoded) < 8_000
 
 
 def test_membership_is_a_hard_room_filter(tmp_path: Path) -> None:
@@ -229,7 +241,7 @@ def test_membership_is_a_hard_room_filter(tmp_path: Path) -> None:
     assert result["connection"]["membership_room_count"] == 1
     assert result["totals"]["messages"] == 1
     page = period_records.read_batch(
-        result["snapshot_token"], result["batches"][0]["batch_id"], source_root=tmp_path
+        result["snapshot_token"], result["batches"][0], source_root=tmp_path
     )
     assert {record["conversation_id"] for record in page["records"]} == {"allowed"}
 
@@ -341,7 +353,7 @@ def test_snapshot_mutation_requires_a_new_manifest(tmp_path: Path) -> None:
         {
             "operation": "read_batch",
             "snapshot_token": result["snapshot_token"],
-            "batch_id": result["batches"][0]["batch_id"],
+            "batch_id": result["batches"][0],
         },
         source_root=tmp_path,
     )
