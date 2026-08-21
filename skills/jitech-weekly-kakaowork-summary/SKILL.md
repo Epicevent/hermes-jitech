@@ -1,7 +1,7 @@
 ---
 name: jitech-weekly-kakaowork-summary
 description: 승인된 카카오워크 주간 전건을 근거와 함께 요약합니다.
-version: 1.0.2
+version: 1.0.3
 author: Jitech
 license: MIT
 platforms: [linux]
@@ -29,9 +29,14 @@ metadata:
 2. `status=unavailable`이면 우회 검색 없이 연결 진단과 미확인 범위를 알린다.
 3. 0건이면 fresh는 "연결됨, 해당 기간 0건", stale은 최신성 미확인으로 끝낸다.
 4. 1건 이상이면 manifest만 보고 답하지 말고 `batches`의 모든 batch ID를
-   즉시 읽는다.
+   끝까지 읽는다.
+   `jitech_kakaowork_period_records`는 모델 응답 한 번에 정확히 한 번만
+   호출한다. 여러 batch나 page의 `read_batch`를 한 응답에 병렬·일괄 호출하지
+   않는다. 한 호출의 JSON 결과를 받은 뒤에만 다음 호출을 만든다.
    각 batch는 cursor 없이 `read_batch`를 시작하고 `next_cursor`가 없어질
-   때까지 같은 batch를 계속 읽는다.
+   때까지 같은 batch를 한 page씩 계속 읽은 뒤 다음 batch로 넘어간다.
+   도구 JSON은 그대로 읽으며 `execute_code`, 셸, 파일 도구로 복사하거나
+   재파싱하지 않는다. batch 사이에 사용자 확인을 요청하지 않는다.
 5. 각 page의 room, sender, local_time, plain_text, `stable_message_id`를
    그대로 사용한다. 서로 다른 방·발신자·행위자를 합치거나 추정하지 않는다.
 6. 마지막 page의 `batch_coverage_digest`를 batch별로 한 번만 보존한다.
