@@ -670,14 +670,9 @@ def manifest(
         "batches": [
             {
                 "batch_id": batch.batch_id,
-                "conversation_id": batch.conversation_id,
-                "room_name": batch.room_name,
-                "local_date": batch.local_date,
                 "message_count": len(batch.messages),
-                "text_characters": batch.text_characters,
                 "text_utf8_bytes": batch.text_utf8_bytes,
                 "page_count": (len(batch.messages) + _PAGE_MAX_MESSAGES - 1) // _PAGE_MAX_MESSAGES,
-                "decrypt_failures": batch.decrypt_failure_count,
             }
             for batch in snapshot.batches
         ],
