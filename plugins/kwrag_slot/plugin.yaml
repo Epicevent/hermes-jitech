@@ -1,6 +1,6 @@
 name: kwrag_slot
-version: 0.1.0
-description: "Caller-explicit in-process KWRAG product caller and build-status CLI."
+version: 0.2.0
+description: "Slot-bounded Kakao evidence and in-process KWRAG integration."
 author: Epicevent
 kind: backend
 platforms:

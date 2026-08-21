@@ -1,9 +1,9 @@
-"""Explicit model tools for the slot-local KWRAG index.
+"""Bounded model tools for slot-local KWRAG and Kakao evidence.
 
-These tools are deliberately small product adapters.  They do not expose a
-shell, an ops command, a generation pin, or raw corpus content to the model.
-The KWRAG package owns the actual source walk and index publication; Hermes
-only supplies the caller's optional scope and returns content-free status.
+The KWRAG index tools do not expose a shell, ops command, generation pin, or
+unverified search content.  The weekly period tool is the deliberate exception:
+it returns every record in a fixed period while keeping package path, identity,
+membership scope, SQL, batching, and reconciliation outside model control.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from plugins.kwrag_slot.terminal import (
     build_index,
     index_status,
 )
+from plugins.kwrag_slot.period_records import execute_period_records
 from tools.registry import tool_error, tool_result
 
 
@@ -122,6 +123,55 @@ SEARCH_SCHEMA = {
             },
         },
         "required": ["query"],
+        "additionalProperties": False,
+    },
+}
+
+PERIOD_RECORDS_SCHEMA = {
+    "name": "jitech_kakaowork_period_records",
+    "description": (
+        "Enumerate every authorized KakaoWork record in a fixed weekly period. "
+        "Call manifest first, read every batch page, then reconcile coverage."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "operation": {
+                "type": "string",
+                "enum": ["manifest", "read_batch", "reconcile"],
+            },
+            "period": {
+                "type": "string",
+                "enum": ["rolling_7d", "previous_calendar_week"],
+                "description": "Required only for manifest.",
+            },
+            "snapshot_token": {
+                "type": "string",
+                "description": "Opaque token returned by manifest.",
+            },
+            "batch_id": {
+                "type": "string",
+                "description": "A manifest batch identifier, required for read_batch.",
+            },
+            "cursor": {
+                "type": "string",
+                "description": "Opaque next_cursor from the preceding read_batch page.",
+            },
+            "coverage": {
+                "type": "array",
+                "description": "One final-page coverage digest for every manifest batch.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "batch_id": {"type": "string"},
+                        "coverage_digest": {"type": "string"},
+                    },
+                    "required": ["batch_id", "coverage_digest"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["operation"],
         "additionalProperties": False,
     },
 }
@@ -338,6 +388,10 @@ def _handle_search_with_agent(agent, args: dict[str, Any], **_kwargs: Any) -> st
     )
 
 
+def _handle_period_records(args: dict[str, Any], **_kwargs: Any) -> str:
+    return tool_result(execute_period_records(args))
+
+
 def register(ctx) -> None:
     ctx.register_tool(
         name="kwrag_index_build",
@@ -363,4 +417,12 @@ def register(ctx) -> None:
         check_fn=_check_kwrag_available,
         emoji="RAG",
         agent_handler=_handle_search_with_agent,
+    )
+    ctx.register_tool(
+        name="jitech_kakaowork_period_records",
+        toolset="kwrag",
+        schema=PERIOD_RECORDS_SCHEMA,
+        handler=_handle_period_records,
+        check_fn=lambda: True,
+        emoji="KW",
     )
