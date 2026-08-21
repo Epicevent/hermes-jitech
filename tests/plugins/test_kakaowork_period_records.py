@@ -32,6 +32,15 @@ PARITY_FIRST_STABLE_ID = (
 )
 
 
+def test_tokens_survive_tool_handler_process_boundaries(monkeypatch) -> None:
+    monkeypatch.setenv("HERMES_API_TOKEN", "runtime-secret-for-test")
+    token = period_records._encode_token("cursor", {"offset": 50})
+
+    monkeypatch.setattr(period_records, "_EPHEMERAL_TOKEN_SECRET", os.urandom(32))
+
+    assert period_records._decode_token(token, "cursor") == {"offset": 50}
+
+
 MESSAGE_DDL = """
 CREATE TABLE messages (
   conversation_id TEXT NOT NULL,

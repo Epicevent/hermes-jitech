@@ -28,7 +28,9 @@ _BATCH_MAX_MESSAGES = 200
 _BATCH_MAX_UTF8_BYTES = 32_768
 _PAGE_MAX_MESSAGES = 50
 _FRESHNESS_TOLERANCE_SECONDS = 48 * 60 * 60
-_TOKEN_SECRET = os.urandom(32)
+_EPHEMERAL_TOKEN_SECRET = os.urandom(32)
+_TOKEN_SECRET_ENV = "HERMES_API_TOKEN"
+_TOKEN_SECRET_DOMAIN = b"jitech-kakaowork-period-records-token-v1"
 _EXPECTED_MESSAGE_COLUMNS = {
     "conversation_id",
     "message_id",
@@ -172,9 +174,20 @@ def _unb64(value: str) -> bytes:
         raise PeriodRecordsError("invalid_token", "snapshot or cursor token is invalid") from exc
 
 
+def _token_secret() -> bytes:
+    runtime_secret = os.environ.get(_TOKEN_SECRET_ENV, "")
+    if runtime_secret:
+        return hmac.new(
+            runtime_secret.encode("utf-8"),
+            _TOKEN_SECRET_DOMAIN,
+            hashlib.sha256,
+        ).digest()
+    return _EPHEMERAL_TOKEN_SECRET
+
+
 def _encode_token(kind: str, payload: Mapping[str, Any]) -> str:
     envelope = _canonical_bytes({"kind": kind, "payload": dict(payload), "version": 1})
-    signature = hmac.new(_TOKEN_SECRET, envelope, hashlib.sha256).digest()
+    signature = hmac.new(_token_secret(), envelope, hashlib.sha256).digest()
     return f"{_b64(envelope)}.{_b64(signature)}"
 
 
@@ -184,7 +197,7 @@ def _decode_token(token: Any, expected_kind: str) -> dict[str, Any]:
     encoded, signature = token.split(".", 1)
     envelope = _unb64(encoded)
     supplied = _unb64(signature)
-    expected = hmac.new(_TOKEN_SECRET, envelope, hashlib.sha256).digest()
+    expected = hmac.new(_token_secret(), envelope, hashlib.sha256).digest()
     if not hmac.compare_digest(supplied, expected):
         raise PeriodRecordsError("invalid_token", "snapshot or cursor token is invalid")
     try:
