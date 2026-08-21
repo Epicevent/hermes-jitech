@@ -23,6 +23,15 @@ def test_skill_requires_manifest_all_pages_and_reconcile() -> None:
     assert "stable_message_id" in text
 
 
+def test_skill_serializes_period_tool_calls_within_provider_budget() -> None:
+    text = SKILL.read_text(encoding="utf-8")
+
+    assert "모델 응답 한 번에 정확히 한 번만" in text
+    assert "병렬·일괄 호출하지" in text
+    assert "한 page씩" in text
+    assert "`execute_code`" in text
+
+
 def test_skill_never_promotes_incomplete_or_stale_results() -> None:
     text = SKILL.read_text(encoding="utf-8")
 
