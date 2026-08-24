@@ -29,7 +29,7 @@ _BATCH_MAX_UTF8_BYTES = 32_768
 _PAGE_MAX_MESSAGES = 50
 _FRESHNESS_TOLERANCE_SECONDS = 48 * 60 * 60
 _EPHEMERAL_TOKEN_SECRET = os.urandom(32)
-_TOKEN_SECRET_ENV = "HERMES_API_TOKEN"
+_TOKEN_SECRET_ENVS = ("API_SERVER_KEY", "HERMES_API_TOKEN")
 _TOKEN_SECRET_DOMAIN = b"jitech-kakaowork-period-records-token-v1"
 _EXPECTED_MESSAGE_COLUMNS = {
     "conversation_id",
@@ -175,7 +175,17 @@ def _unb64(value: str) -> bytes:
 
 
 def _token_secret() -> bytes:
-    runtime_secret = os.environ.get(_TOKEN_SECRET_ENV, "")
+    # Period-record tools execute in the Hermes gateway process, where the
+    # server-side bearer is API_SERVER_KEY. HERMES_API_TOKEN belongs to the
+    # separate Workspace proxy process, but remains a useful local fallback.
+    runtime_secret = next(
+        (
+            value
+            for name in _TOKEN_SECRET_ENVS
+            if (value := os.environ.get(name, ""))
+        ),
+        "",
+    )
     if runtime_secret:
         return hmac.new(
             runtime_secret.encode("utf-8"),
