@@ -932,20 +932,18 @@ def run_conversation(
     current_turn_user_idx = len(messages) - 1
     agent._persist_user_message_idx = current_turn_user_idx
 
-    # Let loaded plugins observe explicit user-turn actions through the generic host hook.
-    # The core loop does not import or privilege a specific plugin.
+    # A clear user request to build/refresh the mounted RAG index is a product
+    # action, not a suggestion for the model to improvise with execute_code or
+    # file tools.  Route only that explicit action through the fixed KWRAG
+    # handler; ordinary questions retain the normal model tool surface.
     try:
-        from hermes_cli.plugins import invoke_hook as _invoke_hook
+        from plugins.kwrag_slot.tools import execute_explicit_index_build
 
-        _invoke_hook(
-            "pre_user_turn",
-            agent=agent,
-            user_message=original_user_message,
-            messages=messages,
-            effective_task_id=effective_task_id,
+        execute_explicit_index_build(
+            agent, original_user_message, messages, effective_task_id
         )
     except Exception as exc:
-        logger.warning("pre_user_turn hook dispatch failed: %s", exc)
+        logger.warning("explicit KWRAG index bridge failed: %s", exc)
 
     def _compress_context_for_current_turn(
         messages_to_compress: list[dict[str, Any]],
