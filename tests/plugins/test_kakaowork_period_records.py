@@ -6,6 +6,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
+from agent.redact import redact_sensitive_text
 from plugins.kwrag_slot import period_records
 
 
@@ -39,6 +40,18 @@ def test_tokens_survive_tool_handler_process_boundaries(monkeypatch) -> None:
     monkeypatch.setattr(period_records, "_EPHEMERAL_TOKEN_SECRET", os.urandom(32))
 
     assert period_records._decode_token(token, "cursor") == {"offset": 50}
+
+
+def test_workflow_references_survive_persisted_tool_call_redaction(monkeypatch) -> None:
+    monkeypatch.setenv("API_SERVER_KEY", "runtime-secret-for-test")
+    snapshot_ref = period_records._encode_token("snapshot", {"snapshot_id": "snapshot-1"})
+    cursor = period_records._encode_token("cursor", {"offset": 50})
+    arguments = json.dumps(
+        {"operation": "read_batch", "snapshot_ref": snapshot_ref, "cursor": cursor},
+        separators=(",", ":"),
+    )
+
+    assert redact_sensitive_text(arguments, force=True) == arguments
 
 
 MESSAGE_DDL = """
@@ -124,7 +137,7 @@ def _coverage(manifest: dict, source_root: Path) -> list[dict[str, str]]:
         returned = 0
         while True:
             page = period_records.read_batch(
-                manifest["snapshot_token"],
+                manifest["snapshot_ref"],
                 batch_id,
                 cursor,
                 source_root=source_root,
@@ -196,7 +209,7 @@ def test_1001_records_are_deterministically_batched_paged_and_reconciled(tmp_pat
     assert first["batches"] == second["batches"]
     coverage = _coverage(first, tmp_path)
     reconciled = period_records.reconcile(
-        first["snapshot_token"], coverage, source_root=tmp_path
+        first["snapshot_ref"], coverage, source_root=tmp_path
     )
     assert reconciled["complete"] is True
     assert reconciled["source_total_messages"] == 1001
@@ -205,7 +218,7 @@ def test_1001_records_are_deterministically_batched_paged_and_reconciled(tmp_pat
     assert reconciled["uncovered_messages"] == 0
 
     first_page = period_records.read_batch(
-        first["snapshot_token"], first["batches"][0], source_root=tmp_path
+        first["snapshot_ref"], first["batches"][0], source_root=tmp_path
     )
     assert first_page["returned_count"] == 50
     assert "batch_coverage_digest" not in first_page
@@ -250,7 +263,7 @@ def test_membership_is_a_hard_room_filter(tmp_path: Path) -> None:
     assert result["connection"]["membership_room_count"] == 1
     assert result["totals"]["messages"] == 1
     page = period_records.read_batch(
-        result["snapshot_token"], result["batches"][0], source_root=tmp_path
+        result["snapshot_ref"], result["batches"][0], source_root=tmp_path
     )
     assert {record["conversation_id"] for record in page["records"]} == {"allowed"}
 
@@ -274,7 +287,7 @@ def test_connected_empty_period_reports_freshness_and_reconciles(tmp_path: Path)
     assert result["batches"] == []
     assert result["freshness"]["stale"] is True
     reconciled = period_records.reconcile(
-        result["snapshot_token"], [], source_root=tmp_path
+        result["snapshot_ref"], [], source_root=tmp_path
     )
     assert reconciled["complete"] is False
     assert reconciled["source_total_messages"] == 0
@@ -305,7 +318,7 @@ def test_recent_database_publication_is_fresh_despite_old_message_activity(tmp_p
     assert result["freshness"]["database_lag_to_period_end_seconds"] == 60 * 60
     assert result["freshness"]["activity_lag_to_period_end_seconds"] == 40 * 24 * 60 * 60
     reconciled = period_records.reconcile(
-        result["snapshot_token"], [], source_root=tmp_path
+        result["snapshot_ref"], [], source_root=tmp_path
     )
     assert reconciled["complete"] is True
 
@@ -361,7 +374,7 @@ def test_snapshot_mutation_requires_a_new_manifest(tmp_path: Path) -> None:
     changed = period_records.execute_period_records(
         {
             "operation": "read_batch",
-            "snapshot_token": result["snapshot_token"],
+            "snapshot_ref": result["snapshot_ref"],
             "batch_id": result["batches"][0],
         },
         source_root=tmp_path,
@@ -386,7 +399,7 @@ def test_reconcile_rejects_missing_duplicate_and_wrong_coverage(tmp_path: Path) 
     coverage = _coverage(result, tmp_path)
 
     incomplete = period_records.reconcile(
-        result["snapshot_token"],
+        result["snapshot_ref"],
         [coverage[0], coverage[0]],
         source_root=tmp_path,
     )
@@ -396,7 +409,7 @@ def test_reconcile_rejects_missing_duplicate_and_wrong_coverage(tmp_path: Path) 
     assert incomplete["uncovered_messages"] == 201
 
     wrong = period_records.reconcile(
-        result["snapshot_token"],
+        result["snapshot_ref"],
         [coverage[0], {**coverage[1], "coverage_digest": "sha256:" + "0" * 64}],
         source_root=tmp_path,
     )
@@ -418,7 +431,7 @@ def test_decrypt_failure_is_counted_and_prevents_complete_claim(tmp_path: Path) 
     )
     result = period_records.manifest("rolling_7d", source_root=tmp_path, now=NOW)
     reconciled = period_records.reconcile(
-        result["snapshot_token"], _coverage(result, tmp_path), source_root=tmp_path
+        result["snapshot_ref"], _coverage(result, tmp_path), source_root=tmp_path
     )
 
     assert reconciled["complete"] is False
@@ -453,7 +466,7 @@ def test_model_schema_cannot_select_identity_path_sql_or_arbitrary_dates() -> No
     assert set(properties) == {
         "operation",
         "period",
-        "snapshot_token",
+        "snapshot_ref",
         "batch_id",
         "cursor",
         "coverage",

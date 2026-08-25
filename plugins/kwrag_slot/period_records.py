@@ -161,15 +161,15 @@ def _sha256(value: bytes) -> str:
     return "sha256:" + hashlib.sha256(value).hexdigest()
 
 
-def _b64(value: bytes) -> str:
-    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+def _b32(value: bytes) -> str:
+    return base64.b32encode(value).rstrip(b"=").decode("ascii")
 
 
-def _unb64(value: str) -> bytes:
+def _unb32(value: str) -> bytes:
     if not isinstance(value, str) or not value:
         raise PeriodRecordsError("invalid_token", "snapshot or cursor token is invalid")
     try:
-        return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+        return base64.b32decode(value + "=" * (-len(value) % 8))
     except (ValueError, TypeError) as exc:
         raise PeriodRecordsError("invalid_token", "snapshot or cursor token is invalid") from exc
 
@@ -198,15 +198,20 @@ def _token_secret() -> bytes:
 def _encode_token(kind: str, payload: Mapping[str, Any]) -> str:
     envelope = _canonical_bytes({"kind": kind, "payload": dict(payload), "version": 1})
     signature = hmac.new(_token_secret(), envelope, hashlib.sha256).digest()
-    return f"{_b64(envelope)}.{_b64(signature)}"
+    # This is an opaque workflow reference, not a credential.  Base32 keeps
+    # it out of the generic JWT redactor (which masks base64 JSON beginning
+    # with ``eyJ`` when assistant tool calls are persisted and replayed).
+    return f"kpr1.{_b32(envelope)}.{_b32(signature)}"
 
 
 def _decode_token(token: Any, expected_kind: str) -> dict[str, Any]:
-    if not isinstance(token, str) or token.count(".") != 1:
+    if not isinstance(token, str) or token.count(".") != 2:
         raise PeriodRecordsError("invalid_token", "snapshot or cursor token is invalid")
-    encoded, signature = token.split(".", 1)
-    envelope = _unb64(encoded)
-    supplied = _unb64(signature)
+    prefix, encoded, signature = token.split(".", 2)
+    if prefix != "kpr1":
+        raise PeriodRecordsError("invalid_token", "snapshot or cursor token is invalid")
+    envelope = _unb32(encoded)
+    supplied = _unb32(signature)
     expected = hmac.new(_token_secret(), envelope, hashlib.sha256).digest()
     if not hmac.compare_digest(supplied, expected):
         raise PeriodRecordsError("invalid_token", "snapshot or cursor token is invalid")
@@ -695,7 +700,7 @@ def manifest(
         # per-batch counts here only risks truncating the authoritative ID set.
         "batch_count": len(snapshot.batches),
         "batches": [batch.batch_id for batch in snapshot.batches],
-        "snapshot_token": _snapshot_token(snapshot),
+        "snapshot_ref": _snapshot_token(snapshot),
     }
 
 
@@ -863,19 +868,19 @@ def execute_period_records(
                 raise PeriodRecordsError("invalid_request", "manifest accepts only operation and period")
             return manifest(str(args.get("period")), source_root=source_root, now=now)
         if operation == "read_batch":
-            if set(args) - {"operation", "snapshot_token", "batch_id", "cursor"}:
+            if set(args) - {"operation", "snapshot_ref", "batch_id", "cursor"}:
                 raise PeriodRecordsError("invalid_request", "read_batch arguments are invalid")
             return read_batch(
-                args.get("snapshot_token"),
+                args.get("snapshot_ref"),
                 args.get("batch_id"),
                 args.get("cursor"),
                 source_root=source_root,
             )
         if operation == "reconcile":
-            if set(args) != {"operation", "snapshot_token", "coverage"}:
+            if set(args) != {"operation", "snapshot_ref", "coverage"}:
                 raise PeriodRecordsError("invalid_request", "reconcile arguments are invalid")
             return reconcile(
-                args.get("snapshot_token"),
+                args.get("snapshot_ref"),
                 args.get("coverage"),
                 source_root=source_root,
             )

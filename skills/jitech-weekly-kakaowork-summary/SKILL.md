@@ -1,7 +1,7 @@
 ---
 name: jitech-weekly-kakaowork-summary
 description: 승인된 카카오워크 주간 전건을 근거와 함께 요약합니다.
-version: 1.0.3
+version: 1.0.4
 author: Jitech
 license: MIT
 platforms: [linux]
@@ -43,7 +43,7 @@ metadata:
 7. 모든 batch 뒤 `reconcile`을 호출한다.
 
 ```json
-{"operation":"reconcile","snapshot_token":"<token>","coverage":[{"batch_id":"<id>","coverage_digest":"<final digest>"}]}
+{"operation":"reconcile","snapshot_ref":"<manifest snapshot_ref>","coverage":[{"batch_id":"<id>","coverage_digest":"<final digest>"}]}
 ```
 
 `snapshot_mismatch`이면 새 manifest부터 한 번만 다시 시작한다. 두 번째 변경은

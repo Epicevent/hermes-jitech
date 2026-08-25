@@ -145,9 +145,9 @@ PERIOD_RECORDS_SCHEMA = {
                 "enum": ["rolling_7d", "previous_calendar_week"],
                 "description": "Required only for manifest.",
             },
-            "snapshot_token": {
+            "snapshot_ref": {
                 "type": "string",
-                "description": "Opaque token returned by manifest.",
+                "description": "Opaque workflow reference returned by manifest.",
             },
             "batch_id": {
                 "type": "string",
